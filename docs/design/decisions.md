@@ -1,0 +1,152 @@
+# Decision log
+
+Each entry: **decision** — why — consequence for the code. Entries marked *(prod)* come from incidents in an existing
+production ComfyUI farm (≈10 GPU workers, jobs from minutes to several hours, workflows larger than 400 KB) whose
+operators shared their design rationale with this project. Entries marked *(probe)* were verified against stock ComfyUI
+with `spikes/protocol_probe.py`. Entries marked *(new)* are choices made for this rewrite.
+
+## Queue and dispatch
+
+**D-01 Payload and state live in different tables.** *(prod)* — A dispatch query sorted rows that carried a 416 KB
+workflow; MySQL rejects the whole sort when one row exceeds the sort buffer, and one group stopped dispatching entirely
+while workers sat idle. Postgres would not fail, it would silently spill to disk and get slow. → `job_payloads` holds the
+workflow; every hot query (dispatch, health, progress) touches only `jobs`.
+
+**D-02 Dispatch claims rows with `FOR UPDATE SKIP LOCKED` inside one transaction.** *(new, replaces a prod workaround)* —
+The old design consumed an "idle workers" snapshot built by another loop, which could be stale; a worker that had just
+been put into maintenance received a new job and the rolling restart killed it. → Lock the worker row and the job row,
+re-check `maintenance` and `status` under the lock, update both, commit, then POST. Contention is decided by the
+database, not by timing.
+
+**D-03 Group matching is explicit and the metrics use the same rule.** *(prod)* — Jobs without a group were only picked
+after every group's backlog was empty; under saturation one waited 5.5 hours. Ungrouped workers silently receive
+nothing (QA lost four rounds to this). → The policy for ungrouped jobs is a setting (`lowest_priority` |
+`least_loaded_group`), the dispatcher and the monitoring query share one SQL function, and a worker without a group is
+reported as a configuration warning, not hidden.
+
+**D-04 `running` and the router-chosen `prompt_id` are committed in the same statement, before the POST.** *(prod)* — If
+the router dies between committing `running` and POSTing, a row without an identifier cannot be checked later; an old
+fallback ("worker idle ⇒ completed") marked a never-executed job as completed. → The identifier exists before the job
+leaves the router. This trades *duplicate execution* risk for *lost job* risk, which is detectable (D-06).
+
+**D-05 A timeout is not "not delivered".** *(prod, probe)* — A job marked failed after a read timeout ran for 16 minutes
+on the worker and produced output; the user resubmitted it three times. ComfyUI accepts a client-chosen `prompt_id`
+*(probe S1)*, so after any ambiguous error the router asks the worker (`/api/jobs/{id}`, `/queue`) instead of guessing.
+**Resubmitting the same `prompt_id` is accepted and executes again** *(probe S1d)* — the worker does not deduplicate, so
+"just retry" is never safe. → Branches: connect error ⇒ back to pending; read error ⇒ ask: accepted ⇒ running,
+absent ⇒ pending, cannot tell ⇒ stay running (the lost-job check resolves it).
+
+**D-06 A lost job becomes `failed` with a reason, never `pending`.** *(prod)* — If the job is what crashed the worker,
+re-queueing it would walk through the farm crashing workers. → After a grace period (dispatch timeout + check period +
+margin, default 30 s) a running job the worker does not know is failed with "lost — rerun if needed".
+
+**D-07 4xx from a worker is final.** *(prod, probe)* — A 400 is a workflow validation error and is identical on every
+worker; returning it to pending produced an infinite re-dispatch loop every few seconds (the worker stayed healthy, so
+nothing stopped it). Uppercase UUIDs are rejected with 400 `invalid_prompt_id` *(probe S1c)* — the router must emit
+canonical lowercase. → 4xx ⇒ `failed` with the worker's `node_errors` attached.
+
+**D-08 Completion is read from the worker, WS events are an accelerator.** *(prod, new)* — WebSockets drop and lag.
+`/api/jobs/{id}` exists in current ComfyUI and reports `pending|in_progress|completed|failed|cancelled` *(probe S2, S6)*.
+→ `execution_success` / `execution_error` / `execution_interrupted` events finish a job immediately; a periodic
+reconciliation against `/api/jobs` is the source of truth. Interrupted jobs are `cancelled`, not `completed` (this was an
+open question in the old design; history shows `status_str: "error"` + an `execution_interrupted` message *(probe S6d)*).
+
+**D-09 Interrupt is cooperative; cancellation is a state, not an event.** *(probe)* — `/interrupt` with a `prompt_id`
+only affects that job *(probe S6c)*, but it takes effect between nodes; a single long node ran 260 s after the request.
+→ `cancelling` state until the worker reports the outcome; the worker stays busy meanwhile.
+
+**D-10 Display paths: estimate at submit, correct from the worker at completion.** *(prod)* — Users build output paths
+from string nodes, so static extraction stored node links like `["73",0]` for most rows. → Static resolution walks links;
+completion overwrites with real outputs, merging path components in both directions (history gives the parent folder,
+the submitted path may carry a more specific leaf). Columns are `text`, never length-limited (a strict length overflow
+once rejected the whole submit).
+
+## Worker health
+
+**D-11 busy ≠ dead, judged by elapsed time, not by counts.** *(prod)* — Large model loads block a worker's event loop for
+minutes (226 s measured for a 33 GB model). "Two failed checks = offline" marked healthy workers dead; counting checks
+also made the threshold depend on loop timing. → Read/write/pool timeouts and read errors = busy (the TCP connection
+succeeded); connect errors = dead; unknown exceptions = busy. Thresholds: dead after 15 s, busy-but-unresponsive after
+90 s, measured from the first failure; the first-failure timestamp is cleared on success.
+
+**D-12 Health checks are concurrent; slow collectors run in their own loops.** *(prod)* — A sequential check loop let one
+hung worker stretch the cycle past 12 s, which made other decisions stale. → `gather` the probes, process results
+serially, isolate optional collectors (VRAM, logs).
+
+**D-13 The router's worker WebSocket uses a deterministic `clientId`.** *(prod)* — With a random id kept in memory, a
+router restart froze the progress of every running job forever (the worker sends events to the id the job was
+submitted with). → `client_id = uuid5(router_instance, worker_id)`. **Precondition:** the worker must have the reconnect
+fix (D-14), otherwise the deterministic id makes the race reachable.
+
+**D-14 Fix the reconnect race at the worker, and upstream.** *(prod, probe)* — ComfyUI's WS handler pops `sockets[sid]`
+in `finally` without checking it is still the same socket; the old connection's cleanup deletes the new registration
+and every later event for that client is dropped without an error. Reproduced on 0.41.0: the second connection received
+0 job events while a single-connection control received them *(probe S3/S3b)*. → (1) a one-line upstream PR
+(`if self.sockets.get(sid) is ws:` around **both** pops); (2) until it lands, the optional worker extension swaps the
+`/ws` route handler for a guarded copy before routes are registered; (3) the router keeps a 300 s ping timeout so a
+loop-blocked worker does not drop the socket in the first place. Never open a diagnostic WebSocket with the router's
+`clientId` — it steals the router's registration.
+
+## Events
+
+**D-15 Progress writes are throttled and bounded.** *(prod)* — One UPDATE per progress event exhausted a 10-connection
+pool; `acquire()` had no timeout, so WS loops stopped reading and went quiet. → Per-worker 2 s throttle, write only on
+change, pool acquire timeout (5 s) everywhere, and a failed progress write never breaks the WS loop.
+
+**D-16 Relay targets are captured when the event is received.** *(prod)* — Relaying in a background task that looked up
+the target later lost every `execution_error`: the error branch removed the mapping first. → Tasks receive values, not
+lookups; per-browser-socket lock keeps text/binary order.
+
+**D-17 In-memory state is a cache that can be rebuilt from the ledger.** *(prod)* — After a failover or restart the
+worker→browser mapping was empty and events for running jobs were dropped. → On a miss, rebuild from
+`jobs.browser_client_id`; also verify on a hit when no browser socket exists (stale mapping).
+
+**D-18 The router broadcasts queue `status`.** *(prod)* — The frontend refreshes its queue UI only on `status` events;
+without them a submitted job was invisible until reload. → Push on submit/dispatch/finish/cancel.
+
+**D-19 Reconnect catch-up.** *(prod)* — Events emitted during a reconnect gap are lost; the browser shows "running"
+forever. → On browser reconnect, resend final events for that client's jobs that finished in the last 60 s, plus jobs
+the ledger still has as running but the worker reports finished.
+
+## Node definitions
+
+**D-20 `/object_info` snapshot without TTL, persisted, stale-if-error.** *(prod)* — It is synchronous (26 s measured on a
+heavily customised worker; 0.1 s on a bare one *(probe S5)*). A 10-minute TTL made one worker unresponsive for about an
+hour per day, and refreshing in the middle of a rolling upgrade served a mixed-version snapshot. → Refresh manually,
+after a rollout completes, or when a group's node set changes; keep the snapshot per group in Postgres; never replace a
+good snapshot with an error; show freshness in the UI.
+
+## Submission
+
+**D-21 Bounded waits everywhere: pool acquire 5 s ⇒ 503 + Retry-After.** *(prod)* — Unbounded waits turned congestion into
+infinite spinners.
+
+**D-22 Unknown group ids degrade, they do not reject.** *(prod)* — A deleted group id cached in a browser made every
+submit fail with an FK error for that user. → Treat as "no group" and say so in the response.
+
+**D-23 Idempotency key chosen by the client, not content comparison.** *(prod)* — A fixed seed with batch N legitimately
+submits identical bodies N times. → One UUID per click, retried on 503/connection errors with the same key; the server
+returns the existing job for (user, key) within 10 minutes. The key doubles as the `prompt_id`.
+
+**D-24 Validate before queueing, on a worker of the target group.** *(prod)* — Without it, a broken workflow is accepted,
+waits in the queue, and fails at dispatch time with no node highlighted. A CPU-only UI worker cannot validate because
+some nodes only import with a GPU. → Ask up to 3 idle workers of the target group, 4 s each, skip validation if none
+answers (the worker validates again at dispatch).
+
+## Platform
+
+**D-25 Postgres, UTC, dedicated timestamps.** *(new)* — The previous system leaned on MySQL quirks (same-value UPDATE does
+not touch `updated_at`, so `updated_at` silently meant "completion time"), and two clocks (DB session TZ vs host TZ) made
+failover jump 9 h. → `timestamptz` everywhere, UTC, `created_at/dispatched_at/started_at/finished_at` columns with one
+meaning each; `updated_at` is for humans only.
+
+**D-26 Single node by default; HA is a module.** *(new)* — Small sites do not need two database nodes. The core asks one
+question, "may I write?", through an interface; the HA module answers it (Postgres `pg_is_in_recovery()`).
+
+**D-27 Schema before code; migrations are automatic and idempotent.** *(prod)* — Deploying code that referenced a table
+before the table existed broke the whole dashboard. → Versioned migrations applied at start under an advisory lock.
+
+**D-28 Authentication is on by default.** *(new, prod debt)* — The old system trusted its closed network: browser `/ws`
+and submit were unauthenticated, so a guessed `clientId` could read someone else's previews, and stock
+`--multi-user` ComfyUI has no authentication. → Identity is required, a browser's `clientId` is bound to its identity,
+workers accept only router/gateway traffic ([09](09-security.md)).
