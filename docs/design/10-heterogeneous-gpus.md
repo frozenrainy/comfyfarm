@@ -35,7 +35,7 @@ Typical setups:
 | First-run kernel tuning | small | MIOpen searches kernels on new tensor shapes; repeated runs of video VAEs reported 4–5× slower until restart (ComfyUI #12672 / ROCm #6008, open as of 2026-10) | optional **recycle policy**: restart a worker after N jobs or when a job's duration exceeds the worker's recent median by a factor; implemented with the rollout drain machinery |
 | FP8 | native on Blackwell | stored fp8 weights are upcast; some stacks silently fall back to FP32 (TransformerEngine #520) | none (informational on the dashboard) |
 | Attention kernels | SageAttention etc. available | community ports only | express as group requirements |
-| Driver/OS | Windows or Linux | Linux recommended (Windows: PyTorch only, no training) | Windows workers supported by the adapter; the upgrade contract is Linux-oriented (07) |
+| Driver/OS | Windows or Linux | Linux recommended (Windows: PyTorch only, no training) | Windows workers supported by the adapter; upgrades need a launcher that implements `platform: windows` (contract v1.1 §9, see 07) |
 
 ## Per-backend measurements to collect on the test box
 

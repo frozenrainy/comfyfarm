@@ -56,11 +56,19 @@ arbitrary commands on workers.
 | `systemd-local` | router and worker on the same host |
 | `manual` | the dashboard asks an operator to restart and waits for the badge |
 
-## Proposed additive fields for the contract (to discuss with the other implementation)
+## Contract v1.1 additive fields (adopted, §9)
 
-Our farm mixes CUDA and ROCm workers and includes a Windows worker. Within `comfy-upgrade/1` additive rules:
+Our proposal for mixed CUDA/ROCm farms with a Windows worker was adopted by the contract's co-owner as additive fields
+within `comfy-upgrade/1` (export edition v1.1, §9):
 
-- `venv` manifest: `accelerator` (`cuda` | `rocm` | `cpu`) and `arch[]` (e.g. `sm_120`, `gfx1201`); class **C** reports
-  extended from "CUDA arch report" to "accelerator arch report".
-- Render: a Windows layout (`Scripts\python.exe`) is currently outside the contract's `argv[0]` rule — either a
-  platform field or a documented limitation.
+- `venv` manifest `accelerator` (`cuda|rocm|cpu`) + `arch[]` (device code actually present: `sm_*`/PTX, `gfx*`); class C
+  reports become "accelerator arch reports".
+- `platform` (`posix|windows`, absent = posix) in the render and the `venv` manifest. Launchers **must refuse** (exit 2) a
+  platform they do not implement — that rule is what makes the change safe for old launchers. Windows launchers use
+  `Scripts\python.exe`, case-insensitive prefix checks, and run ComfyUI as a child process (no PID-preserving `execve`).
+
+**Router obligations (ComfyFarm enforces both when assigning profiles):**
+1. Never assign a venv whose manifest `platform` differs from the worker's (`capabilities.os`, P15).
+2. Treat a venv manifest without `accelerator` as *unknown* and never auto-assign it; an admin may assign it explicitly.
+   With `accelerator`, auto-assignment also requires the worker's backend (and, when `arch` is present, the GPU's arch)
+   to match.

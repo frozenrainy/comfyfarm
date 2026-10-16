@@ -160,6 +160,9 @@ router saw the commit. With asynchronous streaming replication a freshly promote
 see the job as pending and dispatch it again, and P3 makes the worker run it twice. The HA module therefore requires
 `synchronous_commit = on` (or `remote_apply`) with `synchronous_standby_names`, plus **fencing** so the old primary's
 router cannot write (the original system checked for a virtual-IP conflict with `arping -D` right before promotion).
+**Complement (not a substitute):** because `prompt_id` is fixed at submit time, a newly promoted node first asks the
+workers (`/api/jobs/{id}`) about pending jobs from the failover window before re-dispatching them, and skips any a worker
+already knows. This cannot catch a worker that lost its records in a restart, so synchronous replication stays required.
 
 **D-27 Schema before code; migrations are automatic and idempotent.** *(prod)* — Deploying code that referenced a table
 before the table existed broke the whole dashboard. → Versioned migrations applied at start under an advisory lock.

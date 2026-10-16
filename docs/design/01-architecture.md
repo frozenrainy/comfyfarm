@@ -61,7 +61,9 @@ previews must be routed to the executing worker.
 
 **C. HA (optional).** Two router nodes, Postgres streaming replication, a virtual IP. The router core only knows
 `writable()`; promotion/fencing tooling is a separate operations package. **Synchronous replication and fencing are
-requirements**, not tuning: without them a failover can dispatch the same job twice ([D-26](decisions.md)).
+requirements**, not tuning: without them a failover can dispatch the same job twice ([D-26](decisions.md)). After
+promotion, pending jobs from the failover window are checked against the workers by `prompt_id` before re-dispatch
+(a complement, not a substitute).
 
 ## Data flow of one job
 
