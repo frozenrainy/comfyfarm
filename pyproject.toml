@@ -5,7 +5,7 @@ description = "Job router for a farm of ComfyUI workers (CUDA and ROCm)"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "asyncpg>=0.29", "httpx>=0.27", "websockets>=12"]
+dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "asyncpg>=0.29", "httpx>=0.27", "websockets>=13", "python-multipart>=0.0.9"]
 
 [project.optional-dependencies]
 fake = ["aiohttp>=3.9"]

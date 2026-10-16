@@ -116,12 +116,17 @@ def create_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(title="ComfyFarm", lifespan=lifespan)
     from .api.stock import make_router
+    from .identity import TrustGatewayHeaders, current_roles
+    app.add_middleware(TrustGatewayHeaders, secret=settings.gateway_secret, dev=settings.dev_identity is not None)
 
     def identity(user: str | None) -> str:
-        # M1: development identity only (loopback). Real identity providers arrive in M2 (docs/design/08).
+        """The user named by the gateway (header kept only if the gateway vouched, see identity.py), or the development
+        identity on a loopback-only deployment."""
+        if user:
+            return user
         if settings.dev_identity is None:
-            raise HTTPException(401, "no identity provider configured")
-        return user or settings.dev_identity
+            raise HTTPException(401, "not authenticated")
+        return settings.dev_identity
 
     app.include_router(make_router(router, lambda user: identity(user)))
 
@@ -167,7 +172,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     def admin(user: str | None) -> str:
         who = identity(user)
-        if who not in settings.dev_admins:          # M1 dev roles; identity providers supply roles in M2 (docs/design/08)
+        if "admin" not in current_roles.get() and not (settings.dev_identity and who in settings.dev_admins):
             raise HTTPException(403, "admin only")
         return who
 
@@ -264,7 +269,8 @@ def create_app(settings: Settings) -> FastAPI:
     @app.websocket("/ws")
     async def browser_ws(ws: WebSocket):
         """Stock-frontend WebSocket. M2-dev identity: `user` query or X-ComfyFarm-User header (gateway replaces this)."""
-        owner = ws.query_params.get("user") or ws.headers.get("x-comfyfarm-user") or settings.dev_identity
+        owner = ws.headers.get("x-comfyfarm-user") or ((ws.query_params.get("user") or settings.dev_identity)
+                                                       if settings.dev_identity else None)
         if owner is None:
             await ws.close(code=4401)
             return
@@ -296,6 +302,39 @@ def create_app(settings: Settings) -> FastAPI:
             pass
         finally:
             router.events.browsers.unbind(conn)
+
+    @app.post("/api/internal/login")
+    async def internal_login(request: Request):
+        """Local identity provider check, callable only by the gateway (shared secret header, checked here explicitly
+        because no user identity is involved yet)."""
+        import hmac as _hmac
+        from .identity import verify_password
+        if not settings.gateway_secret or not _hmac.compare_digest(request.headers.get("x-comfyfarm-gateway-login", ""),
+                                                                    settings.gateway_secret):
+            raise HTTPException(403, "gateway only")
+        body = await request.json()
+        async with router.db.conn() as c:
+            u = await c.fetchrow("SELECT username, password_hash, roles FROM users WHERE username = $1 AND disabled_at IS NULL",
+                                 body.get("username", ""))
+        if u is None or not verify_password(body.get("password", ""), u["password_hash"]):
+            raise HTTPException(401, "bad credentials")
+        return {"user": u["username"], "roles": list(u["roles"])}
+
+    @app.get("/api/farm/locate")
+    async def locate(filename: str, subfolder: str = "", type: str = "output",
+                     x_comfyfarm_user: str | None = Header(default=None)):
+        """Which worker holds a result file of this user (temp files exist only on the executing worker)."""
+        owner = identity(x_comfyfarm_user)
+        item = [{"filename": filename, "subfolder": subfolder, "type": type}]
+        async with router.db.conn() as c:
+            url = await c.fetchval(
+                "SELECT w.base_url FROM jobs j JOIN workers w ON w.id = j.worker_id WHERE j.owner = $1 AND "
+                "EXISTS (SELECT 1 FROM jsonb_each(coalesce(j.outputs, '{}'::jsonb)) o, jsonb_each(o.value) k "
+                "        WHERE jsonb_typeof(k.value) = 'array' AND k.value @> $2::jsonb) "
+                "ORDER BY j.finished_at DESC NULLS LAST LIMIT 1", owner, item)
+        if url is None:
+            raise HTTPException(404, "not found")
+        return {"base_url": url}
 
     @app.get("/api/health/dispatch")
     async def health_dispatch():

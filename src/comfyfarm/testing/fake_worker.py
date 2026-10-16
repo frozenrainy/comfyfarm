@@ -93,6 +93,8 @@ class FakeWorker:
             r.add_get(p + "/object_info", self.get_object_info)
             r.add_get(p + "/system_stats", self.get_system_stats)
         r.add_get("/api/jobs", self.get_jobs)
+        r.add_get("/view", self.view)
+        r.add_get("/api/view", self.view)
         r.add_get("/api/jobs/{pid}", self.get_job)
         r.add_post("/api/jobs/{pid}/cancel", self.cancel_job)
         r.add_post("/_fake/mode", self.set_mode)
@@ -300,6 +302,13 @@ class FakeWorker:
                 await self.broadcast_status()
                 return web.json_response({"cancelled": True})
         return web.json_response({"cancelled": False})
+
+    async def view(self, request):
+        """Serves the fake outputs the history lists (temp files exist only on the executing worker)."""
+        name = request.query.get("filename", "")
+        if not any(name == f"fake_{j.prompt_id[:8]}.png" for j in self.history.values()):
+            return web.Response(status=404)
+        return web.Response(body=b"\x89PNG fake " + name.encode(), content_type="image/png")
 
     async def get_object_info(self, request):
         return web.json_response({k: {"input": {"required": {n: [t] for n, t in spec.items()}}, "output": out,
