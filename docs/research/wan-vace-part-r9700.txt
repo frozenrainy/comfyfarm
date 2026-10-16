@@ -4,3 +4,8 @@ r9700_run1.json: completed wall 650s | peak RAM 56.0 GB, VRAM 21.6 GB | s/it by 
 r9700_run2.json: completed wall 587s | peak RAM 55.7 GB, VRAM 20.3 GB | s/it by loop length {10: [48.3, 46.1], 2: [14.3, 12.2]}
 r9700_run3.json: completed wall 583s | peak RAM 56.1 GB, VRAM 23.7 GB | s/it by loop length {10: [48.3, 46.2], 2: [14.3, 12.2]}
 # reference RTX 5070 Ti 16GB (Windows, ComfyUI 0.38.2): HIGH 39 s/it, LOW 18.8 s/it, ~456 s per part (99 min / 13 parts incl. overhead)
+
+# after enabling ResizableBAR (BAR0 256 MB -> 32 GB), host rebooted (cold page cache for run 1)
+r9700_run1.json: completed wall 716s | peak RAM 52.3 GB, VRAM 19.5 GB | s/it by loop length {10: [48.3, 46.1], 2: [14.1, 12.0]}
+r9700_run2.json: completed wall 589s | peak RAM 57.0 GB, VRAM 23.6 GB | s/it by loop length {10: [48.3, 46.2], 2: [14.3, 12.2]}
+r9700_run3.json: completed wall 586s | peak RAM 56.0 GB, VRAM 20.4 GB | s/it by loop length {10: [48.3, 46.2], 2: [14.4, 12.2]}
