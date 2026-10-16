@@ -36,7 +36,10 @@ ROUTER_PREFIXES = ("/api/prompt", "/api/jobs", "/api/queue", "/api/history", "/a
 IDENTITY_HEADERS = {"x-comfyfarm-user", "x-comfyfarm-roles", "x-comfyfarm-gateway", "comfy-user",
                     "x-comfyfarm-gateway-login"}
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
-               "transfer-encoding", "upgrade", "host", "content-length", "accept-encoding"}
+               "transfer-encoding", "upgrade", "host", "content-length", "accept-encoding",
+               # the gateway does the cross-site check itself (same_origin_ok); upstream ComfyUI would compare the
+               # browser's Origin (the gateway) with its own Host and refuse every proxied request with 403
+               "origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-user"}
 HASHED_ASSET = re.compile(r"^/assets/.+[-.][A-Za-z0-9_]{8,}\.(js|css|woff2?|svg|png|webp)$")
 COOKIE = "comfyfarm_session"
 
@@ -128,6 +131,8 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
 <input name=password type=password placeholder=Password><button>Log in</button></form>""")
 
     async def login(request: Request):
+        if not same_origin_ok(request):
+            return Response(status_code=403)
         form = await request.form()
         r = await http.post(f"{s.router_url}/api/internal/login", headers={"x-comfyfarm-gateway-login": s.secret},
                             json={"username": form.get("username", ""), "password": form.get("password", "")})
@@ -144,8 +149,21 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
         resp.delete_cookie(COOKIE)
         return resp
 
+    def same_origin_ok(request) -> bool:
+        """CSRF guard owned by the gateway (stock ComfyUI's Host/Origin check cannot work behind a proxy):
+        refuse cross-site fetches and any Origin that is not this gateway."""
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return False
+        origin = request.headers.get("origin")
+        if origin:
+            from urllib.parse import urlparse
+            return urlparse(origin).netloc.lower() == request.headers.get("host", "").lower()
+        return True
+
     # ---- everything else ---------------------------------------------------------------------------------------
     async def handle(request: Request):
+        if not same_origin_ok(request):
+            return Response(status_code=403)
         ident = identify(request)
         path = request.url.path
         if ident is None:
@@ -167,6 +185,9 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
         return await proxy(request, s.ui_url, base_headers, cache_immutable=bool(HASHED_ASSET.match(path)))
 
     async def ws_endpoint(ws: WebSocket):
+        if not same_origin_ok(ws):
+            await ws.close(code=4403)
+            return
         ident = identify(ws)
         if ident is None:
             await ws.close(code=4401)

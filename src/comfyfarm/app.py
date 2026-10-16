@@ -339,6 +339,16 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(401, "bad credentials")
         return {"user": u["username"], "roles": list(u["roles"])}
 
+    @app.get("/api/farm/groups")
+    async def farm_groups(x_comfyfarm_user: str | None = Header(default=None)):
+        """Groups for the frontend extension's picker."""
+        identity(x_comfyfarm_user)
+        async with router.db.conn() as c:
+            rows = await c.fetch("SELECT g.id, g.name, g.requirements, count(w.id) FILTER (WHERE w.state = 'online' AND "
+                                 "w.enabled AND w.deleted_at IS NULL AND NOT w.maintenance) AS online FROM worker_groups g "
+                                 "LEFT JOIN workers w ON w.group_id = g.id GROUP BY g.id ORDER BY g.name")
+        return [{"id": r["id"], "name": r["name"], "online": r["online"], "requirements": r["requirements"]} for r in rows]
+
     @app.get("/api/farm/locate")
     async def locate(filename: str, subfolder: str = "", type: str = "output",
                      x_comfyfarm_user: str | None = Header(default=None)):

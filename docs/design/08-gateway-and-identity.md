@@ -41,7 +41,7 @@ operations open.
 |---|---|
 | `trusted-header` | behind an authenticating reverse proxy (`X-Forwarded-User`, roles from a header or a mapping file); the gateway must only accept connections from the proxy **and** must strip any identity header the client sent itself before applying the proxy's value |
 | `oidc` | direct login (authorization code flow, session cookie) |
-| `local` | users in the database with bcrypt passwords; small sites |
+| `local` | users in the database with scrypt password hashes (stdlib, no extra dependency); small sites |
 | `dev-none` | single user `dev`, refuses to start unless bound to 127.0.0.1 |
 
 ## Submit path through the gateway

@@ -160,8 +160,12 @@ class WorkerStream:
         if etype == "execution_start" and ref is not None:
             self.current = ref
             await self.hub.started(ref)
+        if etype == "executed" and ref is not None and data.get("node") is not None:
+            # record before relaying: the browser asks /api/view for these files as soon as it sees the event, and
+            # the gateway finds the worker holding them through the ledger
+            await self.hub.record_output(ref, str(data["node"]), data.get("output") or {})
         if ref is not None:
-            self.hub.browsers.send(self.hub.browsers.target(ref), ev)      # relay first: the target is captured now
+            self.hub.browsers.send(self.hub.browsers.target(ref), ev)      # the target is captured now (D-16)
         if ref is None:
             return
         if etype in ("progress", "progress_state"):
@@ -228,6 +232,14 @@ class EventHub:
             self.refs.clear()
         self.refs[prompt_id] = r
         return r
+
+    async def record_output(self, ref: JobRef, node: str, output: dict):
+        try:
+            async with self.db.conn() as c:
+                await c.execute("UPDATE jobs SET outputs = coalesce(outputs, '{}'::jsonb) || jsonb_build_object($2::text, $3::jsonb) "
+                                "WHERE id = $1", ref.job_id, node, output)
+        except Exception as e:
+            log.warning("output record skipped: %s", type(e).__name__)
 
     async def started(self, ref: JobRef):
         try:

@@ -177,3 +177,14 @@ credentials (`auth_token_comfy_org`, `api_key_comfy_org`) inside `extra_data` wi
 would put them in the ledger, its backups and its replicas. → The router strips them at submit, keeps them in memory
 keyed by job, and adds them back only in the POST to the worker. A router restart before dispatch drops them; API nodes
 in that job then fail with an authentication error instead of credentials lingering in a database.
+
+**D-30 The gateway owns the cross-site check.** *(new, probe)* — Stock ComfyUI refuses a request whose `Origin` host differs
+from its own `Host` on loopback, and any `Sec-Fetch-Site: cross-site` fetch. Behind a proxy the browser's `Origin` is the
+gateway, so every proxied asset request got 403 and the frontend never started (seen in the first browser E2E). → The
+gateway refuses cross-site fetches and foreign origins itself, then forwards without `Origin`/`Sec-Fetch-*`. The CSRF
+protection moves to the boundary instead of being lost.
+
+**D-31 Outputs are recorded from `executed` before the event is relayed.** *(new, probe)* — The stock frontend requests
+`/api/view` the moment it sees `executed`; the gateway finds the worker holding a temp file through the ledger. Recording
+outputs only at completion (reconcile) made the first preview 404 in the browser E2E. → The event hub writes the node's
+outputs, then relays the event.

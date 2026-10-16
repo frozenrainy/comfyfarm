@@ -360,6 +360,10 @@ class FakeWorker:
                     await asyncio.sleep(per * (5 if self.mode == "slow-interrupt" and job.interrupt else 1))
                     await self.send("progress_state", {"prompt_id": job.prompt_id, "nodes": {nid: {"value": s + 1, "max": steps, "state": "running"}}}, cid)
                     await self.send_preview(job.prompt_id, nid, cid)
+                if node["class_type"] in OUTPUT_NODES and self.mode != "error":
+                    out = {"images": [{"filename": f"fake_{job.prompt_id[:8]}.png", "subfolder": "", "type": "temp"}]}
+                    self.history[job.prompt_id] = job                # file exists from now on (served by /view)
+                    await self.send("executed", {"node": nid, "display_node": nid, "output": out, "prompt_id": job.prompt_id}, cid)
                 if self.mode == "error" and node["class_type"] in OUTPUT_NODES:
                     interrupted = ("error", nid, node["class_type"]); break
                 executed.append(nid)

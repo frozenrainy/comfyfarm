@@ -152,3 +152,40 @@ async def test_ws_through_gateway_and_temp_view_routing(farm):
         await login(c2, gw, "root", "pw-root")
         other = await c2.get(f"{gw}/api/view", params={"filename": f["filename"], "subfolder": "", "type": "temp"})
         assert other.status_code != 200 or not other.content.startswith(b"\x89PNG fake")
+
+
+async def test_gateway_owns_the_cross_site_check(farm):
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        assert (await c.get(f"{gw}/", headers={"Sec-Fetch-Site": "cross-site"})).status_code == 403
+        assert (await c.post(f"{gw}/api/prompt", json={"prompt": tiny(9)}, headers={"Origin": "http://evil.example"})).status_code == 403
+        same = gw.replace("http://", "")
+        r = await c.get(f"{gw}/", headers={"Origin": f"http://{same}", "Sec-Fetch-Site": "same-origin"})
+        assert r.status_code == 200                                       # and upstream did not see the Origin
+        assert "origin" not in {k.lower() for k in farm["ui"].seen[-1]}
+
+
+async def test_preview_available_when_executed_arrives(farm):
+    """The stock frontend fetches /api/view as soon as it sees `executed`; the file must already be locatable."""
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        cookie = f"comfyfarm_session={c.cookies['comfyfarm_session']}"
+        router = farm["router"]
+        for _ in range(50):
+            await router.events.sync_workers()
+            if all(st.connected for st, _ in router.events.streams.values()):
+                break
+            await asyncio.sleep(0.1)
+        ws = await websockets.connect(f"{farm['ws']}?clientId=gwc2", additional_headers={"Cookie": cookie})
+        await asyncio.wait_for(ws.recv(), 3)
+        await c.post(f"{gw}/api/prompt", json={"prompt": tiny(11), "client_id": "gwc2"})
+        while True:
+            m = await asyncio.wait_for(ws.recv(), 5)
+            if isinstance(m, str) and json.loads(m)["type"] == "executed":
+                img = json.loads(m)["data"]["output"]["images"][0]
+                break
+        r = await c.get(f"{gw}/api/view", params=img)                       # immediately, like the frontend
+        assert r.status_code == 200 and r.content.startswith(b"\x89PNG fake")
+        await ws.close()
