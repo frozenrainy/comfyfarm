@@ -30,13 +30,34 @@ messages) is the fastest evidence; the job that was running is usually the victi
 `GET /api/health/dispatch` — unauthenticated, numbers only (no names, paths or users), **per group**: a stall in one
 group must not be averaged away by another group that is still busy.
 
+"Worker of the group" below means enabled, not deleted and meeting the group's requirements; "idle" additionally
+means online, not in maintenance and without a current job — exactly the dispatcher's conditions (D-33).
+
 | Field (per group) | Definition | Pitfall it avoids |
 |---|---|---|
-| `pending` | count of dispatchable pending jobs (same rule as the dispatcher, D-03) | metric and dispatcher disagreeing about ungrouped jobs |
-| `idle_workers` | online, not in maintenance, no current job | — |
-| `dispatch_idle_seconds` | `min(now - last_dispatch_at, oldest_dispatchable_pending_age)` where `last_dispatch_at = max(dispatched_at)` of the group, only when `idle_workers > 0` and `pending > 0`; otherwise `null` | "oldest pending age" alone measures backlog, not stall; `updated_at` would act as a heartbeat; `started_at` (execution start) would show a job that is loading its model as "nothing dispatched" |
-| `running_longest_seconds` | oldest of: `now - started_at` for `running`, `now - dispatched_at` for `dispatching` | measuring from `created_at` reports lifetime incl. queueing; looking at `started_at` only hides jobs stuck in `dispatching` |
+| `pending` | pending jobs of the group **or ungrouped**, that some worker of the group meets (job requirements) | metric and dispatcher disagreeing about ungrouped jobs (D-03) |
+| `paused` | paused jobs of the group | — |
+| `running` | jobs dispatching/running/cancelling on workers of the group | — |
+| `idle_workers` | idle workers of the group | — |
+| `dispatch_idle_seconds` | while an idle worker meets some waiting job: `min(now - last dispatch to a worker of the group, oldest wait of such a job)`, wait counted from the job's last transition to `pending`; otherwise `null` | "oldest pending age" alone measures backlog, not stall; `created_at` makes a resumed job look stalled for its whole age; a job only a busy worker can take is not a stall; `updated_at` would act as a heartbeat |
+| `running_longest_seconds` | oldest of: `now - started_at` for `running`/`cancelling` (dispatch time until the worker reports a start), `now - dispatched_at` for `dispatching` | measuring from `created_at` reports lifetime incl. queueing; looking at `started_at` only hides jobs stuck in `dispatching` |
+| `unsatisfiable_pending` | pending jobs of the group no worker of the group meets | such jobs wait forever without anyone noticing, or (counted as pending) fake a dispatch stall |
 | `rollout_started_at` | start of an active rollout, else `null` | a boolean "suppress alerts" flag that gets stuck silences monitoring forever |
+
+Top level: `ungrouped_unsatisfiable_pending` — ungrouped jobs no group can take (they belong to no group's numbers).
+
+`GET /metrics` — the same computation (`health/dispatch.py`) as Prometheus gauges, label `group="<id>"`:
+`comfyfarm_pending_jobs`, `comfyfarm_paused_jobs`, `comfyfarm_running_jobs`, `comfyfarm_idle_workers`,
+`comfyfarm_dispatch_idle_seconds`, `comfyfarm_running_longest_seconds`, `comfyfarm_unsatisfiable_pending_jobs`,
+`comfyfarm_rollout_started_timestamp_seconds`, plus `comfyfarm_ungrouped_unsatisfiable_pending_jobs` and
+`comfyfarm_ledger_up`. A `null` is an **absent series**, never 0. When the ledger cannot be read the scrape still
+succeeds with only `comfyfarm_ledger_up 0`: "not observed" must not look like "nothing to report".
+
+Example alert (stall for 5 minutes, unless a rollout is running):
+
+```
+comfyfarm_dispatch_idle_seconds > 300 unless on(group) comfyfarm_rollout_started_timestamp_seconds
+```
 
 Rules learned the hard way:
 
@@ -44,7 +65,7 @@ Rules learned the hard way:
   into "fine". Unknown is `null`, and alert rules treat `null` with a fallback.
 - Alert on **duration** (continuous seconds above a threshold), not on single samples or counts. Judge thresholds by
   "fraction of time the alert would be on + longest episode", not by number of alerts.
-- Prometheus exposition (`/metrics`) mirrors the same fields; the JSON endpoint stays for simple checkers.
+- `/metrics` mirrors the JSON fields; the JSON endpoint stays for simple checkers.
 
 ## Logs
 

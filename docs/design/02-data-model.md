@@ -97,6 +97,9 @@ CREATE TABLE job_events (            -- audit trail of state transitions (small 
 CREATE TABLE schema_migrations (version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
 ```
 
+Migration 0004 (M3) adds `jobs.note`, `workers.note` (free text for humans, max 500 chars, no logic reads them) and
+`jobs.retry_of` (the finished job a user retry was copied from).
+
 Rollout tables (`profiles`, `profile_assignments`, `rollouts`, `rollout_steps`, `audit_log`) follow
 [07](07-rollout-and-upgrades.md) and are added in M4.
 

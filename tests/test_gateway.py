@@ -189,3 +189,26 @@ async def test_preview_available_when_executed_arrives(farm):
         r = await c.get(f"{gw}/api/view", params=img)                       # immediately, like the frontend
         assert r.status_code == 200 and r.content.startswith(b"\x89PNG fake")
         await ws.close()
+
+
+async def test_dashboard_through_gateway(farm):
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{gw}/comfyfarm/dashboard/")
+        assert r.status_code == 303 and r.headers["location"] == "/comfyfarm/login?next=/comfyfarm/dashboard/"
+        r = await c.post(f"{gw}/comfyfarm/login", data={"username": "root", "password": "pw-root", "next": "/comfyfarm/dashboard/"})
+        assert r.headers["location"] == "/comfyfarm/dashboard/"
+        page = await c.get(f"{gw}/comfyfarm/dashboard/")
+        assert page.status_code == 200 and "app.js" in page.text           # served by the router, not the UI worker
+        ov = (await c.get(f"{gw}/api/farm/overview?scope=all")).json()
+        assert ov["me"] == {"user": "root", "admin": True} and ov["workers"][0]["base_url"]   # roles travel via the gateway
+    async with httpx.AsyncClient() as c:
+        # only fixed targets after login: anything else would be an open redirect
+        r = await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "pw-alice", "next": "https://evil.example/"})
+        assert r.headers["location"] == "/"
+        r = await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "nope", "next": "//evil.example"})
+        assert r.headers["location"] == "/comfyfarm/login?next=/&e=1"
+        await login(c, gw, "alice", "pw-alice")
+        ov = (await c.get(f"{gw}/api/farm/overview?scope=all")).json()
+        assert ov["me"]["admin"] is False and "base_url" not in ov["workers"][0]
+        assert (await c.patch(f"{gw}/api/admin/workers/1", json={"maintenance": True})).status_code == 403

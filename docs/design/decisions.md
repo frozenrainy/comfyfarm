@@ -188,3 +188,20 @@ protection moves to the boundary instead of being lost.
 `/api/view` the moment it sees `executed`; the gateway finds the worker holding a temp file through the ledger. Recording
 outputs only at completion (reconcile) made the first preview 404 in the browser E2E. → The event hub writes the node's
 outputs, then relays the event.
+
+**D-32 Dashboard: no framework, no build step; reordering is admin-only.** *(new)* — A farm may sit on a network without
+a package registry, and a dashboard that needs `npm install` to be patched is a dashboard nobody patches. The page is
+one HTML, one CSS and one JS module served by the router; it polls one overview document and updates table rows in
+place by key (re-rendering the table wiped a note being typed and moved the row under the pointer — seen in the browser
+E2E). The queue order is one shared order, so "run mine next" moves everyone else's work back: users may pause, resume,
+cancel, retry and annotate their own jobs; only admins reorder. Users see their own jobs with their place in line;
+other users' jobs appear only as counts.
+
+**D-33 Monitoring numbers follow the dispatcher, not the table.** *(new)* — The first `/api/health/dispatch` counted
+"pending jobs of the group": a job no worker could ever take (wrong requirements) then read as a dispatch stall, a
+resumed week-old job read as a week of stall, and ungrouped jobs — which every group takes — counted nowhere. →
+`pending` is what a worker of the group can take; the stall clock runs only while an *idle* worker could take a waiting
+job, from when the job last became waiting (`job_events`), bounded by the group's last dispatch; jobs no worker meets
+are reported separately (`unsatisfiable_pending`, `ungrouped_unsatisfiable_pending`). `/metrics` is the same computation
+in Prometheus text; a ledger it cannot read is `comfyfarm_ledger_up 0`, never a page of missing-but-healthy-looking
+numbers.

@@ -1,0 +1,67 @@
+:root {
+  --bg: #f7f7f5; --panel: #fff; --line: #e3e3df; --text: #1f2328; --muted: #6a6f76;
+  --ok: #1a7f37; --amber: #9a6700; --bad: #c62828; --info: #0b5cad; --accent: #0b5cad;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+       word-break: keep-all; overflow-wrap: anywhere; }
+header { display: flex; align-items: center; gap: 1rem; padding: .6rem 1.2rem; background: var(--panel);
+         border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 1.1rem; margin: 0; }
+header a { color: var(--accent); text-decoration: none; }
+.spacer { flex: 1; }
+.muted { color: var(--muted); }
+main { padding: 1rem 1.2rem 3rem; max-width: 1400px; margin: 0 auto; }
+section { margin-bottom: 1.8rem; }
+h2 { font-size: 1rem; margin: 0 0 .6rem; }
+.section-head { display: flex; align-items: center; gap: 1rem; margin-bottom: .6rem; }
+.section-head h2 { margin: 0; }
+
+.banner { background: #fdecea; color: var(--bad); padding: .5rem 1.2rem; border-bottom: 1px solid #f5c2c0; }
+.warn { color: var(--amber); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .8rem; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: .8rem 1rem; }
+.card h3 { margin: 0 0 .4rem; font-size: .95rem; display: flex; justify-content: space-between; gap: .5rem; }
+.card dl { display: grid; grid-template-columns: auto 1fr; gap: .15rem .8rem; margin: 0; }
+.card dt { color: var(--muted); }
+.card dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.card .alert { color: var(--bad); font-weight: 600; }
+.card .caution { color: var(--amber); font-weight: 600; }
+
+/* horizontal scroll wrapper: no sticky headers inside it (they drift against the scroll position) */
+.scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+/* `anywhere` (body) lets a table squeeze every cell to one letter per line; tables scroll sideways instead */
+table { border-collapse: collapse; width: 100%; min-width: 760px; overflow-wrap: normal; }
+th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { white-space: nowrap; font-weight: 600; color: var(--muted); font-size: .85rem; background: #fafaf8; }
+tbody tr:last-child td { border-bottom: 0; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.actions { white-space: nowrap; text-align: right; }
+.empty { margin: .4rem .2rem; }
+
+.pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .8rem; border: 1px solid currentColor; white-space: nowrap; }
+.s-pending, .s-unknown { color: var(--muted); }
+.s-paused { color: var(--info); }
+.s-dispatching, .s-running, .s-online, .s-completed { color: var(--ok); }
+.s-cancelling, .s-busy_unresponsive, .s-suspect, .s-maintenance { color: var(--amber); }
+.s-failed, .s-offline { color: var(--bad); }
+.s-cancelled, .s-disabled { color: var(--muted); }
+
+.bar { width: 90px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.bar > i { display: block; height: 100%; background: var(--ok); }
+
+button { font: inherit; font-size: .8rem; padding: .15rem .5rem; border: 1px solid var(--line); background: var(--panel);
+         border-radius: 4px; cursor: pointer; color: var(--text); }
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.danger:hover { border-color: var(--bad); color: var(--bad); }
+button:disabled { opacity: .4; cursor: default; }
+input.note { width: 100%; min-width: 8rem; border: 1px solid transparent; background: transparent; font: inherit; padding: .15rem .3rem; border-radius: 4px; }
+input.note:hover, input.note:focus { border-color: var(--line); background: #fff; outline: none; }
+.err { color: var(--bad); max-width: 28rem; overflow-wrap: anywhere; }
+ul.warnings { margin: 0; padding-left: 1rem; color: var(--amber); }
+
+body:not(.is-admin) .admin-only { display: none; }
+
+#toast { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); background: #333; color: #fff;
+         padding: .5rem 1rem; border-radius: 6px; max-width: 90vw; }

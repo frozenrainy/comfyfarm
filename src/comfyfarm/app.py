@@ -5,10 +5,12 @@ import asyncio
 import contextlib
 import json
 import logging
+import pathlib
 import uuid
 
 from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .adapter.comfy import ComfyAdapter
@@ -18,9 +20,11 @@ from .core.reconcile import Reconciler
 from .core.settings import Settings
 from .db import Busy, Database
 from .events.hub import EventHub
+from .health.dispatch import prometheus, snapshot as dispatch_snapshot
 from .health.monitor import HealthMonitor
 
 log = logging.getLogger(__name__)
+DASHBOARD_DIR = pathlib.Path(__file__).parent / "dashboard"
 
 
 class Router:
@@ -92,6 +96,7 @@ class WorkerPatch(BaseModel):
     maintenance: bool | None = None
     enabled: bool | None = None
     group: str | None = None
+    note: str | None = None                # "" clears
 
 
 class PromptIn(BaseModel):                 # stock ComfyUI /prompt body + optional ComfyFarm fields
@@ -129,6 +134,12 @@ def create_app(settings: Settings) -> FastAPI:
         return settings.dev_identity
 
     app.include_router(make_router(router, lambda user: identity(user)))
+
+    def is_admin(who: str) -> bool:
+        return "admin" in current_roles.get() or bool(settings.dev_identity and who in settings.dev_admins)
+
+    from .api.dashboard import make_router as make_dashboard
+    app.include_router(make_dashboard(router, identity, is_admin))
 
     @app.exception_handler(Busy)
     async def busy(_req: Request, _exc: Busy):
@@ -191,7 +202,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     def admin(user: str | None) -> str:
         who = identity(user)
-        if "admin" not in current_roles.get() and not (settings.dev_identity and who in settings.dev_admins):
+        if not is_admin(who):
             raise HTTPException(403, "admin only")
         return who
 
@@ -259,6 +270,8 @@ def create_app(settings: Settings) -> FastAPI:
                 if gid is None:
                     raise HTTPException(400, f"unknown group {body.group!r}")
                 args.append(gid); sets.append(f"group_id = ${len(args)}")
+            if body.note is not None:
+                args.append((body.note.strip()[:jobsvc.NOTE_MAX]) or None); sets.append(f"note = ${len(args)}")
             if not sets:
                 return {"changed": False}
             done = await c.fetchval(f"UPDATE workers SET {', '.join(sets)} WHERE id = $1 AND deleted_at IS NULL RETURNING id", *args)
@@ -278,12 +291,15 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/farm/jobs/{prompt_id}/cancel")
     async def cancel_job(prompt_id: uuid.UUID, x_comfyfarm_user: str | None = Header(default=None)):
-        owner = identity(x_comfyfarm_user)
-        async with router.db.conn() as c:
-            jid = await c.fetchval("SELECT id FROM jobs WHERE prompt_id = $1 AND owner = $2", prompt_id, owner)
-        if jid is None:
+        who = identity(x_comfyfarm_user)
+        async with router.db.conn() as c:       # owner, or an admin (operators cancel stuck jobs from the dashboard)
+            r = await c.fetchrow("SELECT id, owner FROM jobs WHERE prompt_id = $1 AND ($2 OR owner = $3)",
+                                 prompt_id, is_admin(who), who)
+        if r is None:
             raise HTTPException(404, "not found")
-        return {"status": await jobsvc.request_cancel(router.db, router.adapter, jid)}
+        status = await jobsvc.request_cancel(router.db, router.adapter, r["id"])
+        await router.events.push_status({r["owner"]})
+        return {"status": status}
 
     @app.websocket("/ws")
     async def browser_ws(ws: WebSocket):
@@ -369,30 +385,25 @@ def create_app(settings: Settings) -> FastAPI:
     async def health_dispatch():
         """Numbers only, per group (docs/design/06). Unknown values are null, never 0."""
         async with router.db.conn() as c:
-            rows = await c.fetch("""
-              SELECT g.id, g.name,
-                (SELECT count(*) FROM jobs j WHERE j.status = 'pending' AND j.group_id = g.id) AS pending,
-                (SELECT count(*) FROM workers w WHERE w.group_id = g.id AND w.state = 'online' AND NOT w.maintenance
-                   AND w.enabled AND w.deleted_at IS NULL AND w.current_job_id IS NULL) AS idle_workers,
-                (SELECT extract(epoch FROM now() - max(j.dispatched_at)) FROM jobs j WHERE j.group_id = g.id) AS since_dispatch,
-                (SELECT extract(epoch FROM now() - min(j.created_at)) FROM jobs j WHERE j.status = 'pending' AND j.group_id = g.id) AS oldest_pending,
-                (SELECT extract(epoch FROM now() - min(coalesce(j.started_at, j.dispatched_at))) FROM jobs j
-                   WHERE j.group_id = g.id AND j.status IN ('running','dispatching')) AS running_longest,
-                (SELECT count(*) FROM jobs j WHERE j.status = 'pending' AND j.group_id = g.id AND NOT EXISTS (
-                   SELECT 1 FROM workers w WHERE w.group_id = g.id AND w.enabled AND w.deleted_at IS NULL
-                     AND w.state = 'online' AND comfyfarm_satisfies(w.capabilities, g.requirements)
-                     AND comfyfarm_satisfies(w.capabilities, j.requirements))) AS unsatisfiable
-              FROM worker_groups g ORDER BY g.id""")
-        out = {}
-        for r in rows:
-            stalled = None
-            if r["pending"] and r["idle_workers"]:
-                cands = [x for x in (r["since_dispatch"], r["oldest_pending"]) if x is not None]
-                stalled = float(min(cands)) if cands else None
-            out[str(r["id"])] = {"pending": r["pending"], "idle_workers": r["idle_workers"],
-                                 "dispatch_idle_seconds": stalled,
-                                 "running_longest_seconds": float(r["running_longest"]) if r["running_longest"] is not None else None,
-                                 "unsatisfiable_pending": r["unsatisfiable"]}
-        return {"groups": out}
+            return await dispatch_snapshot(c)
+
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus exposition of the same numbers. A ledger that cannot be read is reported as
+        `comfyfarm_ledger_up 0` with a 200, so the scrape itself still succeeds and the outage is visible."""
+        try:
+            async with router.db.conn() as c:
+                snap = await dispatch_snapshot(c)
+        except Exception as e:
+            log.warning("metrics: ledger unreadable: %s", type(e).__name__)
+            snap = None
+        return PlainTextResponse(prometheus(snap), media_type="text/plain; version=0.0.4; charset=utf-8")
+
+    # ---- dashboard (static, no build step: the farm may have no package registry, D-32) --------------------------
+    @app.get("/comfyfarm/dashboard")
+    async def dashboard_redirect():
+        return RedirectResponse("/comfyfarm/dashboard/", status_code=307)
+
+    app.mount("/comfyfarm/dashboard/", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")
 
     return app

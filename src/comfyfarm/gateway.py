@@ -32,7 +32,10 @@ from .identity import Identity, read_session, sign_session
 log = logging.getLogger(__name__)
 
 ROUTER_PREFIXES = ("/api/prompt", "/api/jobs", "/api/queue", "/api/history", "/api/interrupt", "/api/object_info",
-                   "/api/farm/", "/api/admin/", "/api/health/", "/prompt", "/queue", "/history", "/interrupt", "/object_info")
+                   "/api/farm/", "/api/admin/", "/api/health/",
+                   "/comfyfarm/dashboard", "/prompt", "/queue", "/history", "/interrupt", "/object_info")
+DASHBOARD = "/comfyfarm/dashboard/"
+AFTER_LOGIN = ("/", DASHBOARD)
 IDENTITY_HEADERS = {"x-comfyfarm-user", "x-comfyfarm-roles", "x-comfyfarm-gateway", "comfy-user",
                     "x-comfyfarm-gateway-login"}
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
@@ -122,12 +125,17 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         return StreamingResponse(body_iter(), status_code=up.status_code, headers=out_headers)
 
     # ---- login -------------------------------------------------------------------------------------------------
+    def safe_next(v) -> str:
+        return v if v in AFTER_LOGIN else "/"      # fixed list: a free-form target would be an open redirect
+
     async def login_page(request: Request):
         err = request.query_params.get("e")
+        nxt = safe_next(request.query_params.get("next"))
         return HTMLResponse(f"""<!doctype html><meta charset=utf-8><title>ComfyFarm</title>
 <style>body{{font-family:system-ui;max-width:22rem;margin:12vh auto;color:#222}}input{{width:100%;padding:.5rem;margin:.3rem 0}}
 button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Login failed</p>' if err else ''}
-<form method=post action=/comfyfarm/login><input name=username placeholder=Username autofocus>
+<form method=post action=/comfyfarm/login><input type=hidden name=next value="{nxt}">
+<input name=username placeholder=Username autofocus>
 <input name=password type=password placeholder=Password><button>Log in</button></form>""")
 
     async def login(request: Request):
@@ -136,10 +144,11 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
         form = await request.form()
         r = await http.post(f"{s.router_url}/api/internal/login", headers={"x-comfyfarm-gateway-login": s.secret},
                             json={"username": form.get("username", ""), "password": form.get("password", "")})
+        nxt = safe_next(form.get("next"))
         if r.status_code != 200:
-            return RedirectResponse("/comfyfarm/login?e=1", status_code=303)
+            return RedirectResponse(f"/comfyfarm/login?next={nxt}&e=1", status_code=303)
         d = r.json()
-        resp = RedirectResponse("/", status_code=303)
+        resp = RedirectResponse(nxt, status_code=303)
         resp.set_cookie(COOKIE, sign_session(Identity(d["user"], frozenset(d["roles"])), s.session_key),
                         httponly=True, samesite="lax", secure=s.secure_cookie, max_age=7 * 86400)
         return resp
@@ -167,8 +176,11 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
         ident = identify(request)
         path = request.url.path
         if ident is None:
-            if request.method == "GET" and path in ("/", "/index.html") and s.provider == "local":
-                return RedirectResponse("/comfyfarm/login", status_code=303)
+            if request.method == "GET" and s.provider == "local":
+                if path in ("/", "/index.html"):
+                    return RedirectResponse("/comfyfarm/login", status_code=303)
+                if path.startswith("/comfyfarm/dashboard"):
+                    return RedirectResponse(f"/comfyfarm/login?next={DASHBOARD}", status_code=303)
             return JSONResponse({"error": "not authenticated"}, status_code=401)
         if path.startswith(ROUTER_PREFIXES):
             return await proxy(request, s.router_url, router_headers(request, ident))

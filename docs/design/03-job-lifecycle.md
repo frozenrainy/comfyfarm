@@ -74,6 +74,13 @@ fight.
 
 `paused` jobs are skipped by the dispatcher. Reorder changes `priority` only. Both are pure ledger operations.
 
+- Pause/resume: `pending ↔ paused`, by the owner or an admin. Resume counts as entering the queue again (the stall clock
+  of 06 starts there, not at `created_at`).
+- Reorder (admin only, D-32): top/bottom take `max+1`/`min-1`; "before/after job X" renumbers the queued jobs in one
+  statement, keeping the top value, so a concurrent "front" submit still lands first. Every priority assignment (submit,
+  retry, move) takes the same transaction-level advisory lock.
+- Retry: new job, same owner/group/requirements/payload, `retry_of` set, appended at the end.
+
 ## Priority and group policy
 
 Dispatcher order for a worker in group G:
