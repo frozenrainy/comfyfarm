@@ -32,6 +32,7 @@ class Router:
         self.reconciler = Reconciler(self.db, self.adapter, settings, self.dispatcher.wake)
         self.health = HealthMonitor(self.db, self.adapter, settings, self.dispatcher.wake)
         self.events = EventHub(self.db, settings, self.dispatcher.wake)
+        self.dispatcher.ready = self.events.ready
         self.tasks: list[asyncio.Task] = []
 
     async def start(self, loops: bool = True):
@@ -69,6 +70,11 @@ class Router:
                 await t
         await self.adapter.close()
         await self.db.close()
+
+
+# Credentials the stock frontend puts into extra_data (Comfy.org API nodes). Kept in memory until dispatch, never
+# written to the ledger (D-29). A router restart before dispatch drops them: those API nodes then fail visibly.
+SECRET_EXTRA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
 
 
 class GroupIn(BaseModel):
@@ -129,8 +135,10 @@ def create_app(settings: Settings) -> FastAPI:
             except ValueError:
                 raise HTTPException(400, {"error": {"type": "invalid_prompt_id", "message": "prompt_id must be a UUID"},
                                           "node_errors": {}})
+        extra = dict(body.extra_data)
+        secrets = {k: extra.pop(k) for k in SECRET_EXTRA_KEYS if k in extra}    # D-29: not persisted
         try:
-            job, _created = await jobsvc.submit(router.db, owner=owner, prompt=body.prompt, extra_data=body.extra_data,
+            job, _created = await jobsvc.submit(router.db, owner=owner, prompt=body.prompt, extra_data=extra,
                                                 group_id=body.comfyfarm_group, idempotency_key=body.prompt_id,
                                                 browser_client_id=body.client_id, front=body.front,
                                                 requirements=body.comfyfarm_requirements)
@@ -138,6 +146,8 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(409, "prompt_id conflict")
         except jobsvc.BadRequirements as e:
             raise HTTPException(400, {"error": {"type": "invalid_requirements", "message": str(e)}, "node_errors": {}})
+        if secrets and _created:
+            router.dispatcher.secrets[job["id"]] = secrets
         router.dispatcher.wake.set()
         return {"prompt_id": str(job["prompt_id"]), "number": job["id"], "node_errors": {}}
 

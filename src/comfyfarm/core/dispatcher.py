@@ -46,6 +46,8 @@ class Dispatcher:
         self.wake = asyncio.Event()
         self.inflight: set[asyncio.Task] = set()
         self.claimed_total = 0
+        self.ready = lambda worker_id: True     # EventHub replaces this: dispatch only once events can be received
+        self.secrets: dict[int, dict] = {}      # job id → credentials kept out of the ledger (D-29)
 
     async def run(self):
         while True:
@@ -67,6 +69,8 @@ class Dispatcher:
             candidates = [r["id"] for r in await c.fetch(IDLE_WORKERS)]
         claimed = 0
         for wid in candidates:
+            if not self.ready(wid):
+                continue
             claim = await self.claim(wid)
             if claim is None:
                 continue
@@ -95,6 +99,7 @@ class Dispatcher:
     async def deliver(self, job_id: int, prompt_id: str, worker: dict, prompt: dict, extra: dict):
         if self.s.preview_method and "preview_method" not in extra:
             extra["preview_method"] = self.s.preview_method                     # P16
+        extra.update(self.secrets.pop(job_id, {}))                              # D-29: never stored, only forwarded
         out = await self.adapter.submit(worker["base_url"], prompt_id, prompt, extra,
                                         worker_client_id(self.s.instance, worker["id"]))
         async with self.db.conn() as c:

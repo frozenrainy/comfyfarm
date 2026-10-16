@@ -171,3 +171,9 @@ before the table existed broke the whole dashboard. → Versioned migrations app
 and submit were unauthenticated, so a guessed `clientId` could read someone else's previews, and stock
 `--multi-user` ComfyUI has no authentication. → Identity is required, a browser's `clientId` is bound to its identity,
 workers accept only router/gateway traffic ([09](09-security.md)).
+
+**D-29 Credentials in `extra_data` are forwarded, never stored.** *(new)* — The stock frontend sends Comfy.org API
+credentials (`auth_token_comfy_org`, `api_key_comfy_org`) inside `extra_data` with every prompt. Persisting payloads
+would put them in the ledger, its backups and its replicas. → The router strips them at submit, keeps them in memory
+keyed by job, and adds them back only in the POST to the worker. A router restart before dispatch drops them; API nodes
+in that job then fail with an authentication error instead of credentials lingering in a database.

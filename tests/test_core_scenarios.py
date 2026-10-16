@@ -102,6 +102,7 @@ async def test_unreachable_worker_requeues_to_another(router_factory, fakes):
         await c.execute("UPDATE workers SET state = 'online', last_ok_at = now() - interval '1 hour' WHERE name = 'dead'")
         await c.execute("UPDATE workers SET state = 'online', last_ok_at = now() WHERE name = 'good'")
         dead_id = await c.fetchval("SELECT id FROM workers WHERE name = 'dead'")
+    r.dispatcher.ready = lambda wid: True      # a worker whose event stream looked fine but whose HTTP is gone
     pid = await submit(r, 6)
     await wait_status(r, pid, "completed", timeout=20)
     assert good.fake.post_log == [pid]

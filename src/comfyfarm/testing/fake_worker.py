@@ -77,6 +77,7 @@ class FakeWorker:
         self.jobs: dict[str, Job] = {}
         self.counter = 0
         self.post_log: list[str] = []        # every POST /prompt prompt_id received (tests count duplicates)
+        self.post_extra: list[dict] = []     # extra_data of each POST (credential forwarding tests)
         self.mode, self.mode_seconds = "normal", 0.0
         self.wake = asyncio.Event()
         self.app = web.Application(middlewares=[self._fault_middleware])
@@ -207,6 +208,7 @@ class FakeWorker:
         body = await request.json()
         pid = body.get("prompt_id") or str(uuid.uuid4())
         self.post_log.append(pid)
+        self.post_extra.append(body.get("extra_data", {}))
         if self.mode == "drop":
             return web.json_response({"error": {"type": "prompt_outputs_failed_validation", "message": "fake drop"},
                                       "node_errors": {"1": {"errors": [{"type": "fake"}]}}}, status=400)

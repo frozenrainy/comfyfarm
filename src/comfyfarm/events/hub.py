@@ -120,6 +120,7 @@ class WorkerStream:
         self.last_progress_write = 0.0
         self.last_written = None
         self.connected = False
+        self.down_since = time.monotonic()
 
     async def run(self):
         backoff = [1, 2, 5, 10]
@@ -136,6 +137,8 @@ class WorkerStream:
                 raise
             except Exception as e:
                 log.info("worker %s ws: %s", self.worker_id, type(e).__name__)
+            if self.connected:
+                self.down_since = time.monotonic()
             self.connected = False
             await asyncio.sleep(backoff[min(attempt, len(backoff) - 1)])
             attempt += 1
@@ -191,6 +194,21 @@ class EventHub:
         self.streams: dict[int, tuple[WorkerStream, asyncio.Task]] = {}
         self.refs: dict[str, JobRef] = {}
         self.status_seen: dict[str, tuple] = {}
+        self.running = False
+
+    STREAM_GRACE = 30.0
+
+    def ready(self, worker_id: int) -> bool:
+        """Dispatch to a worker only when its event stream is up: events of a job submitted while nobody listens on
+        the router's clientId are lost (P10). If the stream stays down longer than the grace, dispatch anyway —
+        outcomes still come from reconcile, only live progress is lost."""
+        if not self.running:
+            return True
+        entry = self.streams.get(worker_id)
+        if entry is None:
+            return False
+        st = entry[0]
+        return st.connected or time.monotonic() - st.down_since > self.STREAM_GRACE
 
     async def ref(self, prompt_id: str) -> JobRef | None:
         """prompt_id → job, cached; on a miss rebuilt from the ledger (D-17)."""
@@ -250,6 +268,7 @@ class EventHub:
                 self.streams[wid] = (st, asyncio.create_task(st.run()))
 
     async def run(self):
+        self.running = True
         while True:
             try:
                 await self.sync_workers()
