@@ -1,12 +1,12 @@
 [INFO] version: 0.41.0
-[PASS] S1 prompt_id preassigned: status 200 sent e5d31c4d got e5d31c4d keys ['node_errors', 'number', 'prompt_id']
+[PASS] S1 prompt_id preassigned: status 200 sent c5bfb382 got c5bfb382 keys ['node_errors', 'number', 'prompt_id']
 [PASS] S1b history by preassigned id: found after 0.2s, status=success
 [INFO] S1c uppercase prompt_id: status 400 -> None {'type': 'invalid_prompt_id', 'message': 'prompt_id must be a valid UUID', 'details': 'prompt_id must be a UUID string in canonical lowercase hyphenated form; omit it to let the server generate one', 'extra_info': {}}
-[INFO] S1d resubmit same prompt_id: status 200 body {"prompt_id": "e5d31c4d-dae4-4118-b731-0d787b8e87b3", "number": 11, "node_errors": {}}
+[INFO] S1d resubmit same prompt_id: status 200 body {"prompt_id": "c5bfb382-a8c5-4d47-ac99-75f182d334b3", "number": 2, "node_errors": {}}
 [INFO] S1d history entries for that id: 1 (dict keyed by id — a rerun overwrites)
 [INFO] S2 /queue keys: ['queue_pending', 'queue_running']
-[PASS] S2 /api/jobs: status 200 {"jobs": [{"id": "e5d31c4d-dae4-4118-b731-0d787b8e87b3", "status": "completed", "priority": 11, "create_time": 1792121510571, "execution_start_time": 1792121510572, "execution_end_time": 1792121510572, "outputs_count": 1, "previewable_outpu
-[PASS] S2 /api/jobs/{id}: status 200 {"id": "e5d31c4d-dae4-4118-b731-0d787b8e87b3", "status": "completed", "priority": 11, "create_time": 1792121510571, "execution_start_time": 1792121510572, "execution_end_time": 1792121510572, "outputs_count": 1, "previewable_outputs_count": 1, "preview_output": {"filename": "ComfyUI_temp_zitit_00004
+[PASS] S2 /api/jobs: status 200 {"jobs": [{"id": "c5bfb382-a8c5-4d47-ac99-75f182d334b3", "status": "completed", "priority": 2, "create_time": 1792151952246, "execution_start_time": 1792151952246, "execution_end_time": 1792151952247, "outputs_count": 1, "previewable_output
+[PASS] S2 /api/jobs/{id}: status 200 {"id": "c5bfb382-a8c5-4d47-ac99-75f182d334b3", "status": "completed", "priority": 2, "create_time": 1792151952246, "execution_start_time": 1792151952246, "execution_end_time": 1792151952247, "outputs_count": 1, "previewable_outputs_count": 1, "preview_output": {"filename": "ComfyUI_temp_pdcvu_00001_
 [PASS] S4 invalid workflow -> 4xx: status 400 keys ['error', 'node_errors'] error.type=prompt_outputs_failed_validation
 [PASS] S4b bad input value -> node_errors: status 400 node_errors keys ['2']
 [INFO] S5 /object_info: 0.11s, 2.0 MB, 987 nodes
@@ -14,10 +14,11 @@
 [PASS] S3b control: owner socket gets job events: ['status', 'status', 'execution_start', 'execution_cached', 'progress_state', 'executing', 'progress_state', 'progress_state', 'executing', 'progress_state']
 [INFO] S3c bystander socket: ['status', 'status', 'status'] (only 'status' broadcasts expected)
 [PASS] S7 feature_flags reply: {"type": "feature_flags", "data": {"supports_preview_metadata": true, "supports_model_type_tags": true, "max_upload_size": 104857600, "extension": {"manager": {"supports_v4": true}}, "node_replacements": true, "assets": false}}
-[INFO] S6 queue state: running ['8c3242f4'] pending ['47990159']
+[INFO] S6 slow job calibration: 1 chained blur node(s) ≈ 71.9s on this worker
+[INFO] S6 queue state: running ['d3a24e60'] pending ['5a0310d3']
 [PASS] S6b delete pending by id: status 200
 [PASS] S6c interrupt with a NON-running prompt_id leaves the running job alone: status 200
-[PASS] S6d interrupt targeted at running id: took effect after 74s · /api/jobs status=cancelled · history status_str=error completed=False msgs=['execution_start', 'execution_cached', 'execution_interrupted']
+[PASS] S6d interrupt targeted at running id: took effect after 73s · /api/jobs status=cancelled · history status_str=error completed=False msgs=['execution_start', 'execution_cached', 'execution_interrupted']
 [PASS] S6e deleted pending job leaves no history: []
 [PASS] S8 cancel API on a pending job: status 200 {"cancelled": true}
 [PASS] S8b cancel API on an unknown id is a no-op: status 200 {"cancelled": false}

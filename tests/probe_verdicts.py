@@ -5,7 +5,7 @@ import re
 def verdicts(text: str) -> dict:
     out = {}
     for line in text.splitlines():
-        m = re.match(r"\[(PASS|FAIL|INFO)\] (S\d+[a-z]?)\b[^:]*: (.*)", line)
+        m = re.match(r"\[(PASS|FAIL|INFO|SKIP)\] (S\d+[a-z]?)\b[^:]*: (.*)", line)
         if not m:
             continue
         status, tag, detail = m.groups()

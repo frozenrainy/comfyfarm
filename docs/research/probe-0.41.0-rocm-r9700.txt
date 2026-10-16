@@ -1,0 +1,25 @@
+[INFO] version: 0.41.0
+[PASS] S1 prompt_id preassigned: status 200 sent 05d6c94b got 05d6c94b keys ['node_errors', 'number', 'prompt_id']
+[PASS] S1b history by preassigned id: found after 0.2s, status=success
+[INFO] S1c uppercase prompt_id: status 400 -> None {'type': 'invalid_prompt_id', 'message': 'prompt_id must be a valid UUID', 'details': 'prompt_id must be a UUID string in canonical lowercase hyphenated form; omit it to let the server generate one', 'extra_info': {}}
+[INFO] S1d resubmit same prompt_id: status 200 body {"prompt_id": "05d6c94b-a88d-430f-801f-2161606ace42", "number": 13, "node_errors": {}}
+[INFO] S1d history entries for that id: 1 (dict keyed by id — a rerun overwrites)
+[INFO] S2 /queue keys: ['queue_pending', 'queue_running']
+[PASS] S2 /api/jobs: status 200 {"jobs": [{"id": "05d6c94b-a88d-430f-801f-2161606ace42", "status": "completed", "priority": 13, "create_time": 1792151613628, "execution_start_time": 1792151613628, "execution_end_time": 1792151613629, "outputs_count": 1, "previewable_outpu
+[PASS] S2 /api/jobs/{id}: status 200 {"id": "05d6c94b-a88d-430f-801f-2161606ace42", "status": "completed", "priority": 13, "create_time": 1792151613628, "execution_start_time": 1792151613628, "execution_end_time": 1792151613629, "outputs_count": 1, "previewable_outputs_count": 1, "preview_output": {"filename": "ComfyUI_temp_rabmm_00008
+[PASS] S4 invalid workflow -> 4xx: status 400 keys ['error', 'node_errors'] error.type=prompt_outputs_failed_validation
+[PASS] S4b bad input value -> node_errors: status 400 node_errors keys ['2']
+[INFO] S5 /object_info: 0.19s, 2.6 MB, 1304 nodes
+[INFO] S3 reconnect race (ws2 after ws1 closed): ws2 received 14 job events ['status', 'status', 'execution_start', 'execution_cached', 'progress_state', 'executing', 'progress_state', 'progress_state'] — 0 = bug present (registration deleted by old handler)
+[PASS] S3b control: owner socket gets job events: ['status', 'status', 'execution_start', 'execution_cached', 'progress_state', 'executing', 'progress_state', 'progress_state', 'executing', 'progress_state']
+[INFO] S3c bystander socket: ['status', 'status', 'status'] (only 'status' broadcasts expected)
+[PASS] S7 feature_flags reply: {"type": "feature_flags", "data": {"supports_preview_metadata": true, "supports_model_type_tags": true, "max_upload_size": 104857600, "extension": {"manager": {"supports_v4": true}}, "node_replacements": true, "assets": false}}
+[INFO] S6 slow job calibration: 102 chained blur node(s) ≈ 9.5s on this worker
+[INFO] S6 queue state: running ['8214d507'] pending ['e1b45f08']
+[PASS] S6b delete pending by id: status 200
+[PASS] S6c interrupt with a NON-running prompt_id leaves the running job alone: status 200
+[PASS] S6d interrupt targeted at running id: took effect after 0s · /api/jobs status=cancelled · history status_str=error completed=False msgs=['execution_start', 'execution_cached', 'execution_interrupted']
+[PASS] S6e deleted pending job leaves no history: []
+[PASS] S8 cancel API on a pending job: status 200 {"cancelled": true}
+[PASS] S8b cancel API on an unknown id is a no-op: status 200 {"cancelled": false}
+[PASS] S8c cancel API on the running job: took effect after 0s, status=cancelled

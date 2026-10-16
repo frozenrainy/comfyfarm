@@ -12,11 +12,47 @@ def tiny(seed=0, size=64, blur=1):
             "2": {"class_type": "ImageBlur", "inputs": {"image": ["1", 0], "blur_radius": blur, "sigma": 1.0}},
             "3": {"class_type": "PreviewImage", "inputs": {"images": ["2", 0]}}}
 
-def slow(seed=0):  # one long single node (tens of seconds on CPU) — interrupt cannot cut it (P7)
-    return tiny(seed, size=2048, blur=25)
+SLOW_CHAIN = 1   # set by calibrate(): number of chained blur nodes so a job runs for several seconds on this device
+
+
+def slow(seed=0):
+    """A job that runs for several seconds on this worker: a chain of blur nodes. On CPU one node is already long
+    (interrupt then waits for it, P7); on a GPU the chain is long instead, and interrupt lands between nodes."""
+    g = {"1": {"class_type": "EmptyImage", "inputs": {"width": 2048, "height": 2048, "batch_size": 1, "color": seed % 0xFFFFFF}}}
+    prev = "1"
+    for i in range(SLOW_CHAIN):
+        nid = str(10 + i)
+        g[nid] = {"class_type": "ImageBlur", "inputs": {"image": [prev, 0], "blur_radius": 25, "sigma": 1.0}}
+        prev = nid
+    g["9"] = {"class_type": "PreviewImage", "inputs": {"images": [prev, 0]}}
+    return g
+
+
+async def calibrate(c, target=10.0):
+    """Measure one blur node on this device and size the chain so slow() takes about `target` seconds."""
+    global SLOW_CHAIN
+    SLOW_CHAIN = 1
+    for _ in range(4):
+        pid = str(uuid.uuid4())
+        await c.post(f"{BASE}/prompt", json={"prompt": slow(int(time.time())), "client_id": "probe", "prompt_id": pid})
+        h, _ = await wait_history(c, pid, 900)
+        j = (await c.get(f"{BASE}/api/jobs/{pid}")).json()
+        took = max((j.get("execution_end_time") or 0) - (j.get("execution_start_time") or 0), 1) / 1000
+        if took >= target * 0.6:
+            break
+        SLOW_CHAIN = min(4000, max(SLOW_CHAIN * 2, int(SLOW_CHAIN * target / took) + 1))
+    return SLOW_CHAIN, took
+
+
+async def precondition(c, pid, state):
+    """True if `pid` is currently in `state` ('running'|'pending') on the worker. A check whose precondition does not
+    hold did not run — it is reported as SKIP, never as FAIL or PASS."""
+    q = (await c.get(f"{BASE}/queue")).json()
+    ids = [x[1] for x in q["queue_running" if state == "running" else "queue_pending"]]
+    return pid in ids
 
 def report(tag, ok, detail):
-    print(f"[{'PASS' if ok is True else 'FAIL' if ok is False else 'INFO'}] {tag}: {detail}")
+    print(f"[{'PASS' if ok is True else 'FAIL' if ok is False else 'SKIP' if ok == 'skip' else 'INFO'}] {tag}: {detail}")
 
 async def collect(ws, seconds):
     out = []
@@ -123,6 +159,8 @@ async def main():
         await ws.close()
 
         # S6 interrupt targeted at a prompt_id, and deleting a pending item
+        chain, took = await calibrate(c)
+        report("S6 slow job calibration", None, f"{chain} chained blur node(s) ≈ {took:.1f}s on this worker")
         a, b = str(uuid.uuid4()), str(uuid.uuid4())
         await c.post(f"{BASE}/prompt", json={"prompt": slow(7), "client_id": "probe", "prompt_id": a})
         await c.post(f"{BASE}/prompt", json={"prompt": slow(8), "client_id": "probe", "prompt_id": b})
@@ -130,21 +168,29 @@ async def main():
         q = (await c.get(f"{BASE}/queue")).json()
         running = [x[1] for x in q["queue_running"]]; pending = [x[1] for x in q["queue_pending"]]
         report("S6 queue state", None, f"running {[r[:8] for r in running]} pending {[p[:8] for p in pending]}")
-        r = await c.post(f"{BASE}/queue", json={"delete": [b]})
-        q = (await c.get(f"{BASE}/queue")).json()
-        report("S6b delete pending by id", b not in [x[1] for x in q["queue_pending"]], f"status {r.status_code}")
-        r = await c.post(f"{BASE}/interrupt", json={"prompt_id": str(uuid.uuid4())})
-        await asyncio.sleep(0.5)
-        q = (await c.get(f"{BASE}/queue")).json()
-        report("S6c interrupt with a NON-running prompt_id leaves the running job alone", a in [x[1] for x in q["queue_running"]], f"status {r.status_code}")
+        if await precondition(c, b, "pending"):
+            r = await c.post(f"{BASE}/queue", json={"delete": [b]})
+            q = (await c.get(f"{BASE}/queue")).json()
+            report("S6b delete pending by id", b not in [x[1] for x in q["queue_pending"]], f"status {r.status_code}")
+        else:
+            report("S6b delete pending by id", "skip", "precondition: job was not pending")
+        if await precondition(c, a, "running"):
+            r = await c.post(f"{BASE}/interrupt", json={"prompt_id": str(uuid.uuid4())})
+            await asyncio.sleep(0.5)
+            q = (await c.get(f"{BASE}/queue")).json()
+            report("S6c interrupt with a NON-running prompt_id leaves the running job alone", a in [x[1] for x in q["queue_running"]], f"status {r.status_code}")
+        else:
+            report("S6c interrupt with a NON-running prompt_id leaves the running job alone", "skip", "precondition: job was not running")
+        pre_a = await precondition(c, a, "running")
         r = await c.post(f"{BASE}/interrupt", json={"prompt_id": a})
         # interrupt is cooperative (checked between nodes): a single long node keeps running — wait for the outcome
         h, dt = await wait_history(c, a, 900)
         st = h and h.get("status", {})
         job = (await c.get(f"{BASE}/api/jobs/{a}")).json()
         msgs = [m[0] for m in (st or {}).get("messages", [])]
-        report("S6d interrupt targeted at running id", h is not None and "execution_interrupted" in msgs and job.get("status") == "cancelled",
-               f"took effect after {dt:.0f}s · /api/jobs status={job.get('status')} · history status_str={st and st.get('status_str')} completed={st and st.get('completed')} msgs={msgs}")
+        report("S6d interrupt targeted at running id", (h is not None and "execution_interrupted" in msgs and job.get("status") == "cancelled") if pre_a else "skip",
+               f"took effect after {dt:.0f}s · /api/jobs status={job.get('status')} · history status_str={st and st.get('status_str')} completed={st and st.get('completed')} msgs={msgs}"
+               if pre_a else "precondition: job was not running when interrupted")
         hb = (await c.get(f"{BASE}/history/{b}")).json()
         report("S6e deleted pending job leaves no history", b not in hb, f"{list(hb)[:1]}")
 
@@ -153,14 +199,16 @@ async def main():
         await c.post(f"{BASE}/prompt", json={"prompt": slow(9), "client_id": "probe", "prompt_id": p1})
         await c.post(f"{BASE}/prompt", json={"prompt": tiny(10), "client_id": "probe", "prompt_id": p2})
         await asyncio.sleep(0.5)
+        pre_p2, pre_p1 = await precondition(c, p2, "pending"), await precondition(c, p1, "running")
         r = await c.post(f"{BASE}/api/jobs/{p2}/cancel")
-        report("S8 cancel API on a pending job", r.status_code == 200 and r.json().get("cancelled") is True, f"status {r.status_code} {r.text[:80]}")
+        report("S8 cancel API on a pending job", (r.status_code == 200 and r.json().get("cancelled") is True) if pre_p2 else "skip",
+               f"status {r.status_code} {r.text[:80]}" if pre_p2 else "precondition: job was not pending")
         r = await c.post(f"{BASE}/api/jobs/{str(uuid.uuid4())}/cancel")
         report("S8b cancel API on an unknown id is a no-op", r.status_code == 200 and r.json().get("cancelled") is False, f"status {r.status_code} {r.text[:80]}")
         r = await c.post(f"{BASE}/api/jobs/{p1}/cancel")
         h, dt = await wait_history(c, p1, 900)
         job = (await c.get(f"{BASE}/api/jobs/{p1}")).json()
-        report("S8c cancel API on the running job", r.json().get("cancelled") is True and job.get("status") == "cancelled",
-               f"took effect after {dt:.0f}s, status={job.get('status')}")
+        report("S8c cancel API on the running job", (r.json().get("cancelled") is True and job.get("status") == "cancelled") if pre_p1 else "skip",
+               f"took effect after {dt:.0f}s, status={job.get('status')}" if pre_p1 else "precondition: job was not running")
 
 asyncio.run(main())
