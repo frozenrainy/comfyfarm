@@ -66,8 +66,8 @@ class Job:
 
 
 class FakeWorker:
-    def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False):
-        self.version, self.backend, self.ws_fix = version, backend, ws_fix
+    def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16):
+        self.version, self.backend, self.ws_fix, self.vram_gb = version, backend, ws_fix, vram_gb
         self.sockets: dict[str, web.WebSocketResponse] = {}
         self.sockets_metadata: dict[str, dict] = {}
         self.pending: list[Job] = []
@@ -290,7 +290,7 @@ class FakeWorker:
         torch = "2.14.0+rocm7.2" if self.backend == "rocm" else "2.14.0+cu130"
         return web.json_response({"system": {"comfyui_version": self.version, "pytorch_version": torch, "os": "posix",
                                              "argv": ["main.py", "--listen", "0.0.0.0"]},
-                                  "devices": [{"name": f"Fake {self.backend.upper()} GPU", "type": "cuda", "vram_total": 17179869184}]})
+                                  "devices": [{"name": f"Fake {self.backend.upper()} GPU", "type": "cuda", "vram_total": self.vram_gb * 1073741824}]})
 
     # ---------------- executor ----------------
     async def _start(self, app):

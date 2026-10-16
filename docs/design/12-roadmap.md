@@ -3,7 +3,7 @@
 | Milestone | Content | Needs GPU box |
 |---|---|---|
 | **M0 Design** (done) | design docs, protocol probe, worker-extension prototype (reconnect fix verified on 0.41.0) | no |
-| **M1 Core** (in progress) | schema + migrations, dispatcher (`SKIP LOCKED`), adapter with classified outcomes, reconcile + lost jobs, health, REST submit/list/cancel, fake worker + scenario tests. Done so far: all of these except cancel and admin APIs; 13 tests incl. fake↔real parity | no — fake workers + CPU ComfyUI |
+| **M1 Core** (done) | schema + migrations, dispatcher (`SKIP LOCKED`), adapter with classified outcomes, reconcile + lost jobs, health, cancel, admin API, capability requirements, NOTIFY wake-up, fake worker + scenario tests (19 tests incl. fake↔real parity, mutation-checked double dispatch) | no — fake workers + CPU ComfyUI |
 | **M2 Events & gateway** | worker WS relay, catch-up, status broadcast, gateway routing, identity providers (`local`, `trusted-header`), frontend extension (group picker, idempotent submit), pre-submit validation | partly — real previews need GPU |
 | **M3 Dashboard & monitoring** | queue/worker/group views, pause/reorder/retry/notes, `/api/health/dispatch` + `/metrics` | no |
 | **M4 Rollout** | drain/restart/verify, restart backends, `comfy-upgrade/1` render + badge, recycle policy | yes |

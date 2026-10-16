@@ -20,14 +20,17 @@ SELECT id FROM workers
 
 # Re-checked under the lock: a worker put into maintenance after the candidate list was read is skipped (D-02).
 LOCK_WORKER = """
-SELECT id, group_id, base_url FROM workers
- WHERE id = $1 AND enabled AND NOT maintenance AND deleted_at IS NULL AND state = 'online' AND current_job_id IS NULL
- FOR UPDATE SKIP LOCKED"""
+SELECT w.id, w.group_id, w.base_url, w.capabilities FROM workers w JOIN worker_groups g ON g.id = w.group_id
+ WHERE w.id = $1 AND w.enabled AND NOT w.maintenance AND w.deleted_at IS NULL AND w.state = 'online'
+   AND w.current_job_id IS NULL AND comfyfarm_satisfies(w.capabilities, g.requirements)
+ FOR UPDATE OF w SKIP LOCKED"""
 
-# Group jobs first, then ungrouped ones (policy 'lowest_priority', D-03); highest priority first.
+# Group jobs first, then ungrouped ones (policy 'lowest_priority', D-03); highest priority first; only jobs whose
+# own requirements this worker satisfies (docs/design/10).
 PICK_JOB = """
 SELECT id, prompt_id FROM jobs
  WHERE status = 'pending' AND deleted_at IS NULL AND (group_id = $1 OR group_id IS NULL)
+   AND comfyfarm_satisfies($2, requirements)
  ORDER BY (group_id IS NULL), priority DESC, id
  LIMIT 1 FOR UPDATE SKIP LOCKED"""
 
@@ -80,14 +83,14 @@ class Dispatcher:
                 w = await c.fetchrow(LOCK_WORKER, worker_id)
                 if w is None:
                     return None
-                j = await c.fetchrow(PICK_JOB, w["group_id"])
+                j = await c.fetchrow(PICK_JOB, w["group_id"], w["capabilities"])
                 if j is None:
                     return None
                 await transition(c, j["id"], "dispatching", ("pending",), f"claimed by worker {worker_id}",
                                  worker_id=worker_id, dispatched_at="now()")
                 await c.execute("UPDATE workers SET current_job_id = $2 WHERE id = $1", worker_id, j["id"])
                 payload = await c.fetchrow("SELECT prompt, extra_data FROM job_payloads WHERE job_id = $1", j["id"])
-        return j["id"], str(j["prompt_id"]), dict(w), payload["prompt"], dict(payload["extra_data"] or {})
+        return j["id"], str(j["prompt_id"]), {k: w[k] for k in ("id", "group_id", "base_url")}, payload["prompt"], dict(payload["extra_data"] or {})
 
     async def deliver(self, job_id: int, prompt_id: str, worker: dict, prompt: dict, extra: dict):
         if self.s.preview_method and "preview_method" not in extra:

@@ -18,3 +18,4 @@ class Settings:
     max_connect_attempts: int = 5          # connect failures before a job fails as unreachable
     preview_method: str | None = "auto"    # P16: sent as extra_data.preview_method
     dev_identity: str | None = None        # M1 only: trust X-ComfyFarm-User (loopback deployments)
+    dev_admins: tuple[str, ...] = ("admin",)   # M1 only: users treated as admins under dev identity

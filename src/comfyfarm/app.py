@@ -35,6 +35,27 @@ class Router:
         await self.db.start()
         if loops:
             self.tasks = [asyncio.create_task(x.run()) for x in (self.health, self.dispatcher, self.reconciler)]
+            self.tasks.append(asyncio.create_task(self.listen()))
+
+    async def listen(self):
+        """Wake the dispatcher on NOTIFY from any router sharing the ledger. Only an accelerator (docs/design/01):
+        notifications sent while this connection is down are lost, so the dispatcher keeps polling."""
+        import asyncpg
+        while True:
+            conn = None
+            try:
+                conn = await asyncpg.connect(self.s.dsn)
+                await conn.add_listener("comfyfarm_wake", lambda *_: self.dispatcher.wake.set())
+                while not conn.is_closed():
+                    await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("listen connection failed: %s", type(e).__name__)
+            finally:
+                if conn is not None and not conn.is_closed():
+                    await conn.close()
+            await asyncio.sleep(2)
 
     async def stop(self):
         for t in self.tasks:
@@ -46,6 +67,23 @@ class Router:
         await self.db.close()
 
 
+class GroupIn(BaseModel):
+    name: str
+    requirements: dict = {}
+
+
+class WorkerIn(BaseModel):
+    name: str
+    base_url: str
+    group: str | None = None
+
+
+class WorkerPatch(BaseModel):
+    maintenance: bool | None = None
+    enabled: bool | None = None
+    group: str | None = None
+
+
 class PromptIn(BaseModel):                 # stock ComfyUI /prompt body + optional ComfyFarm fields
     prompt: dict
     client_id: str | None = None
@@ -53,6 +91,7 @@ class PromptIn(BaseModel):                 # stock ComfyUI /prompt body + option
     extra_data: dict = {}
     front: bool = False
     comfyfarm_group: int | None = None
+    comfyfarm_requirements: dict = {}
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -89,9 +128,12 @@ def create_app(settings: Settings) -> FastAPI:
         try:
             job, _created = await jobsvc.submit(router.db, owner=owner, prompt=body.prompt, extra_data=body.extra_data,
                                                 group_id=body.comfyfarm_group, idempotency_key=body.prompt_id,
-                                                browser_client_id=body.client_id, front=body.front)
+                                                browser_client_id=body.client_id, front=body.front,
+                                                requirements=body.comfyfarm_requirements)
         except jobsvc.Conflict:
             raise HTTPException(409, "prompt_id conflict")
+        except jobsvc.BadRequirements as e:
+            raise HTTPException(400, {"error": {"type": "invalid_requirements", "message": str(e)}, "node_errors": {}})
         router.dispatcher.wake.set()
         return {"prompt_id": str(job["prompt_id"]), "number": job["id"], "node_errors": {}}
 
@@ -105,6 +147,80 @@ def create_app(settings: Settings) -> FastAPI:
         d = dict(r)
         d["prompt_id"] = str(d["prompt_id"])
         return {k: (v.isoformat() if hasattr(v, "isoformat") else str(v) if isinstance(v, uuid.UUID) else v) for k, v in d.items()}
+
+    def admin(user: str | None) -> str:
+        who = identity(user)
+        if who not in settings.dev_admins:          # M1 dev roles; identity providers supply roles in M2 (docs/design/08)
+            raise HTTPException(403, "admin only")
+        return who
+
+    @app.post("/api/admin/groups")
+    async def create_group(body: GroupIn, x_comfyfarm_user: str | None = Header(default=None)):
+        admin(x_comfyfarm_user)
+        try:
+            req = jobsvc.validate_requirements(body.requirements)
+        except jobsvc.BadRequirements as e:
+            raise HTTPException(400, str(e))
+        async with router.db.conn() as c:
+            gid = await c.fetchval("INSERT INTO worker_groups(name, requirements) VALUES ($1, $2) "
+                                   "ON CONFLICT (name) DO UPDATE SET requirements = excluded.requirements RETURNING id",
+                                   body.name, req)
+        return {"id": gid, "name": body.name, "requirements": req}
+
+    @app.get("/api/admin/workers")
+    async def list_workers(x_comfyfarm_user: str | None = Header(default=None)):
+        admin(x_comfyfarm_user)
+        async with router.db.conn() as c:
+            rows = await c.fetch("SELECT w.*, g.name AS group_name FROM workers w LEFT JOIN worker_groups g ON g.id = w.group_id "
+                                 "WHERE w.deleted_at IS NULL ORDER BY w.id")
+        out = []
+        for r in rows:
+            d = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(r).items()}
+            d["warnings"] = ["no group: receives no jobs"] if r["group_id"] is None else []   # D-03
+            out.append(d)
+        return out
+
+    @app.post("/api/admin/workers")
+    async def create_worker(body: WorkerIn, x_comfyfarm_user: str | None = Header(default=None)):
+        admin(x_comfyfarm_user)
+        async with router.db.conn() as c:
+            gid = await c.fetchval("SELECT id FROM worker_groups WHERE name = $1", body.group) if body.group else None
+            if body.group and gid is None:
+                raise HTTPException(400, f"unknown group {body.group!r}")
+            wid = await c.fetchval("INSERT INTO workers(name, base_url, group_id) VALUES ($1, $2, $3) RETURNING id",
+                                   body.name, body.base_url.rstrip("/"), gid)
+        return {"id": wid}
+
+    @app.patch("/api/admin/workers/{worker_id}")
+    async def patch_worker(worker_id: int, body: WorkerPatch, x_comfyfarm_user: str | None = Header(default=None)):
+        admin(x_comfyfarm_user)
+        sets, args = [], [worker_id]
+        for k in ("maintenance", "enabled"):
+            v = getattr(body, k)
+            if v is not None:
+                args.append(v); sets.append(f"{k} = ${len(args)}")
+        async with router.db.conn() as c:
+            if body.group is not None:
+                gid = await c.fetchval("SELECT id FROM worker_groups WHERE name = $1", body.group)
+                if gid is None:
+                    raise HTTPException(400, f"unknown group {body.group!r}")
+                args.append(gid); sets.append(f"group_id = ${len(args)}")
+            if not sets:
+                return {"changed": False}
+            done = await c.fetchval(f"UPDATE workers SET {', '.join(sets)} WHERE id = $1 AND deleted_at IS NULL RETURNING id", *args)
+        if done is None:
+            raise HTTPException(404, "not found")
+        router.dispatcher.wake.set()
+        return {"changed": True}
+
+    @app.delete("/api/admin/workers/{worker_id}")
+    async def delete_worker(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
+        admin(x_comfyfarm_user)
+        async with router.db.conn() as c:     # soft delete: its running jobs become worker_lost (D-06b)
+            done = await c.fetchval("UPDATE workers SET deleted_at = now(), enabled = false WHERE id = $1 AND deleted_at IS NULL RETURNING id", worker_id)
+        if done is None:
+            raise HTTPException(404, "not found")
+        return {"deleted": True}
 
     @app.post("/api/farm/jobs/{prompt_id}/cancel")
     async def cancel_job(prompt_id: uuid.UUID, x_comfyfarm_user: str | None = Header(default=None)):
@@ -127,7 +243,11 @@ def create_app(settings: Settings) -> FastAPI:
                 (SELECT extract(epoch FROM now() - max(j.dispatched_at)) FROM jobs j WHERE j.group_id = g.id) AS since_dispatch,
                 (SELECT extract(epoch FROM now() - min(j.created_at)) FROM jobs j WHERE j.status = 'pending' AND j.group_id = g.id) AS oldest_pending,
                 (SELECT extract(epoch FROM now() - min(coalesce(j.started_at, j.dispatched_at))) FROM jobs j
-                   WHERE j.group_id = g.id AND j.status IN ('running','dispatching')) AS running_longest
+                   WHERE j.group_id = g.id AND j.status IN ('running','dispatching')) AS running_longest,
+                (SELECT count(*) FROM jobs j WHERE j.status = 'pending' AND j.group_id = g.id AND NOT EXISTS (
+                   SELECT 1 FROM workers w WHERE w.group_id = g.id AND w.enabled AND w.deleted_at IS NULL
+                     AND w.state = 'online' AND comfyfarm_satisfies(w.capabilities, g.requirements)
+                     AND comfyfarm_satisfies(w.capabilities, j.requirements))) AS unsatisfiable
               FROM worker_groups g ORDER BY g.id""")
         out = {}
         for r in rows:
@@ -137,7 +257,8 @@ def create_app(settings: Settings) -> FastAPI:
                 stalled = float(min(cands)) if cands else None
             out[str(r["id"])] = {"pending": r["pending"], "idle_workers": r["idle_workers"],
                                  "dispatch_idle_seconds": stalled,
-                                 "running_longest_seconds": float(r["running_longest"]) if r["running_longest"] is not None else None}
+                                 "running_longest_seconds": float(r["running_longest"]) if r["running_longest"] is not None else None,
+                                 "unsatisfiable_pending": r["unsatisfiable"]}
         return {"groups": out}
 
     return app

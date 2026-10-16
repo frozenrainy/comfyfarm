@@ -26,4 +26,4 @@ async def test_api_submit_shapes_and_conflicts(dsn, fakes):
             assert r4.status_code == 404                               # no hint that the job exists
             h = (await c.get("/api/health/dispatch")).json()["groups"]
             g = next(iter(h.values()))
-            assert set(g) == {"pending", "idle_workers", "dispatch_idle_seconds", "running_longest_seconds"}
+            assert set(g) == {"pending", "idle_workers", "dispatch_idle_seconds", "running_longest_seconds", "unsatisfiable_pending"}

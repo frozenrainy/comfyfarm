@@ -12,6 +12,25 @@ TERMINAL = ("completed", "failed", "cancelled")
 ON_WORKER = ("dispatching", "running", "cancelling")
 
 
+REQUIREMENT_KEYS = {"backend": list, "os": list, "min_vram_gb": (int, float)}
+
+
+class BadRequirements(ValueError):
+    pass
+
+
+def validate_requirements(req: dict | None) -> dict:
+    """Unknown keys are rejected rather than ignored: a silently ignored constraint would run the job somewhere it
+    was not meant to run."""
+    req = req or {}
+    for k, v in req.items():
+        if k not in REQUIREMENT_KEYS:
+            raise BadRequirements(f"unknown requirement {k!r} (supported: {sorted(REQUIREMENT_KEYS)})")
+        if not isinstance(v, REQUIREMENT_KEYS[k]) or isinstance(v, bool):
+            raise BadRequirements(f"requirement {k!r} has the wrong type")
+    return req
+
+
 class Conflict(Exception):
     """The idempotency key / prompt_id belongs to another owner's job (D-23) → 409, nothing else revealed."""
 
@@ -44,9 +63,10 @@ async def transition(conn, job_id: int, to: str, frm: tuple[str, ...], reason: s
 
 async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | None = None, group_id: int | None = None,
                  idempotency_key: str | None = None, browser_client_id: str | None = None, front: bool = False,
-                 output_hint: str | None = None) -> tuple[dict, bool]:
+                 output_hint: str | None = None, requirements: dict | None = None) -> tuple[dict, bool]:
     """Insert a pending job. Returns (job, created). Unknown group ids degrade to 'no group' (D-22)."""
     key = str(uuid.UUID(idempotency_key)) if idempotency_key else None          # canonical lowercase (P2)
+    requirements = validate_requirements(requirements)
     prompt_id = key or str(uuid.uuid4())
     async with db.conn() as c:
         async with c.transaction():
@@ -61,9 +81,10 @@ async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | N
             agg = "max(priority) + 1" if front else "min(priority) - 1"
             prio = await c.fetchval(f"SELECT coalesce({agg}, 0) FROM jobs WHERE status IN ('pending','paused')")
             row = await c.fetchrow(
-                "INSERT INTO jobs(prompt_id, priority, group_id, owner, idempotency_key, browser_client_id, output_hint) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (prompt_id) DO NOTHING RETURNING *",
-                uuid.UUID(prompt_id), prio, group_id, owner, uuid.UUID(key) if key else None, browser_client_id, output_hint)
+                "INSERT INTO jobs(prompt_id, priority, group_id, owner, idempotency_key, browser_client_id, output_hint, requirements) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (prompt_id) DO NOTHING RETURNING *",
+                uuid.UUID(prompt_id), prio, group_id, owner, uuid.UUID(key) if key else None, browser_client_id, output_hint,
+                requirements)
             if row is None:                                    # concurrent submit with the same key
                 existing = await c.fetchrow("SELECT * FROM jobs WHERE prompt_id = $1", uuid.UUID(prompt_id))
                 if existing["owner"] != owner:

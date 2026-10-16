@@ -10,6 +10,8 @@ Rules that shape the schema:
   whole submit.
 - **The ledger is the truth**; anything in memory must be derivable from these tables (D-17).
 
+The migrations in `src/comfyfarm/migrations/` are the source of truth; this page explains them.
+
 ```sql
 CREATE TYPE job_status AS ENUM
   ('pending','dispatching','running','cancelling','completed','failed','cancelled','paused');
@@ -33,6 +35,8 @@ CREATE TABLE workers (
   current_job_id   bigint,                          -- set by the dispatcher under row lock
   capabilities     jsonb NOT NULL DEFAULT '{}',     -- backend, devices, vram, versions (from /system_stats)
   last_ok_at       timestamptz,
+  offline_since    timestamptz,                     -- start of the current offline period (D-06b)
+  deleted_at       timestamptz,                     -- soft delete; its running jobs become worker_lost
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 
@@ -51,8 +55,11 @@ CREATE TABLE jobs (
   error               jsonb,                        -- {kind, message, node_errors?, worker?}
   progress            jsonb,                        -- {value, max, node, updated} — written throttled (D-15)
   attempt             int NOT NULL DEFAULT 0,       -- dispatch attempts (connect failures)
+  requirements        jsonb NOT NULL DEFAULT '{}',  -- capability constraints (10-heterogeneous-gpus), validated at submit
+  absent_seen_at      timestamptz,                  -- first "worker does not know it" while dispatching (D-05 settling)
   created_at          timestamptz NOT NULL DEFAULT now(),
   dispatched_at       timestamptz,                  -- left the router
+  dispatch_ended_at   timestamptz,                  -- the POST returned (or failed); start of the settle/grace clocks
   started_at          timestamptz,                  -- worker reported execution_start
   finished_at         timestamptz,                  -- terminal state reached
   deleted_at          timestamptz,                  -- soft delete (hidden from lists)
