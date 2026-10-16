@@ -148,4 +148,19 @@ async def main():
         hb = (await c.get(f"{BASE}/history/{b}")).json()
         report("S6e deleted pending job leaves no history", b not in hb, f"{list(hb)[:1]}")
 
+        # S8 /api/jobs/{id}/cancel: idempotent, pending and unknown ids
+        p1, p2 = str(uuid.uuid4()), str(uuid.uuid4())
+        await c.post(f"{BASE}/prompt", json={"prompt": slow(9), "client_id": "probe", "prompt_id": p1})
+        await c.post(f"{BASE}/prompt", json={"prompt": tiny(10), "client_id": "probe", "prompt_id": p2})
+        await asyncio.sleep(0.5)
+        r = await c.post(f"{BASE}/api/jobs/{p2}/cancel")
+        report("S8 cancel API on a pending job", r.status_code == 200 and r.json().get("cancelled") is True, f"status {r.status_code} {r.text[:80]}")
+        r = await c.post(f"{BASE}/api/jobs/{str(uuid.uuid4())}/cancel")
+        report("S8b cancel API on an unknown id is a no-op", r.status_code == 200 and r.json().get("cancelled") is False, f"status {r.status_code} {r.text[:80]}")
+        r = await c.post(f"{BASE}/api/jobs/{p1}/cancel")
+        h, dt = await wait_history(c, p1, 900)
+        job = (await c.get(f"{BASE}/api/jobs/{p1}")).json()
+        report("S8c cancel API on the running job", r.json().get("cancelled") is True and job.get("status") == "cancelled",
+               f"took effect after {dt:.0f}s, status={job.get('status')}")
+
 asyncio.run(main())

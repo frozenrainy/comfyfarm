@@ -75,6 +75,7 @@ class FakeWorker:
         self.history: dict[str, Job] = {}
         self.jobs: dict[str, Job] = {}
         self.counter = 0
+        self.post_log: list[str] = []        # every POST /prompt prompt_id received (tests count duplicates)
         self.mode, self.mode_seconds = "normal", 0.0
         self.wake = asyncio.Event()
         self.app = web.Application(middlewares=[self._fault_middleware])
@@ -91,6 +92,7 @@ class FakeWorker:
             r.add_get(p + "/system_stats", self.get_system_stats)
         r.add_get("/api/jobs", self.get_jobs)
         r.add_get("/api/jobs/{pid}", self.get_job)
+        r.add_post("/api/jobs/{pid}/cancel", self.cancel_job)
         r.add_post("/_fake/mode", self.set_mode)
         self.app.on_startup.append(self._start)
 
@@ -185,11 +187,12 @@ class FakeWorker:
         return errors
 
     async def post_prompt(self, request):
+        body = await request.json()
+        pid = body.get("prompt_id") or str(uuid.uuid4())
+        self.post_log.append(pid)
         if self.mode == "drop":
             return web.json_response({"error": {"type": "prompt_outputs_failed_validation", "message": "fake drop"},
                                       "node_errors": {"1": {"errors": [{"type": "fake"}]}}}, status=400)
-        body = await request.json()
-        pid = body.get("prompt_id") or str(uuid.uuid4())
         if not UUID_RE.match(pid):
             return web.json_response({"error": {"type": "invalid_prompt_id", "message": "prompt_id must be a valid UUID",
                                                 "details": "prompt_id must be a UUID string in canonical lowercase hyphenated form; omit it to let the server generate one",
@@ -264,6 +267,20 @@ class FakeWorker:
         else:
             log.info("Prompt %s is not currently running, skipping interrupt", pid)
         return web.Response(status=200)
+
+    async def cancel_job(self, request):
+        """Idempotent: running → interrupt (cooperative), pending → removed, finished/unknown → cancelled false."""
+        pid = request.match_info["pid"]
+        if self.running and self.running.prompt_id == pid:
+            self.running.interrupt = True
+            return web.json_response({"cancelled": True})
+        for j in self.pending:
+            if j.prompt_id == pid:
+                self.pending.remove(j)
+                j.status, j.ended = "cancelled", time.time()
+                await self.broadcast_status()
+                return web.json_response({"cancelled": True})
+        return web.json_response({"cancelled": False})
 
     async def get_object_info(self, request):
         return web.json_response({k: {"input": {"required": {n: [t] for n, t in spec.items()}}, "output": out,

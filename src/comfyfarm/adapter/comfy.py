@@ -1,0 +1,199 @@
+"""ComfyUI worker protocol. Every other module sees classified outcomes, never raw HTTP exceptions.
+
+The facts this module relies on are listed (and verified) in docs/design/04-worker-protocol.md.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+DISPATCH_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0)
+QUERY_TIMEOUT = httpx.Timeout(connect=3.0, read=3.0, write=3.0, pool=3.0)
+
+# connect-phase failures: the request never reached the process
+CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+# the TCP connection existed: the process is there but did not answer in time / broke mid-way
+BUSY_ERRORS = (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.ReadError, httpx.WriteError,
+               httpx.RemoteProtocolError)
+
+
+# ---- outcomes -------------------------------------------------------------------------------------------------------
+@dataclass
+class Accepted:
+    number: int | None = None
+
+
+@dataclass
+class Rejected:                      # 4xx: final, identical on every worker (D-07)
+    status: int
+    error: dict = field(default_factory=dict)
+    node_errors: dict = field(default_factory=dict)
+
+
+@dataclass
+class Unreachable:                   # never reached the process → safe to re-queue
+    reason: str
+
+
+@dataclass
+class Ambiguous:                     # may or may not have been accepted → ask the worker (D-05)
+    reason: str
+
+
+SubmitOutcome = Accepted | Rejected | Unreachable | Ambiguous
+
+
+@dataclass
+class JobState:
+    """What the worker says about one prompt_id. status None = the worker does not know it (404)."""
+    status: str | None                        # pending | in_progress | completed | failed | cancelled | None
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class NoAnswer:                      # worker did not answer the question (busy or dead) — not evidence of absence
+    reason: str
+
+
+def classify_exception(e: Exception) -> str:
+    """'dead' | 'busy' — the health classification of D-11. Unknown exceptions count as busy."""
+    if isinstance(e, CONNECT_ERRORS):
+        return "dead"
+    return "busy"
+
+
+def _ename(e: Exception) -> str:
+    return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__   # httpx messages are often empty
+
+
+class ComfyAdapter:
+    def __init__(self, client: httpx.AsyncClient | None = None):
+        self.http = client or httpx.AsyncClient()
+
+    async def close(self):
+        await self.http.aclose()
+
+    async def submit(self, base_url: str, prompt_id: str, prompt: dict, extra_data: dict, client_id: str) -> SubmitOutcome:
+        body = {"prompt": prompt, "prompt_id": prompt_id, "client_id": client_id, "extra_data": extra_data}
+        try:
+            r = await self.http.post(f"{base_url}/prompt", json=body, timeout=DISPATCH_TIMEOUT)
+        except CONNECT_ERRORS as e:
+            return Unreachable(_ename(e))
+        except Exception as e:                                   # read/write timeout, reset after send, …
+            return Ambiguous(_ename(e))
+        if r.status_code == 200:
+            try:
+                return Accepted(r.json().get("number"))
+            except ValueError:
+                return Accepted(None)
+        if 400 <= r.status_code < 500:
+            try:
+                j = r.json()
+            except ValueError:
+                j = {}
+            return Rejected(r.status_code, j.get("error") or {}, j.get("node_errors") or {})
+        return Ambiguous(f"HTTP {r.status_code}")                # 5xx: the worker may have queued it
+
+    async def job_state(self, base_url: str, prompt_id: str, jobs_api: bool = True) -> JobState | NoAnswer:
+        """Authoritative state of one job on the worker (P4). Older ComfyUI without /api/jobs: /queue + /history."""
+        if not jobs_api:
+            return await self._job_state_legacy(base_url, prompt_id)
+        try:
+            r = await self.http.get(f"{base_url}/api/jobs/{prompt_id}", timeout=QUERY_TIMEOUT)
+        except Exception as e:
+            return NoAnswer(_ename(e))
+        if r.status_code == 404:                                 # {"error": "Job not found"} — verified on 0.41.0
+            return JobState(None)
+        if r.status_code != 200:
+            return NoAnswer(f"HTTP {r.status_code}")
+        j = r.json()
+        return JobState(j.get("status"), j)
+
+    async def _job_state_legacy(self, base_url: str, prompt_id: str) -> JobState | NoAnswer:
+        try:
+            q = (await self.http.get(f"{base_url}/queue", timeout=QUERY_TIMEOUT)).json()
+            if any(x[1] == prompt_id for x in q.get("queue_running", [])):
+                return JobState("in_progress")
+            if any(x[1] == prompt_id for x in q.get("queue_pending", [])):
+                return JobState("pending")
+            h = (await self.http.get(f"{base_url}/history/{prompt_id}", timeout=QUERY_TIMEOUT)).json().get(prompt_id)
+        except Exception as e:
+            return NoAnswer(_ename(e))
+        if not h:
+            return JobState(None)
+        st = h.get("status", {})
+        msgs = [m[0] for m in st.get("messages", [])]
+        if "execution_interrupted" in msgs:                     # P8
+            return JobState("cancelled", h)
+        return JobState("completed" if st.get("completed") else "failed", h)
+
+    async def supports_jobs_api(self, base_url: str) -> bool | None:
+        try:
+            r = await self.http.get(f"{base_url}/api/jobs", params={"limit": 1}, timeout=QUERY_TIMEOUT)
+            return r.status_code == 200
+        except Exception:
+            return None
+
+    async def cancel(self, base_url: str, prompt_id: str, jobs_api: bool = True) -> bool | None:
+        """Cancel wherever the job is (pending or running). True = something was cancelled, False = nothing to
+        cancel (finished/unknown), None = no answer. Interrupt is cooperative (P7): the job may run on for a while."""
+        if jobs_api:
+            try:
+                r = await self.http.post(f"{base_url}/api/jobs/{prompt_id}/cancel", timeout=QUERY_TIMEOUT)
+                if r.status_code == 200:
+                    return bool(r.json().get("cancelled"))
+            except Exception as e:
+                log.warning("cancel %s on %s: %s", prompt_id, base_url, _ename(e))
+                return None
+        deleted = await self.delete_pending(base_url, prompt_id)      # older ComfyUI: no cancel API
+        interrupted = await self.interrupt(base_url, prompt_id)
+        return deleted or interrupted
+
+    async def history(self, base_url: str, prompt_id: str) -> dict | None:
+        try:
+            r = await self.http.get(f"{base_url}/history/{prompt_id}", timeout=QUERY_TIMEOUT)
+            return r.json().get(prompt_id) if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    async def interrupt(self, base_url: str, prompt_id: str) -> bool:
+        try:
+            r = await self.http.post(f"{base_url}/interrupt", json={"prompt_id": prompt_id}, timeout=QUERY_TIMEOUT)
+            return r.status_code == 200
+        except Exception as e:
+            log.warning("interrupt %s on %s failed: %s", prompt_id, base_url, _ename(e))
+            return False
+
+    async def delete_pending(self, base_url: str, prompt_id: str) -> bool:
+        try:
+            r = await self.http.post(f"{base_url}/queue", json={"delete": [prompt_id]}, timeout=QUERY_TIMEOUT)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    async def probe(self, base_url: str) -> tuple[bool, str | None, str]:
+        """Health probe: (ok, failure_kind 'busy'|'dead'|None, detail)."""
+        try:
+            r = await self.http.get(f"{base_url}/queue", timeout=QUERY_TIMEOUT)
+        except Exception as e:
+            return False, classify_exception(e), _ename(e)
+        if r.status_code == 200:
+            return True, None, "ok"
+        return False, "busy", f"HTTP {r.status_code}"
+
+    async def capabilities(self, base_url: str) -> dict | None:
+        try:
+            r = await self.http.get(f"{base_url}/system_stats", timeout=QUERY_TIMEOUT)
+            s = r.json()
+        except Exception:
+            return None
+        system, devices = s.get("system", {}), s.get("devices", [])
+        torch = system.get("pytorch_version", "")
+        backend = "rocm" if "rocm" in torch else "cuda" if "+cu" in torch else (devices[0].get("type") if devices else "cpu")
+        return {"backend": backend, "torch": torch, "comfyui": system.get("comfyui_version"), "os": system.get("os"),
+                "argv": system.get("argv"),
+                "devices": [{"name": d.get("name"), "type": d.get("type"), "vram_total": d.get("vram_total")} for d in devices]}

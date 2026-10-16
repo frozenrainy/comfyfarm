@@ -6,9 +6,10 @@ time, verify, and stop at the first failure.
 ## Shared contract: `comfy-upgrade/1`
 
 ComfyFarm implements the **router side** of `comfy-upgrade/1`, a contract shared with another farm router so both can
-use the same builder, launcher and artifact store. Whether the contract text itself ships in this repository
-(`docs/contracts/comfy-upgrade-1.md`) is pending agreement with its co-owner; until then this page summarises only what
-the router must provide:
+use the same builder, launcher and artifact store. The full contract text (v1.1) is in
+[`docs/contracts/comfy-upgrade-1.md`](../contracts/comfy-upgrade-1.md); this repository's copy is the canonical one.
+Changes require agreement of both implementations and follow the contract's versioning rules. What the router must
+provide:
 
 1. **Render** — `GET /api/worker_profile?instance=` returns the exact `argv`/`env`/`sync`/`files`/`require` for that
    instance with a content hash `rev`; 403 for a caller that is not the assigned host, 404 for no assignment.

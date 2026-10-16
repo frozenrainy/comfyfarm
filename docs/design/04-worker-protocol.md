@@ -26,6 +26,7 @@ Raw probe output: [`docs/research/`](../research/).
 | P15 | `GET /system_stats` → `system.argv` is `sys.argv` **without** the interpreter; `system.comfyui_version`, `system.pytorch_version`, `devices[]` (type, name, vram) | probe 0.41.0 | Version badge for rollouts ([07](07-rollout-and-upgrades.md)); capability detection ([10](10-heterogeneous-gpus.md)) |
 | P16 | Live previews are off unless `--preview-method` or `extra_data.preview_method` enables them | prod | Router sets `extra_data.preview_method` per job (configurable) |
 | P17 | `/internal/logs/raw` returns the worker's recent log entries with timestamps | observed on 0.38.2 (Windows, CUDA) | Diagnostics without SSH; never needed for control flow |
+| P19 | `POST /api/jobs/{id}/cancel` cancels a job wherever it is (pending → removed, running → interrupt) and is idempotent: unknown or finished ids return 200 `{"cancelled": false}` | probe 0.41.0 (S8) | Preferred cancel path; `/queue delete` + `/interrupt` remain the fallback for older ComfyUI |
 | P18 | Custom nodes are imported **before** `PromptServer.add_routes()` | source 0.41.0 (`main.py`) | A custom node can replace the `/ws` route definition — basis of the worker extension |
 
 ## Worker extension (`comfyfarm_worker`, optional custom node)

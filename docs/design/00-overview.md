@@ -1,6 +1,6 @@
 # 00 — Overview
 
-> Status: design phase (2026-10). Working name: **ComfyFarm**. Nothing here is implemented yet; every claim about
+> Status: design phase (2026-10). Nothing here is released yet; every claim about
 > ComfyUI behaviour is either verified by `spikes/protocol_probe.py` (see [04](04-worker-protocol.md)) or marked *unverified*.
 
 ## What it is

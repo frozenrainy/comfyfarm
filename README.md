@@ -1,4 +1,4 @@
-# ComfyFarm (working name)
+# ComfyFarm
 
 A job router for a farm of [ComfyUI](https://github.com/comfyanonymous/ComfyUI) GPU workers — CUDA and ROCm side by
 side. Users keep the stock ComfyUI frontend; ComfyFarm queues their jobs, hands each one to a suitable idle worker, and
