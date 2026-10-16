@@ -48,6 +48,19 @@ class Reconciler:
                     changed |= await self._apply(c, r, ans, now)
         if changed and self.wake:
             self.wake.set()
+        await self.collect_outputs()
+
+    async def collect_outputs(self):
+        """Real outputs for recently completed jobs (history synthesis, display paths D-10, /api/view routing)."""
+        async with self.db.conn() as c:
+            rows = await c.fetch("SELECT j.id, j.prompt_id, w.base_url FROM jobs j JOIN workers w ON w.id = j.worker_id "
+                                 "WHERE j.status = 'completed' AND j.outputs IS NULL AND j.finished_at > now() - interval '1 hour' "
+                                 "ORDER BY j.finished_at DESC LIMIT 20")
+        for r in rows:
+            h = await self.adapter.history(r["base_url"], str(r["prompt_id"]))
+            outputs = (h or {}).get("outputs")
+            async with self.db.conn() as c:     # {} marks "asked, nothing there" so the job is not asked again
+                await c.execute("UPDATE jobs SET outputs = $2 WHERE id = $1 AND outputs IS NULL", r["id"], outputs or {})
 
     async def _ask(self, r: dict, now: datetime):
         if r["wid"] is None or r["deleted_at"] is not None or not r["enabled"]:
@@ -81,8 +94,7 @@ class Reconciler:
                     await c.execute("UPDATE jobs SET started_at = coalesce(started_at, now()) WHERE id = $1", jid)
                 return False
             case "completed":
-                return await transition(c, jid, "completed", ("dispatching", "running", "cancelling"), "worker: completed",
-                                        outputs=ans.raw.get("preview_output") and {"preview": ans.raw["preview_output"]})
+                return await transition(c, jid, "completed", ("dispatching", "running", "cancelling"), "worker: completed")
             case "failed":
                 return await transition(c, jid, "failed", ("dispatching", "running", "cancelling"), "worker: failed",
                                         error=error_doc("execution", "execution error on the worker",

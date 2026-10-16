@@ -115,12 +115,15 @@ def create_app(settings: Settings) -> FastAPI:
         await router.stop()
 
     app = FastAPI(title="ComfyFarm", lifespan=lifespan)
+    from .api.stock import make_router
 
     def identity(user: str | None) -> str:
         # M1: development identity only (loopback). Real identity providers arrive in M2 (docs/design/08).
         if settings.dev_identity is None:
             raise HTTPException(401, "no identity provider configured")
         return user or settings.dev_identity
+
+    app.include_router(make_router(router, lambda user: identity(user)))
 
     @app.exception_handler(Busy)
     async def busy(_req: Request, _exc: Busy):
@@ -180,6 +183,19 @@ def create_app(settings: Settings) -> FastAPI:
                                    "ON CONFLICT (name) DO UPDATE SET requirements = excluded.requirements RETURNING id",
                                    body.name, req)
         return {"id": gid, "name": body.name, "requirements": req}
+
+    @app.post("/api/admin/groups/{name}/object_info/refresh")
+    async def refresh_object_info(name: str, x_comfyfarm_user: str | None = Header(default=None)):
+        """Manual refresh (D-20): after node changes. Never automatic on a timer; a failure keeps the old snapshot."""
+        admin(x_comfyfarm_user)
+        async with router.db.conn() as c:
+            gid = await c.fetchval("SELECT id FROM worker_groups WHERE name = $1", name)
+        if gid is None:
+            raise HTTPException(404, "unknown group")
+        data = await router.refresh_snapshot(gid)
+        if data is None:
+            raise HTTPException(503, "no worker answered; the previous snapshot is kept")
+        return {"refreshed": True, "bytes": len(data)}
 
     @app.get("/api/admin/workers")
     async def list_workers(x_comfyfarm_user: str | None = Header(default=None)):
