@@ -27,8 +27,14 @@ for f in files:
     r = c.post(f"{base}/prompt", json={"prompt": json.load(open(f)), "prompt_id": pid, "client_id": "timer"})
     if r.status_code != 200:
         print(f, "rejected", r.text[:500]); continue
+    blocked = 0.0
     while True:
-        j = c.get(f"{base}/api/jobs/{pid}").json()
+        t = time.time()
+        try:
+            j = c.get(f"{base}/api/jobs/{pid}", timeout=120).json()
+        except httpx.TimeoutException:          # worker event loop blocked (model load, tiled VAE): busy, not dead (P14)
+            j = {}
+        blocked = max(blocked, time.time() - t)
         if j.get("status") in ("completed", "failed", "cancelled"):
             break
         time.sleep(3)
@@ -42,5 +48,5 @@ for f in files:
             steps.setdefault(total, []).append(float(v) if unit == "s/it" else 1 / float(v))
     err = j.get("execution_error")
     print(f"{f}: {j['status']} wall {wall:.0f}s | peak RAM {peaks.get('ram_used', 0):.1f} GB, VRAM {peaks.get('vram_used', 0):.1f} GB | "
-          f"s/it by loop length {{{', '.join(f'{k}: {[round(x, 1) for x in v]}' for k, v in steps.items())}}}" + (f" | error {err}" if err else ""))
+          f"longest status reply {blocked:.0f}s | s/it by loop length {{{', '.join(f'{k}: {[round(x, 1) for x in v]}' for k, v in steps.items())}}}" + (f" | error {err}" if err else ""))
     sys.stdout.flush()
