@@ -3,9 +3,12 @@
 ## Router ↔ worker WebSocket
 
 - One connection per worker, `clientId = uuid5(router_instance_name, worker_id)` (D-13), so after a router restart the
-  worker keeps delivering events of jobs that were submitted before the restart. Requires the reconnect fix (P11/D-14):
-  if the worker extension reports it is not installed, the router logs a warning and falls back to a per-process random
-  id (correct but loses progress of jobs started before a restart).
+  worker keeps delivering events of jobs that were submitted before the restart.
+- Every reconnect with the same id — after a router restart **or** inside one process after a ping timeout — can hit the
+  stock reconnect race (P11), whatever the id scheme. The worker fix (D-14) is therefore needed for reliable progress in
+  general, not as a precondition of deterministic ids. Without it the router warns on the dashboard ("progress may
+  freeze after reconnects"), keeps the long ping timeout to make reconnects rare, and relies on reconcile for job
+  outcomes (outcomes stay correct; only live progress can freeze).
 - Jobs are POSTed with that `client_id`, so their events arrive on this socket only (P10).
 - First message: `feature_flags` with `supports_preview_metadata` (P12) so binary preview frames carry the `prompt_id`.
 - `ping_interval=20 s`, `ping_timeout=300 s` (P14): a worker that is loading a model must not be disconnected. Not

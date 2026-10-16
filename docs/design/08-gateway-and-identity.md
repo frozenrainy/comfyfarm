@@ -15,6 +15,22 @@ origin must be something that can split traffic:
 Without a UI worker (topology A), user-data paths go to a designated GPU worker; the screen then freezes during model
 loads on that worker — acceptable for a homelab, documented.
 
+The `Comfy-User` header sent to any worker is always set by the gateway from the identity; a browser-supplied value is
+discarded.
+
+**Several UI workers sharing one user directory** (failover candidates) need care: stock ComfyUI reads `users.json` only
+at start and rewrites the whole file from memory when a user is added, so users created on another UI worker get
+deleted, unknown users produce 500 and the same name gets a second id. Sharing requires locking + merge-on-write +
+change detection (the worker extension provides it); with a single UI worker this does not apply.
+
+## Node definitions per group
+
+`/object_info` snapshots are per group (D-20). The gateway answers `/api/object_info` with the snapshot of the user's
+**current group** (chosen in the frontend extension, sent as a header, remembered per user). Switching groups makes the
+extension reload node definitions (a page reload in the first version). Users who submit without a group see the
+snapshot of the site's configured default group; ungrouped jobs are still dispatched by the group policy (D-03), so the
+default group should be the most complete one.
+
 ## Identity providers
 
 Interface: `identify(request) -> Identity{user, roles}` or reject. Roles matter as much as the user: rollout, profiles,
@@ -23,7 +39,7 @@ operations open.
 
 | Provider | Use |
 |---|---|
-| `trusted-header` | behind an authenticating reverse proxy (`X-Forwarded-User`, roles from a header or a mapping file); the gateway must only accept connections from the proxy |
+| `trusted-header` | behind an authenticating reverse proxy (`X-Forwarded-User`, roles from a header or a mapping file); the gateway must only accept connections from the proxy **and** must strip any identity header the client sent itself before applying the proxy's value |
 | `oidc` | direct login (authorization code flow, session cookie) |
 | `local` | users in the database with bcrypt passwords; small sites |
 | `dev-none` | single user `dev`, refuses to start unless bound to 127.0.0.1 |

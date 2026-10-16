@@ -6,7 +6,9 @@ layers:
 ## 1. Protocol probe (real ComfyUI, no GPU needed)
 
 `spikes/protocol_probe.py <url>` checks every fact in [04](04-worker-protocol.md) against a running ComfyUI using tiny
-core-node workflows. Run it against each ComfyUI version we support; its output is committed under `docs/research/`.
+core-node workflows. Run it against each ComfyUI version we support; its output is committed under `docs/research/`. The probe refuses to run
+against a worker whose queue is not empty: one early run overlapped a previous run's slow job and produced four false
+FAILs (wrong job running, events arriving late) — results against a shared worker are meaningless.
 Every check that can pass trivially has a control: e.g. the reconnect-race check (S3) is paired with a single-socket
 control (S3b) that must receive events — otherwise "0 events" could just mean "no events at all".
 

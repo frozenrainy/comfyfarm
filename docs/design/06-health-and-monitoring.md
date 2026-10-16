@@ -34,8 +34,8 @@ group must not be averaged away by another group that is still busy.
 |---|---|---|
 | `pending` | count of dispatchable pending jobs (same rule as the dispatcher, D-03) | metric and dispatcher disagreeing about ungrouped jobs |
 | `idle_workers` | online, not in maintenance, no current job | — |
-| `dispatch_idle_seconds` | `min(now - last_dispatch_at, oldest_dispatchable_pending_age)`, only when `idle_workers > 0` and `pending > 0`; otherwise `null` | "oldest pending age" alone measures backlog, not stall; `updated_at` would act as a heartbeat |
-| `running_longest_seconds` | `now - started_at` of the oldest running job | measuring from `created_at` reports lifetime incl. queueing, not execution |
+| `dispatch_idle_seconds` | `min(now - last_dispatch_at, oldest_dispatchable_pending_age)` where `last_dispatch_at = max(dispatched_at)` of the group, only when `idle_workers > 0` and `pending > 0`; otherwise `null` | "oldest pending age" alone measures backlog, not stall; `updated_at` would act as a heartbeat; `started_at` (execution start) would show a job that is loading its model as "nothing dispatched" |
+| `running_longest_seconds` | oldest of: `now - started_at` for `running`, `now - dispatched_at` for `dispatching` | measuring from `created_at` reports lifetime incl. queueing; looking at `started_at` only hides jobs stuck in `dispatching` |
 | `rollout_started_at` | start of an active rollout, else `null` | a boolean "suppress alerts" flag that gets stuck silences monitoring forever |
 
 Rules learned the hard way:

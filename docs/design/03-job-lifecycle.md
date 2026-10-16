@@ -32,7 +32,7 @@ The adapter maps every POST to exactly one outcome. The mapping is the heart of 
 | `Accepted(number)` | 200 | dispatching → running | — |
 | `Rejected(status, node_errors)` | 4xx | → failed (node_errors attached) | Same answer on every worker; retrying loops forever (D-07) |
 | `Unreachable` | connect refused / connect timeout / DNS | → pending, `attempt+1`; worker marked dead-suspect | Request never reached the process |
-| `Ambiguous` | read timeout, connection reset after send, 5xx | ask worker `/api/jobs/{id}` (bounded): present → running · absent → pending · no answer → **stay `dispatching`** | Worker may be executing it (D-05); a blind retry would run it twice (P3) |
+| `Ambiguous` | read timeout, connection reset after send, 5xx | ask worker `/api/jobs/{id}` (bounded): present → running · absent **twice, the second ≥ 5 s after the POST ended** → pending · anything else → **stay `dispatching`** | Worker may be executing it (D-05); a quick reset can mean "still parsing the body"; a blind retry would run it twice (P3) |
 | `Bug` | 400 `invalid_prompt_id` | → failed + alert | Router generated a non-canonical id (P2) |
 
 `attempt` caps connect-failure re-queues (default 5) so a job whose target group is entirely unreachable eventually
@@ -53,6 +53,10 @@ Every 5 s, for jobs in `dispatching | running | cancelling`, group by worker and
 | no answer (busy worker) | keep; busy is judged by health, not here |
 
 *grace* = dispatch timeout (10 s) + reconcile period (5 s) + margin = 30 s by default.
+
+**Worker gone (D-06b):** reconcile needs an answer from the worker. Jobs on a worker that has been offline for more than
+10 min (configurable), or that was deleted or disabled, fail with kind `worker_lost` — otherwise they would stay
+`running` forever.
 
 WS `execution_success` / `execution_error` / `execution_interrupted` apply the same transitions immediately; the
 reconcile loop then only confirms. Transitions are idempotent `UPDATE … WHERE status IN (…)` so the two paths cannot

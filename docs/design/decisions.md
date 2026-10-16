@@ -1,8 +1,7 @@
 # Decision log
 
-Each entry: **decision** — why — consequence for the code. Entries marked *(prod)* come from incidents in an existing
-production ComfyUI farm (≈10 GPU workers, jobs from minutes to several hours, workflows larger than 400 KB) whose
-operators shared their design rationale with this project. Entries marked *(probe)* were verified against stock ComfyUI
+Each entry: **decision** — why — consequence for the code. Entries marked *(prod)* come from incidents in a production
+farm of about ten GPU workers whose operators shared their design rationale with this project. Entries marked *(probe)* were verified against stock ComfyUI
 with `spikes/protocol_probe.py`. Entries marked *(new)* are choices made for this rewrite.
 
 ## Queue and dispatch
@@ -34,11 +33,20 @@ on the worker and produced output; the user resubmitted it three times. ComfyUI 
 *(probe S1)*, so after any ambiguous error the router asks the worker (`/api/jobs/{id}`, `/queue`) instead of guessing.
 **Resubmitting the same `prompt_id` is accepted and executes again** *(probe S1d)* — the worker does not deduplicate, so
 "just retry" is never safe. → Branches: connect error ⇒ back to pending; read error ⇒ ask: accepted ⇒ running,
-absent ⇒ pending, cannot tell ⇒ stay running (the lost-job check resolves it).
+absent ⇒ pending, cannot tell ⇒ stay `dispatching` (the lost-job check resolves it). **"Absent" needs settling time:**
+when the connection breaks quickly (reset right after sending), the worker may still be parsing the body and answer
+"absent"; re-queueing then runs the job twice (P3). "Absent" counts only if seen twice, the second time at least 5 s
+after the POST ended; before that it is "cannot tell". (The old system asked only after a 10 s timeout, so this window
+never opened.)
 
 **D-06 A lost job becomes `failed` with a reason, never `pending`.** *(prod)* — If the job is what crashed the worker,
 re-queueing it would walk through the farm crashing workers. → After a grace period (dispatch timeout + check period +
 margin, default 30 s) a running job the worker does not know is failed with "lost — rerun if needed".
+
+**D-06b A job whose worker is gone is failed too.** *(prod)* — The lost-job judgement needs an answer from the worker; a
+worker that is permanently dead, deleted or disabled never answers, and its jobs would stay `running` forever. → If the
+worker has been offline longer than N minutes (default 10), or is deleted/disabled, its `dispatching|running|cancelling`
+jobs fail with kind `worker_lost`.
 
 **D-07 4xx from a worker is final.** *(prod, probe)* — A 400 is a workflow validation error and is identical on every
 worker; returning it to pending produced an infinite re-dispatch loop every few seconds (the worker stayed healthy, so
@@ -52,7 +60,7 @@ reconciliation against `/api/jobs` is the source of truth. Interrupted jobs are 
 open question in the old design; history shows `status_str: "error"` + an `execution_interrupted` message *(probe S6d)*).
 
 **D-09 Interrupt is cooperative; cancellation is a state, not an event.** *(probe)* — `/interrupt` with a `prompt_id`
-only affects that job *(probe S6c)*, but it takes effect between nodes; a single long node ran 260 s after the request.
+only affects that job *(probe S6c)*, but it takes effect between nodes; a single long node kept running 78–260 s after the request.
 → `cancelling` state until the worker reports the outcome; the worker stays busy meanwhile.
 
 **D-10 Display paths: estimate at submit, correct from the worker at completion.** *(prod)* — Users build output paths
@@ -75,10 +83,12 @@ serially, isolate optional collectors (VRAM, logs).
 
 **D-13 The router's worker WebSocket uses a deterministic `clientId`.** *(prod)* — With a random id kept in memory, a
 router restart froze the progress of every running job forever (the worker sends events to the id the job was
-submitted with). → `client_id = uuid5(router_instance, worker_id)`. **Precondition:** the worker must have the reconnect
-fix (D-14), otherwise the deterministic id makes the race reachable.
+submitted with). → `client_id = uuid5(router_instance, worker_id)`. This survives restarts; it does **not** create the
+reconnect race of D-14 — that race happens with *any* id scheme whenever the same id reconnects, including a reconnect
+inside one router process after a ping timeout. Without the worker fix there is no id scheme that is both race-free and
+restart-safe; the only mitigation is a long ping timeout so reconnects are rare.
 
-**D-14 Fix the reconnect race at the worker, and upstream.** *(prod, probe)* — ComfyUI's WS handler pops `sockets[sid]`
+**D-14 Fix the reconnect race at the worker, and upstream — it is needed whatever the id scheme.** *(prod, probe)* — ComfyUI's WS handler pops `sockets[sid]`
 in `finally` without checking it is still the same socket; the old connection's cleanup deletes the new registration
 and every later event for that client is dropped without an error. Reproduced on 0.41.0: the second connection received
 0 job events while a single-connection control received them *(probe S3/S3b)*. → (1) a one-line upstream PR
@@ -119,14 +129,16 @@ good snapshot with an error; show freshness in the UI.
 ## Submission
 
 **D-21 Bounded waits everywhere: pool acquire 5 s ⇒ 503 + Retry-After.** *(prod)* — Unbounded waits turned congestion into
-infinite spinners.
+infinite spinners. `asyncpg`'s `pool.acquire()` has no timeout by default (the same shape as the original incident with
+another driver) → one wrapper (`db.conn()`) is the only way to get a connection and always passes `timeout=5`.
 
 **D-22 Unknown group ids degrade, they do not reject.** *(prod)* — A deleted group id cached in a browser made every
 submit fail with an FK error for that user. → Treat as "no group" and say so in the response.
 
 **D-23 Idempotency key chosen by the client, not content comparison.** *(prod)* — A fixed seed with batch N legitimately
 submits identical bodies N times. → One UUID per click, retried on 503/connection errors with the same key; the server
-returns the existing job for (user, key) within 10 minutes. The key doubles as the `prompt_id`.
+returns the existing job for (user, key). The key doubles as the `prompt_id`, which is globally unique: a key that
+belongs to **another user's** job is answered with 409 (no 500, and no hint whether it exists).
 
 **D-24 Validate before queueing, on a worker of the target group.** *(prod)* — Without it, a broken workflow is accepted,
 waits in the queue, and fails at dispatch time with no node highlighted. A CPU-only UI worker cannot validate because
@@ -137,11 +149,17 @@ answers (the worker validates again at dispatch).
 
 **D-25 Postgres, UTC, dedicated timestamps.** *(new)* — The previous system leaned on MySQL quirks (same-value UPDATE does
 not touch `updated_at`, so `updated_at` silently meant "completion time"), and two clocks (DB session TZ vs host TZ) made
-failover jump 9 h. → `timestamptz` everywhere, UTC, `created_at/dispatched_at/started_at/finished_at` columns with one
+timestamps jump by the timezone offset at failover. → `timestamptz` everywhere, UTC, `created_at/dispatched_at/started_at/finished_at` columns with one
 meaning each; `updated_at` is for humans only.
 
 **D-26 Single node by default; HA is a module.** *(new)* — Small sites do not need two database nodes. The core asks one
 question, "may I write?", through an interface; the HA module answers it (Postgres `pg_is_in_recovery()`).
+**HA requirements (not optional for no-duplicate guarantees):** zero duplicates in the original system came from the
+pair "commit `running` before dispatch" (D-04) **and** semi-synchronous replication — the standby had the row before the
+router saw the commit. With asynchronous streaming replication a freshly promoted primary can miss a `dispatching` row,
+see the job as pending and dispatch it again, and P3 makes the worker run it twice. The HA module therefore requires
+`synchronous_commit = on` (or `remote_apply`) with `synchronous_standby_names`, plus **fencing** so the old primary's
+router cannot write (the original system checked for a virtual-IP conflict with `arping -D` right before promotion).
 
 **D-27 Schema before code; migrations are automatic and idempotent.** *(prod)* — Deploying code that referenced a table
 before the table existed broke the whole dashboard. → Versioned migrations applied at start under an advisory lock.

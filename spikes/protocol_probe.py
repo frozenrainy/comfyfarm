@@ -12,8 +12,8 @@ def tiny(seed=0, size=64, blur=1):
             "2": {"class_type": "ImageBlur", "inputs": {"image": ["1", 0], "blur_radius": blur, "sigma": 1.0}},
             "3": {"class_type": "PreviewImage", "inputs": {"images": ["2", 0]}}}
 
-def slow(seed=0):  # a few seconds on CPU — long enough to interrupt / observe running state
-    return tiny(seed, size=3072, blur=31)
+def slow(seed=0):  # one long single node (tens of seconds on CPU) — interrupt cannot cut it (P7)
+    return tiny(seed, size=2048, blur=25)
 
 def report(tag, ok, detail):
     print(f"[{'PASS' if ok is True else 'FAIL' if ok is False else 'INFO'}] {tag}: {detail}")
@@ -40,6 +40,10 @@ async def wait_history(c, pid, timeout=60):
 
 async def main():
     async with httpx.AsyncClient(timeout=60) as c:
+        q = (await c.get(f"{BASE}/queue")).json()
+        if q["queue_running"] or q["queue_pending"]:   # results against a busy worker are meaningless (shared-worker trap)
+            print(f"[ABORT] worker queue not empty (running {len(q['queue_running'])}, pending {len(q['queue_pending'])}) — wait or clear it")
+            return
         ver = (await c.get(f"{BASE}/system_stats")).json()["system"]["comfyui_version"]
         report("version", None, ver)
 

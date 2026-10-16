@@ -46,8 +46,10 @@ rollout tasks. The gateway is a second entrypoint of the same package (so a site
 | object_info | on demand | refresh per group snapshot (manual, after rollout, or node-set change) |
 | rollout | on demand | one task per rollout |
 
-Wake-ups: submit and finish notify the dispatcher via Postgres `LISTEN/NOTIFY`, so dispatch latency does not depend on
-the polling period (and a second router instance in HA sees the same notifications).
+Wake-ups: submit and finish notify the dispatcher via Postgres `LISTEN/NOTIFY` so dispatch does not wait for the next
+poll. Notifications are only an accelerator — the 1 s poll is the source of truth: a NOTIFY sent while the listener
+connection is down is lost, and NOTIFY is not delivered to (nor can it be listened on) a streaming-replication standby.
+A standby router does not dispatch anyway.
 
 ## Deployment topologies
 
@@ -58,8 +60,8 @@ so the screen never freezes while a GPU worker loads a model. Validation then *m
 previews must be routed to the executing worker.
 
 **C. HA (optional).** Two router nodes, Postgres streaming replication, a virtual IP. The router core only knows
-`writable()`; promotion/fencing tooling is a separate operations package. See [decisions D-26](decisions.md) and the HA
-notes in [06](06-health-and-monitoring.md).
+`writable()`; promotion/fencing tooling is a separate operations package. **Synchronous replication and fencing are
+requirements**, not tuning: without them a failover can dispatch the same job twice ([D-26](decisions.md)).
 
 ## Data flow of one job
 

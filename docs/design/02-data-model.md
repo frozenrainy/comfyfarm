@@ -97,8 +97,9 @@ Rollout tables (`profiles`, `profile_assignments`, `rollouts`, `rollout_steps`, 
 
 - **Priority:** append = `min(priority) - 1` within pending, "run next" = `max + 1`, retry = append. A gap-free integer is
   not needed; `bigint` never runs out in practice.
-- **Idempotency** (D-23): unique `(owner, idempotency_key)`; a resubmit inside the window returns the existing row. The
-  10-minute window is enforced in SQL (`created_at > now() - interval '10 min'`), older keys may be reused.
+- **Idempotency** (D-23): unique `(owner, idempotency_key)`; a resubmit returns the existing row. Keys are never reused
+  (the key is also the globally unique `prompt_id`). A key that collides with **another owner's** job returns 409
+  without revealing whether that job exists; the insert is `ON CONFLICT DO NOTHING` + lookup, never a 500.
 - **Why `dispatching` is a state:** it is the window between commit and the worker's answer. Reconcile treats it like
   `running` but with a shorter grace period, and the dashboard can show "sending".
 - **Why `worker.current_job_id`:** the dispatcher locks the worker row; a worker with a current job is not idle even if
