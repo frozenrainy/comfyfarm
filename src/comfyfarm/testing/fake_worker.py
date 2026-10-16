@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import re
+import struct
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -157,6 +158,22 @@ class FakeWorker:
                     await ws.send_str(json.dumps({"type": event, "data": data}))
                 except ConnectionError:
                     pass
+
+    async def send_preview(self, prompt_id: str, node_id: str, sid: str | None):
+        """A tiny JPEG-tagged frame per step: type 4 with metadata if the client negotiated it, else type 1 (P12)."""
+        ws = self.sockets.get(sid) if sid else None
+        if ws is None or ws.closed:
+            return
+        image = b"\xff\xd8fake-jpeg\xff\xd9"
+        if self.sockets_metadata.get(sid, {}).get("feature_flags", {}).get("supports_preview_metadata"):
+            meta = json.dumps({"prompt_id": prompt_id, "node_id": node_id, "image_type": "image/jpeg"}).encode()
+            frame = struct.pack(">I", 4) + struct.pack(">I", len(meta)) + meta + image
+        else:
+            frame = struct.pack(">I", 1) + struct.pack(">I", 1) + image
+        try:
+            await ws.send_bytes(frame)
+        except ConnectionError:
+            pass
 
     def queue_info(self):
         return {"exec_info": {"queue_remaining": len(self.pending) + (1 if self.running else 0)}}
@@ -319,9 +336,18 @@ class FakeWorker:
                 for s in range(steps):
                     await asyncio.sleep(per * (5 if self.mode == "slow-interrupt" and job.interrupt else 1))
                     await self.send("progress_state", {"prompt_id": job.prompt_id, "nodes": {nid: {"value": s + 1, "max": steps, "state": "running"}}}, cid)
+                    await self.send_preview(job.prompt_id, nid, cid)
+                if self.mode == "error" and node["class_type"] in OUTPUT_NODES:
+                    interrupted = ("error", nid, node["class_type"]); break
                 executed.append(nid)
             job.ended, self.running = time.time(), None
-            if interrupted:
+            if interrupted and interrupted[0] == "error":
+                job.status = "failed"
+                ev = {"prompt_id": job.prompt_id, "node_id": interrupted[1], "node_type": interrupted[2], "executed": executed,
+                      "exception_message": "fake execution error", "exception_type": "RuntimeError", "traceback": [], "timestamp": ts()}
+                job.messages.append(["execution_error", ev])
+                await self.send("execution_error", ev, cid)
+            elif interrupted:
                 job.status = "cancelled"
                 ev = {"prompt_id": job.prompt_id, "node_id": interrupted[0], "node_type": interrupted[1], "executed": executed, "timestamp": ts()}
                 job.messages.append(["execution_interrupted", ev])

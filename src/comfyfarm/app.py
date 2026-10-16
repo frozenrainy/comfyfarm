@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import uuid
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -16,6 +17,7 @@ from .core.dispatcher import Dispatcher
 from .core.reconcile import Reconciler
 from .core.settings import Settings
 from .db import Busy, Database
+from .events.hub import EventHub
 from .health.monitor import HealthMonitor
 
 log = logging.getLogger(__name__)
@@ -29,12 +31,13 @@ class Router:
         self.dispatcher = Dispatcher(self.db, self.adapter, settings)
         self.reconciler = Reconciler(self.db, self.adapter, settings, self.dispatcher.wake)
         self.health = HealthMonitor(self.db, self.adapter, settings, self.dispatcher.wake)
+        self.events = EventHub(self.db, settings, self.dispatcher.wake)
         self.tasks: list[asyncio.Task] = []
 
     async def start(self, loops: bool = True):
         await self.db.start()
         if loops:
-            self.tasks = [asyncio.create_task(x.run()) for x in (self.health, self.dispatcher, self.reconciler)]
+            self.tasks = [asyncio.create_task(x.run()) for x in (self.health, self.dispatcher, self.reconciler, self.events)]
             self.tasks.append(asyncio.create_task(self.listen()))
 
     async def listen(self):
@@ -58,6 +61,7 @@ class Router:
             await asyncio.sleep(2)
 
     async def stop(self):
+        await self.events.stop()
         for t in self.tasks:
             t.cancel()
         for t in self.tasks:
@@ -230,6 +234,42 @@ def create_app(settings: Settings) -> FastAPI:
         if jid is None:
             raise HTTPException(404, "not found")
         return {"status": await jobsvc.request_cancel(router.db, router.adapter, jid)}
+
+    @app.websocket("/ws")
+    async def browser_ws(ws: WebSocket):
+        """Stock-frontend WebSocket. M2-dev identity: `user` query or X-ComfyFarm-User header (gateway replaces this)."""
+        owner = ws.query_params.get("user") or ws.headers.get("x-comfyfarm-user") or settings.dev_identity
+        if owner is None:
+            await ws.close(code=4401)
+            return
+        client_id = ws.query_params.get("clientId") or uuid.uuid4().hex
+        await ws.accept()
+        conn = router.events.browsers.bind(client_id, owner, ws)
+        if conn is None:                                       # clientId bound to someone else (D-28)
+            await ws.close(code=4403)
+            return
+        try:
+            async with router.db.conn() as c:
+                n = await c.fetchval("SELECT count(*) FROM jobs WHERE owner = $1 AND deleted_at IS NULL AND status IN "
+                                     "('pending','paused','dispatching','running','cancelling')", owner)
+            await ws.send_json({"type": "status", "data": {"status": {"exec_info": {"queue_remaining": n}}, "sid": client_id}})
+            await router.events.catch_up(conn)
+            first = True
+            while True:
+                msg = await ws.receive_text()
+                if first:
+                    try:
+                        data = json.loads(msg)
+                        if data.get("type") == "feature_flags":
+                            conn.preview_metadata = bool(data.get("data", {}).get("supports_preview_metadata"))
+                            await ws.send_json({"type": "feature_flags", "data": {"supports_preview_metadata": True}})
+                    except ValueError:
+                        pass
+                    first = False
+        except WebSocketDisconnect:
+            pass
+        finally:
+            router.events.browsers.unbind(conn)
 
     @app.get("/api/health/dispatch")
     async def health_dispatch():

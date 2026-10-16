@@ -51,7 +51,7 @@ async def fakes():
 
     async def start(**kw):
         fake = FakeWorker(**kw)
-        runner = web.AppRunner(fake.app)
+        runner = web.AppRunner(fake.app, shutdown_timeout=1)
         await runner.setup()
         port = free_port()
         await web.TCPSite(runner, "127.0.0.1", port).start()
