@@ -67,8 +67,10 @@ class Job:
 
 
 class FakeWorker:
-    def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16):
+    def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16,
+                 validate_endpoint: bool = True):
         self.version, self.backend, self.ws_fix, self.vram_gb = version, backend, ws_fix, vram_gb
+        self.validate_calls = 0
         self.sockets: dict[str, web.WebSocketResponse] = {}
         self.sockets_metadata: dict[str, dict] = {}
         self.pending: list[Job] = []
@@ -98,6 +100,8 @@ class FakeWorker:
         r.add_get("/api/jobs/{pid}", self.get_job)
         r.add_post("/api/jobs/{pid}/cancel", self.cancel_job)
         r.add_post("/_fake/mode", self.set_mode)
+        if validate_endpoint:                                   # the comfyfarm_worker extension's endpoint
+            r.add_post("/comfyfarm/validate", self.validate_only)
         self.app.on_startup.append(self._start)
 
     # ---------------- fault injection ----------------
@@ -235,6 +239,14 @@ class FakeWorker:
 
     def _qitem(self, j: Job):
         return [j.number, j.prompt_id, j.prompt, j.extra, [k for k, n in j.prompt.items() if n["class_type"] in OUTPUT_NODES]]
+
+    async def validate_only(self, request):
+        self.validate_calls += 1
+        errors = self.validate((await request.json()).get("prompt") or {})
+        if errors:
+            et = "prompt_no_outputs" if "__prompt__" in errors else "prompt_outputs_failed_validation"
+            return web.json_response({"error": {"type": et, "message": et}, "node_errors": {} if "__prompt__" in errors else errors}, status=400)
+        return web.json_response({"ok": True, "node_errors": {}})
 
     async def get_queue(self, request):
         return web.json_response({"queue_running": [self._qitem(self.running)] if self.running else [],

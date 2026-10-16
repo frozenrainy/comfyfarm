@@ -153,6 +153,22 @@ class ComfyAdapter:
         interrupted = await self.interrupt(base_url, prompt_id)
         return deleted or interrupted
 
+    async def validate(self, base_url: str, prompt: dict) -> tuple[str, dict]:
+        """('ok'|'invalid'|'unavailable', body). 'unavailable' = no answer in 4 s, or no validate endpoint here."""
+        try:
+            r = await self.http.post(f"{base_url}/comfyfarm/validate", json={"prompt": prompt},
+                                     timeout=httpx.Timeout(4.0, connect=2.0))
+        except Exception:
+            return "unavailable", {}
+        if r.status_code == 200:
+            return "ok", {}
+        if r.status_code == 400:
+            try:
+                return "invalid", r.json()
+            except ValueError:
+                return "unavailable", {}
+        return "unavailable", {}
+
     async def history(self, base_url: str, prompt_id: str) -> dict | None:
         try:
             r = await self.http.get(f"{base_url}/history/{prompt_id}", timeout=QUERY_TIMEOUT)

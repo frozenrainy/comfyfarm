@@ -134,6 +134,22 @@ def create_app(settings: Settings) -> FastAPI:
     async def busy(_req: Request, _exc: Busy):
         return JSONResponse({"error": "busy"}, status_code=503, headers={"Retry-After": "2"})
 
+    async def validate_on_group(group_id: int | None, prompt: dict) -> tuple[str, dict]:
+        """D-24: validate on up to 3 online workers of the target group (CPU-only UI workers cannot: some nodes only
+        import with a GPU). Idle workers first; 4 s each; nobody answering → skip, the worker validates at dispatch."""
+        async with router.db.conn() as c:
+            gid = group_id if group_id is not None and await c.fetchval("SELECT 1 FROM worker_groups WHERE id = $1", group_id) \
+                else await c.fetchval("SELECT id FROM worker_groups WHERE name = $1", settings.default_group) if settings.default_group \
+                else None
+            ws = await c.fetch("SELECT base_url FROM workers WHERE enabled AND deleted_at IS NULL AND NOT maintenance "
+                               "AND state = 'online' AND ($1::bigint IS NULL OR group_id = $1) "
+                               "ORDER BY current_job_id IS NOT NULL, random() LIMIT 3", gid)
+        for w in ws:
+            verdict, body = await router.adapter.validate(w["base_url"], prompt)
+            if verdict != "unavailable":
+                return verdict, body
+        return "skipped", {}
+
     @app.post("/api/prompt")
     async def post_prompt(body: PromptIn, x_comfyfarm_user: str | None = Header(default=None)):
         owner = identity(x_comfyfarm_user)
@@ -145,6 +161,9 @@ def create_app(settings: Settings) -> FastAPI:
                                           "node_errors": {}})
         extra = dict(body.extra_data)
         secrets = {k: extra.pop(k) for k in SECRET_EXTRA_KEYS if k in extra}    # D-29: not persisted
+        verdict, err = await validate_on_group(body.comfyfarm_group, body.prompt)
+        if verdict == "invalid":                       # stock shape → the frontend highlights the broken nodes
+            return JSONResponse({"error": err.get("error"), "node_errors": err.get("node_errors", {})}, status_code=400)
         try:
             job, _created = await jobsvc.submit(router.db, owner=owner, prompt=body.prompt, extra_data=extra,
                                                 group_id=body.comfyfarm_group, idempotency_key=body.prompt_id,

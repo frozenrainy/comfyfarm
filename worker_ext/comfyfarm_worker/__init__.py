@@ -81,7 +81,30 @@ def _install():
     log.info("comfyfarm: /ws reconnect fix installed (ComfyUI %s, handler %s)", comfyui_version.__version__, digest[:12])
 
 
-try:
-    _install()
-except Exception as e:  # never break worker startup
-    log.warning("comfyfarm: reconnect fix NOT installed: %r", e)
+def _install_validate():
+    """POST /comfyfarm/validate {prompt, partial_execution_targets?} → 200 {ok} | 400 {error, node_errors} in the
+    stock /prompt error shape, without queueing. The router validates on a worker of the target group before
+    accepting a job (docs/design D-24); `execution.validate_prompt` is internal API, so the rollout smoke test sends a
+    deliberately broken workflow to catch signature changes."""
+    from server import PromptServer
+    import execution
+
+    @PromptServer.instance.routes.post("/comfyfarm/validate")
+    async def comfyfarm_validate(request):
+        body = await request.json()
+        try:
+            valid = await execution.validate_prompt(str(uuid.uuid4()), body.get("prompt") or {},
+                                                    body.get("partial_execution_targets"))
+        except Exception as e:
+            return web.json_response({"error": {"type": "validator_error", "message": repr(e)}}, status=500)
+        if valid[0]:
+            return web.json_response({"ok": True, "node_errors": valid[3]})
+        return web.json_response({"error": valid[1], "node_errors": valid[3]}, status=400)
+    log.info("comfyfarm: /comfyfarm/validate installed")
+
+
+for _step, _fn in (("reconnect fix", _install), ("validate endpoint", _install_validate)):
+    try:
+        _fn()
+    except Exception as e:  # never break worker startup
+        log.warning("comfyfarm: %s NOT installed: %r", _step, e)
