@@ -9,3 +9,10 @@ r9700_run3.json: completed wall 583s | peak RAM 56.1 GB, VRAM 23.7 GB | s/it by 
 r9700_run1.json: completed wall 716s | peak RAM 52.3 GB, VRAM 19.5 GB | s/it by loop length {10: [48.3, 46.1], 2: [14.1, 12.0]}
 r9700_run2.json: completed wall 589s | peak RAM 57.0 GB, VRAM 23.6 GB | s/it by loop length {10: [48.3, 46.2], 2: [14.3, 12.2]}
 r9700_run3.json: completed wall 586s | peak RAM 56.0 GB, VRAM 20.4 GB | s/it by loop length {10: [48.3, 46.2], 2: [14.4, 12.2]}
+
+# 720p + 32fps, one part (81 frames = 2.5 s at 32 fps, 720x1248), ResizableBAR on, warm models
+#   HIGH 208 s/it x10 (34.7 min) · LOW 103.6 s/it x2 (3.5 min) · VAE encode AND decode ran out of VRAM (models stay resident,
+#   16.5 GB) and fell back to tiled · total 42:57 · peak VRAM ~28 GB, RAM 53/60 GB
+#   worker event loop blocked during the tiled VAE decode: a /queue request took 40.8 s; the timing client's 30 s read
+#   timeout fired (P14 in practice — health must call this busy, not dead)
+# reference RTX 5070 Ti 720p one 81-frame part: ~29 min (3.5x its 480p)
