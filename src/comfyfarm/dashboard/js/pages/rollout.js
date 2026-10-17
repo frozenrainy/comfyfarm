@@ -205,8 +205,8 @@ export function rollout(root, { refresh }) {
       renderActive(r);
       const sig = JSON.stringify(r.filter((x) => !ACTIVE.includes(x.status)).map((x) => [x.id, x.status]));
       if (history.dataset.v !== sig) { history.dataset.v = sig; renderHistory(r); }
-      auditT.tbody.replaceChildren(...a.map((e) => h("tr", {}, h("td", {}, when(e.at)), h("td", {}, e.actor), h("td", {}, e.action),
-        h("td", {}, e.target ?? ""), h("td", { class: "muted small" }, Object.keys(e.detail || {}).length ? JSON.stringify(e.detail).slice(0, 160) : ""))));
+      auditT.tbody.replaceChildren(...a.map((e) => h("tr", {}, h("td", { class: "nowrap" }, when(e.at)), h("td", { class: "nowrap" }, e.actor),
+        h("td", { class: "nowrap" }, e.action), h("td", { class: "nowrap" }, e.target ?? ""), h("td", { class: "muted small" }, Object.keys(e.detail || {}).length ? JSON.stringify(e.detail).slice(0, 160) : ""))));
     },
   };
 }

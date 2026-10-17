@@ -78,6 +78,7 @@ tbody tr:last-child td { border-bottom: 0; }
 td.num { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 td.actions { white-space: nowrap; text-align: right; }
 td.actions button + button { margin-left: .25rem; }
+td.nowrap { white-space: nowrap; }
 td.err { color: var(--bad); max-width: 28rem; overflow-wrap: anywhere; }
 .empty { margin: .4rem .2rem; }
 
