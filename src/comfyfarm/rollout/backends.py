@@ -66,7 +66,8 @@ def _parse_status(text: str) -> dict | None:
 
 class Ssh(Backend):
     """Per-host key restricted to a forced command (`comfyfarm.agent ssh`): the key can only say
-    `restart <instance>` / `status <instance>`. config: host, user, key, port, known_hosts."""
+    `restart <instance>` / `status <instance>`. config: host, user, key (a path on the router — the key material
+    stays in the file, never in the ledger), port, known_hosts."""
 
     def argv(self, *cmd: str) -> list[str]:
         for k in ("host", "user", "key"):
@@ -89,14 +90,35 @@ class Ssh(Backend):
 
 
 class HttpAgent(Backend):
-    """Per-host agent (`comfyfarm.agent serve`) with a token. config: url, token."""
+    """Per-host agent (`comfyfarm.agent serve`) with a bearer token. config: url, and the token as a **reference** —
+    `token_file` (path readable by the router) or `token_env` (environment variable name). The token value itself is
+    never accepted into the ledger: backups and replicas must not carry it (same reasoning as D-29)."""
+
+    def __init__(self, config):
+        super().__init__(config)
+        if "token" in self.c:
+            raise BackendError("http-agent: give token_file or token_env, never the token value (it would be stored)")
+        if not self.c.get("url") or not (self.c.get("token_file") or self.c.get("token_env")):
+            raise BackendError("http-agent backend needs url and token_file or token_env")
+
+    def token(self) -> str:
+        if self.c.get("token_file"):
+            try:
+                with open(self.c["token_file"]) as f:
+                    return f.read().strip()
+            except OSError as e:
+                raise BackendError(f"http-agent: cannot read token_file: {type(e).__name__}")
+        import os
+        value = os.environ.get(self.c["token_env"], "")
+        if not value:
+            raise BackendError(f"http-agent: environment variable {self.c['token_env']} is empty on the router")
+        return value
 
     async def _call(self, method: str, path: str, instance: str):
-        if not self.c.get("url") or not self.c.get("token"):
-            raise BackendError("http-agent backend needs url and token")
+        token = self.token()
         async with httpx.AsyncClient(timeout=30) as h:
             return await h.request(method, f"{self.c['url'].rstrip('/')}/{path}", params={"instance": instance},
-                                   headers={"Authorization": f"Bearer {self.c['token']}"})
+                                   headers={"Authorization": f"Bearer {token}"})
 
     async def restart(self, instance):
         try:
@@ -109,7 +131,7 @@ class HttpAgent(Backend):
         try:
             r = await self._call("GET", "status", instance)
             return r.json() if r.status_code == 200 else None
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, BackendError):
             return None
 
 

@@ -54,6 +54,14 @@ A standby router does not dispatch anyway.
 
 ## Deployment topologies
 
+**Shared storage (required).** The input, output and user directories must be one filesystem seen by the UI worker
+and every GPU worker (NFS/SMB on a NAS — the Thinkbox Deadline model): uploads land on the UI worker and are read by
+whichever GPU worker runs the job; saved outputs are written by that worker and served by the UI worker. Models may be
+shared too, but a local NVMe copy per worker is recommended: ComfyUI's disk-backed dynamic loading (`fast-disk`) is
+enabled only for model files on an NVMe at PCIe Gen3 x4 or better — on a NAS it loads through pinned RAM instead
+(slower, not broken). Temp files (previews) need no sharing: the gateway fetches them from the executing worker, and
+does the same for a saved output the UI worker does not have.
+
 **A. Single box (default, homelab).** Router + Postgres + gateway on one machine; workers on the same or other machines.
 
 **B. With UI worker.** Add a CPU-only stock ComfyUI as UI worker; the gateway sends user data and static assets there,

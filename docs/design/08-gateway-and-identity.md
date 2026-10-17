@@ -10,6 +10,7 @@ origin must be something that can split traffic:
 | `/ws`, `POST /api/prompt`, `/api/object_info`, `/api/jobs*`, `/api/queue`, `/api/history*`, `/api/interrupt` | router | the router owns jobs; it synthesises queue/history from the ledger for this user |
 | `/api/users`, `/api/userdata*`, `/api/settings*`, `/`, `/assets`, `/extensions`, `/api/view` (input/output) | UI worker | user data and the screen must not freeze while a GPU worker loads a model |
 | `/api/view?type=temp…` | the GPU worker that executed that job | temp files exist only on that worker |
+| `/api/view?type=output…` | UI worker; on 404 the GPU worker that executed the job (found through the ledger, owner-scoped) | outputs normally sit on shared storage (01); without it the executing worker still has the file |
 | everything else | UI worker | default |
 
 Without a UI worker (topology A), user-data paths go to a designated GPU worker; the screen then freezes during model

@@ -300,3 +300,24 @@ async def test_artifact_checks_when_the_router_sees_the_store(dsn, tmp_path):
             assert ok.status_code == 200 and "does not declare its accelerator" in ok.json()["warnings"][0]
             listing = (await api.get("/api/admin/artifacts", headers=H)).json()
             assert listing["available"] and {a["name"] for a in listing["artifacts"]["venv"]} == {"cu", "win", "plain"}
+
+
+async def test_secrets_are_not_accepted_into_the_ledger(farm, tmp_path):
+    """F8: restart backends store references (key path, token_file, token_env), never a token value."""
+    api, w = farm["api"], farm["hosts"]["w1"]
+    cfg = (await instances(api))["w1"]["instance"]
+    base = {**cfg, "restart_backend": "http-agent"}
+    bad = await api.put(f"/api/admin/instances/{w.wid}", headers=H, json={**base, "restart_config": {"url": "http://h:8399", "token": "s3cret"}})
+    assert bad.status_code == 400 and "never the token value" in bad.text
+    tok = tmp_path / "agent.token"
+    tok.write_text("t" * 32)
+    ok = await api.put(f"/api/admin/instances/{w.wid}", headers=H, json={**base, "restart_config": {"url": "http://h:8399", "token_file": str(tok)}})
+    assert ok.status_code == 200, ok.text
+    async with farm["router"].db.conn() as c:
+        dump = await c.fetchval("SELECT string_agg(row_to_json(t)::text, '') FROM (SELECT * FROM instances) t")
+        audit = await c.fetchval("SELECT string_agg(detail::text, '') FROM audit_log")
+    assert "s3cret" not in dump and "t" * 32 not in dump and "t" * 32 not in (audit or "")
+    from comfyfarm.rollout import backends as be
+    assert be.make("http-agent", {"url": "http://h:8399", "token_file": str(tok)}).token() == "t" * 32
+    with pytest.raises(be.BackendError, match="empty"):
+        be.make("http-agent", {"url": "http://h", "token_env": "COMFYFARM_TEST_NO_SUCH_VAR"}).token()

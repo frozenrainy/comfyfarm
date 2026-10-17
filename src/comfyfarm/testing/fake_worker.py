@@ -42,6 +42,7 @@ NODES = {
     "SaveImage": ({"images": "IMAGE", "filename_prefix": "STRING"}, []),
 }
 OUTPUT_NODES = {"PreviewImage", "SaveImage"}
+OUTPUT_TYPE = {"PreviewImage": "temp", "SaveImage": "output"}     # as stock ComfyUI reports them
 REAL_DEFS = json.loads((pathlib.Path(__file__).parent / "fake_object_info.json").read_text())["nodes"]
 assert set(REAL_DEFS) == set(NODES), "fake_object_info.json must cover exactly the fake's nodes"
 
@@ -274,7 +275,8 @@ class FakeWorker:
 
     def _hist(self, j: Job):
         ok = j.status == "completed"
-        return {"prompt": self._qitem(j), "outputs": {k: {"images": [{"filename": f"fake_{j.prompt_id[:8]}.png", "subfolder": "", "type": "temp"}]}
+        return {"prompt": self._qitem(j), "outputs": {k: {"images": [{"filename": f"fake_{j.prompt_id[:8]}.png", "subfolder": "",
+                                                                     "type": OUTPUT_TYPE[n["class_type"]]}]}
                                                       for k, n in j.prompt.items() if n["class_type"] in OUTPUT_NODES} if ok else {},
                 "status": {"status_str": "success" if ok else "error", "completed": ok, "messages": j.messages}}
 
@@ -376,7 +378,8 @@ class FakeWorker:
                     await self.send("progress_state", {"prompt_id": job.prompt_id, "nodes": {nid: {"value": s + 1, "max": steps, "state": "running"}}}, cid)
                     await self.send_preview(job.prompt_id, nid, cid)
                 if node["class_type"] in OUTPUT_NODES and self.mode != "error":
-                    out = {"images": [{"filename": f"fake_{job.prompt_id[:8]}.png", "subfolder": "", "type": "temp"}]}
+                    out = {"images": [{"filename": f"fake_{job.prompt_id[:8]}.png", "subfolder": "",
+                                       "type": OUTPUT_TYPE[node["class_type"]]}]}
                     self.history[job.prompt_id] = job                # file exists from now on (served by /view)
                     await self.send("executed", {"node": nid, "display_node": nid, "output": out, "prompt_id": job.prompt_id}, cid)
                 if self.mode == "error" and node["class_type"] in OUTPUT_NODES:

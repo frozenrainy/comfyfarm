@@ -167,7 +167,9 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             s.comfy_users[ident.user] = uid
             return uid
 
-    async def proxy(request: Request, base: str, headers: dict, cache_immutable: bool = False) -> Response:
+    async def proxy(request: Request, base: str, headers: dict, cache_immutable: bool = False,
+                    miss: int | None = None) -> Response | None:
+        """`miss`: an upstream status that means "try elsewhere" — the response is dropped and None returned."""
         url = f"{base}{request.url.path}" + (f"?{request.url.query}" if request.url.query else "")
         body = request.stream() if request.method not in ("GET", "HEAD") else None
         req = http.build_request(request.method, url, headers=headers, content=body)
@@ -175,6 +177,9 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             up = await http.send(req, stream=True)
         except httpx.HTTPError as e:
             return JSONResponse({"error": f"upstream unavailable: {type(e).__name__}"}, status_code=502)
+        if miss is not None and up.status_code == miss:
+            await up.aclose()
+            return None
         out_headers = {k: v for k, v in up.headers.items() if k.lower() not in HOP_HEADERS | {"content-encoding"}}
         if cache_immutable and up.status_code == 200:
             out_headers["cache-control"] = "public, max-age=31536000, immutable"    # stock sends no-store
@@ -264,11 +269,22 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         if path.startswith(ROUTER_PREFIXES):
             return await proxy(request, s.router_url, router_headers(request, ident))
         base_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS | IDENTITY_HEADERS}
-        if path in ("/api/view", "/view") and request.query_params.get("type") == "temp":
+        if path in ("/api/view", "/view") and request.query_params.get("type") in ("temp", "output"):
+            # temp files exist only on the executing worker; saved outputs normally sit on shared storage (01) and
+            # are served by the UI worker — when it does not have one, the executing worker is asked (a site without
+            # shared storage for outputs still works, slower)
+            kind = request.query_params.get("type")
+            if kind == "output":
+                base_headers["comfy-user"] = await comfy_user_id(ident)
+                resp = await proxy(request, s.ui_url, base_headers, miss=404)
+                if resp is not None:
+                    return resp
             q = {k: request.query_params.get(k, "") for k in ("filename", "subfolder", "type")}
             loc = await http.get(f"{s.router_url}/api/farm/locate?{urlencode(q)}", headers=router_headers(request, ident))
             if loc.status_code == 200:
                 return await proxy(request, loc.json()["base_url"], base_headers)
+            if kind == "output":
+                return JSONResponse({"error": "not found"}, status_code=404)
         if path in ("/api/users", "/users") and request.method == "GET":
             # the stock frontend shows a user picker in multi-user mode; the gateway already knows who this is
             return JSONResponse({"storage": "server", "migrated": True})

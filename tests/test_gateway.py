@@ -39,6 +39,8 @@ class UIStub:
         self.app.router.add_post("/api/users", self.post_users)
         self.app.router.add_get("/api/settings", self.settings)
         self.app.router.add_get("/assets/index-AbCdEf12.js", self.asset)
+        self.app.router.add_get("/api/view", self.view)          # no shared storage in this test: nothing here
+        self.views = []
 
     async def index(self, r):
         self.seen.append(dict(r.headers)); return web.Response(text="<html>stock frontend</html>", content_type="text/html")
@@ -54,6 +56,9 @@ class UIStub:
 
     async def settings(self, r):
         self.seen.append(dict(r.headers)); return web.json_response({"user": r.headers.get("comfy-user")})
+
+    async def view(self, r):
+        self.views.append(dict(r.query)); return web.json_response({"error": "no such file"}, status=404)
 
     async def asset(self, r):
         return web.Response(text="js", headers={"Cache-Control": "no-store"})
@@ -296,3 +301,32 @@ async def test_login_lands_on_the_dashboard_and_optional_user_list(farm):
 async def add_user_disabled(farm, name):
     async with farm["router"].db.conn() as c:
         await c.execute("INSERT INTO users(username, password_hash, disabled_at) VALUES ($1, 'scrypt$1$x$y', now())", name)
+
+
+def saving(seed):
+    return {"1": {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": seed}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "e2e"}}}
+
+
+async def test_saved_output_falls_back_to_the_executing_worker(farm):
+    """01: outputs normally come from shared storage via the UI worker; when the UI worker has no such file, the
+    gateway asks the ledger which worker made it (owner-scoped) and fetches it there."""
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        pid = (await c.post(f"{gw}/api/prompt", json={"prompt": saving(3)})).json()["prompt_id"]
+        await wait_status(farm["router"], pid, "completed")
+        for _ in range(50):
+            job = (await c.get(f"{gw}/api/jobs/{pid}")).json()
+            if job.get("outputs"):
+                break
+            await asyncio.sleep(0.1)
+        f = job["preview_output"]
+        assert f["type"] == "output"
+        r = await c.get(f"{gw}/api/view", params=f)
+        assert r.status_code == 200 and r.content.startswith(b"\x89PNG fake")          # from the GPU worker
+        assert farm["ui"].views and farm["ui"].views[-1]["filename"] == f["filename"]    # the UI worker was asked first
+        assert (await c.get(f"{gw}/api/view", params={**f, "filename": "nope.png"})).status_code == 404
+    async with httpx.AsyncClient() as other:                                           # not the owner: nothing
+        await login(other, gw, "root", "pw-root")
+        assert (await other.get(f"{gw}/api/view", params=f)).status_code == 404

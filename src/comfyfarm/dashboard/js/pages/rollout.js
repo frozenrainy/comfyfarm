@@ -8,7 +8,7 @@ const PATHS = [["art", "Artifact store <ART>"], ["local", "Local root <LOCAL>"],
 const BACKEND_HINT = {
   manual: '{"timeout": 1800}  — an operator restarts the worker; the farm waits and watches',
   ssh: '{"host": "…", "user": "…", "key": "/path/on/router/id_ed25519", "port": 22}  — key limited to the agent\'s forced command',
-  "http-agent": '{"url": "http://host:8399", "token": "…"}',
+  "http-agent": '{"url": "http://host:8399", "token_file": "/path/on/router/agent.token"}  — or "token_env": "NAME"; the token value itself is never stored',
   "systemd-local": '{"unit": "comfyfarm@{instance}", "user": true}  — router and worker on the same host',
 };
 const head = (title, ...right) => h("div", { class: "section-head" }, h("h2", {}, title), ...right);

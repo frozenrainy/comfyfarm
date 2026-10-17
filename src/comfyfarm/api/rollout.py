@@ -268,7 +268,6 @@ def make_router(ctx: Ctx) -> APIRouter:
                 inst = {k: r[k] for k in ("instance", "role", "platform", "hosts", "listen", "port", "paths",
                                           "restart_backend", "restart_config", "profile_id")}
                 render = rd.build(dict(profiles[r["profile_id"]]), inst) if r["profile_id"] else None
-                inst["restart_config"] = {k: ("***" if k in ("token",) else v) for k, v in inst["restart_config"].items()}
                 d.update(instance=inst, profile=r["profile_name"], rev=render["rev"] if render else None,
                          badge=rd.badge(render, caps.get("argv")))
             out.append(d)
@@ -285,8 +284,6 @@ def make_router(ctx: Ctx) -> APIRouter:
                 if await in_active_rollout(c, worker_id):
                     raise HTTPException(409, "the worker is part of an active rollout")
                 cur = await inst_row(c, worker_id)
-                if cur and cur["restart_config"].get("token") and v["restart_config"].get("token") == "***":
-                    v["restart_config"]["token"] = cur["restart_config"]["token"]       # masked in the list: keep it
                 if cur and cur["profile_id"]:
                     try:                                        # the new paths must still give a valid render
                         rd.check(await profile_doc(c, cur["profile_id"]), v)
@@ -302,7 +299,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                         v["platform"], v["hosts"], v["listen"], v["port"], v["paths"], v["restart_backend"], v["restart_config"])
                 except asyncpg.UniqueViolationError:
                     raise HTTPException(409, f"instance name {v['instance']!r} is taken")
-                await audit(c, who, "instance configured", v["instance"],
+                await audit(c, who, "instance configured", v["instance"],       # restart_config holds references only
                             config={k: v[k] for k in v if k != "restart_config"}, backend=v["restart_backend"])
         return {"saved": True}
 

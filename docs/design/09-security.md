@@ -13,7 +13,7 @@ The design this project learned from ran in a closed network and trusted it. A p
 | Unauthenticated monitoring endpoint leaks data | **Implemented.** `/api/health/dispatch` and `/metrics` expose counts and seconds only — no users, paths, prompts |
 | CSRF / cross-origin abuse | **Implemented.** No `CORS: *`; the gateway owns the cross-site check (D-30); session cookies `HttpOnly`, `SameSite=Lax`, `Secure` when TLS |
 | Secrets in the repository | None committed; configuration via environment or a file outside the repo. *Planned:* CI secret scanning |
-| Secrets in the ledger | Comfy.org credentials are never stored (D-29). *Planned:* restart-backend tokens and key paths move out of `instances.restart_config` into environment references (a ledger backup must not carry them) |
+| Secrets in the ledger | **Implemented.** Comfy.org credentials are never stored (D-29); restart backends store only references (`key` path, `token_file` path or `token_env` name) — a token value is refused at the API (a ledger backup or replica must not carry it) |
 
 ## Things we deliberately do not do
 
