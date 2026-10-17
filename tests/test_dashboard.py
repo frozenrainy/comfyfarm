@@ -171,7 +171,7 @@ async def post_prompt(c, user, seed):
 
 
 async def queue_order(c):
-    q = (await c.get("/api/farm/overview?scope=all", headers=H("admin"))).json()["queue"]
+    q = (await c.get("/api/farm/queue?scope=all", headers=H("admin"))).json()["jobs"]
     return [j["prompt_id"] for j in q]
 
 
@@ -218,17 +218,18 @@ async def test_reorder_is_admin_only_and_exact(farm_api):
     assert (await c.post(f"/api/farm/jobs/{a}/move", json={"before": a}, headers=H("admin"))).status_code == 400
 
 
-async def test_overview_scope_and_places(farm_api):
+async def test_queue_scope_and_places(farm_api):
     r, c = farm_api
     a1 = await post_prompt(c, "alice", 1)
     b1 = await post_prompt(c, "bob", 2)
     a2 = await post_prompt(c, "alice", 3)
-    mine = (await c.get("/api/farm/overview?scope=all", headers=H("alice"))).json()   # not admin: "all" is ignored
-    assert mine["me"] == {"user": "alice", "admin": False} and mine["scope"] == "mine"
-    assert [(j["prompt_id"], j["place"]) for j in mine["queue"]] == [(a1, 1), (a2, 3)]   # bob's job counts for places
-    assert "base_url" not in str(mine["workers"])
-    every = (await c.get("/api/farm/overview?scope=all", headers=H("admin"))).json()
-    assert [j["prompt_id"] for j in every["queue"]] == [a1, b1, a2] and every["me"]["admin"]
+    mine = (await c.get("/api/farm/queue?scope=all", headers=H("alice"))).json()   # not admin: "all" is ignored
+    assert mine["scope"] == "mine" and mine["farm"] == {"queued": 3, "running": 0}
+    assert [(j["prompt_id"], j["place"]) for j in mine["jobs"]] == [(a1, 1), (a2, 3)]   # bob's job counts for places
+    every = (await c.get("/api/farm/queue?scope=all", headers=H("admin"))).json()
+    assert [j["prompt_id"] for j in every["jobs"]] == [a1, b1, a2]
+    dash = (await c.get("/api/farm/dashboard", headers=H("alice"))).json()
+    assert [j["place"] for j in dash["queue"]] == [1, 3] and dash["recent"] == []
 
 
 async def test_notes(farm_api):
@@ -236,14 +237,14 @@ async def test_notes(farm_api):
     a = await post_prompt(c, "alice", 1)
     assert (await c.put(f"/api/farm/jobs/{a}/note", json={"note": "bob's"}, headers=H("bob"))).status_code == 404
     assert (await c.put(f"/api/farm/jobs/{a}/note", json={"note": "  hero shot v3 " + "x" * 600}, headers=H("alice"))).status_code == 200
-    note = (await c.get("/api/farm/overview", headers=H("alice"))).json()["queue"][0]["note"]
+    note = (await c.get("/api/farm/queue", headers=H("alice"))).json()["jobs"][0]["note"]
     assert note.startswith("hero shot v3 x") and len(note) == jobsvc.NOTE_MAX
     await c.put(f"/api/farm/jobs/{a}/note", json={"note": "   "}, headers=H("alice"))
-    assert (await c.get("/api/farm/overview", headers=H("alice"))).json()["queue"][0]["note"] is None
+    assert (await c.get("/api/farm/queue", headers=H("alice"))).json()["jobs"][0]["note"] is None
     wid = (await c.post("/api/admin/workers", json={"name": "w", "base_url": f"http://127.0.0.1:{free_port()}"}, headers=H("admin"))).json()["id"]
     assert (await c.patch(f"/api/admin/workers/{wid}", json={"note": "fan noisy"}, headers=H("alice"))).status_code == 403
     await c.patch(f"/api/admin/workers/{wid}", json={"note": "fan noisy"}, headers=H("admin"))
-    w = (await c.get("/api/farm/overview", headers=H("admin"))).json()["workers"][0]
+    w = (await c.get("/api/admin/workers", headers=H("admin"))).json()[0]
     assert w["note"] == "fan noisy" and "no group: receives no jobs" in w["warnings"]
 
 
@@ -283,7 +284,7 @@ async def test_paused_job_is_not_dispatched_and_retry_runs(dsn, fakes):
             n = (await c.post(f"/api/farm/jobs/{p}/retry", headers=H("alice"))).json()["prompt_id"]
             await wait_status(r, n, "completed")
             assert w.fake.post_log == [p, n]
-            recent = (await c.get("/api/farm/overview", headers=H("alice"))).json()["recent"]
+            recent = (await c.get("/api/farm/dashboard", headers=H("alice"))).json()["recent"]
             assert {x["prompt_id"] for x in recent} == {p, n} and all(x["run_seconds"] is not None for x in recent)
 
 

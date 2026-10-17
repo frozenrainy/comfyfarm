@@ -16,6 +16,7 @@ import contextlib
 import html
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
@@ -30,6 +31,11 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .identity import Identity, read_session, sign_session
 
 log = logging.getLogger(__name__)
+SESSION_TTL = 30.0          # seconds a confirmed session is trusted before the router is asked again (D-35)
+
+
+class Unavailable(Exception):
+    """The router could not confirm a session: answer 503, never let the request through unconfirmed."""
 
 ROUTER_PREFIXES = ("/api/prompt", "/api/jobs", "/api/queue", "/api/history", "/api/interrupt", "/api/object_info",
                    "/api/farm/", "/api/admin/", "/api/health/",
@@ -67,7 +73,33 @@ def create_gateway(s: GatewaySettings) -> Starlette:
     comfy_user_lock = asyncio.Lock()
 
     # ---- identity ----------------------------------------------------------------------------------------------
-    def identify(request) -> Identity | None:
+    session_cache: dict[tuple, tuple[float, frozenset]] = {}
+
+    async def confirm(user: str, epoch: int | None, roles: frozenset) -> frozenset | None:
+        """Current roles of a live account, or None if it is disabled, deleted or its sessions were ended (password
+        change). Asked from the router and cached SESSION_TTL seconds, so a revocation takes effect within that time
+        instead of when the cookie expires (D-35). Raises Unavailable when the router cannot answer."""
+        key, now = (user, epoch, roles), time.monotonic()
+        hit = session_cache.get(key)
+        if hit and now - hit[0] < SESSION_TTL:
+            return hit[1]
+        try:
+            r = await http.post(f"{s.router_url}/api/internal/session", headers={"x-comfyfarm-gateway-login": s.secret},
+                                json={"user": user, "epoch": epoch, "roles": sorted(roles)}, timeout=5)
+        except httpx.HTTPError as e:
+            raise Unavailable(type(e).__name__)
+        if r.status_code == 200:
+            if len(session_cache) > 10000:
+                session_cache.clear()
+            got = frozenset(r.json()["roles"])
+            session_cache[key] = (now, got)
+            return got
+        if r.status_code == 401:
+            session_cache.pop(key, None)
+            return None
+        raise Unavailable(f"router answered {r.status_code}")
+
+    async def identify(request) -> Identity | None:
         if s.provider == "dev":
             host = request.client.host if request.client else ""
             return Identity(s.dev_user, frozenset({"admin"})) if host in ("127.0.0.1", "::1") else None
@@ -77,8 +109,15 @@ def create_gateway(s: GatewaySettings) -> Starlette:
                 return None                                   # only the authenticating proxy may assert identity
             user = request.headers.get(s.user_header)
             roles = frozenset(r.strip() for r in request.headers.get(s.roles_header, "").split(",") if r.strip())
-            return Identity(user, roles) if user else None
-        return read_session(request.cookies.get(COOKIE), s.session_key)
+            if not user:
+                return None
+            got = await confirm(user, None, roles)            # creates the account row on first sight
+            return Identity(user, got) if got is not None else None
+        ident = read_session(request.cookies.get(COOKIE), s.session_key)
+        if ident is None or ident.epoch is None:
+            return None
+        got = await confirm(ident.user, ident.epoch, frozenset())
+        return Identity(ident.user, got, ident.epoch) if got is not None else None
 
     def router_headers(request, ident: Identity) -> dict:
         h = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS | IDENTITY_HEADERS}
@@ -130,10 +169,11 @@ def create_gateway(s: GatewaySettings) -> Starlette:
 
     async def login_page(request: Request):
         err = request.query_params.get("e")
+        note = "Password changed. Log in again." if request.query_params.get("m") == "pw" else ""
         nxt = safe_next(request.query_params.get("next"))
         return HTMLResponse(f"""<!doctype html><meta charset=utf-8><title>ComfyFarm</title>
 <style>body{{font-family:system-ui;max-width:22rem;margin:12vh auto;color:#222}}input{{width:100%;padding:.5rem;margin:.3rem 0}}
-button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Login failed</p>' if err else ''}
+button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Login failed</p>' if err else ''}{f'<p>{note}</p>' if note else ''}
 <form method=post action=/comfyfarm/login><input type=hidden name=next value="{nxt}">
 <input name=username placeholder=Username autofocus>
 <input name=password type=password placeholder=Password><button>Log in</button></form>""")
@@ -149,7 +189,7 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
             return RedirectResponse(f"/comfyfarm/login?next={nxt}&e=1", status_code=303)
         d = r.json()
         resp = RedirectResponse(nxt, status_code=303)
-        resp.set_cookie(COOKIE, sign_session(Identity(d["user"], frozenset(d["roles"])), s.session_key),
+        resp.set_cookie(COOKIE, sign_session(Identity(d["user"], frozenset(), d["epoch"]), s.session_key),
                         httponly=True, samesite="lax", secure=s.secure_cookie, max_age=7 * 86400)
         return resp
 
@@ -173,7 +213,10 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
     async def handle(request: Request):
         if not same_origin_ok(request):
             return Response(status_code=403)
-        ident = identify(request)
+        try:
+            ident = await identify(request)
+        except Unavailable as e:
+            return JSONResponse({"error": f"router unavailable ({e})"}, status_code=503, headers={"Retry-After": "2"})
         path = request.url.path
         if ident is None:
             if request.method == "GET" and s.provider == "local":
@@ -200,7 +243,11 @@ button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Logi
         if not same_origin_ok(ws):
             await ws.close(code=4403)
             return
-        ident = identify(ws)
+        try:
+            ident = await identify(ws)
+        except Unavailable:
+            await ws.close(code=1013)                         # try again later
+            return
         if ident is None:
             await ws.close(code=4401)
             return

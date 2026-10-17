@@ -205,3 +205,16 @@ job, from when the job last became waiting (`job_events`), bounded by the group'
 are reported separately (`unsatisfiable_pending`, `ungrouped_unsatisfiable_pending`). `/metrics` is the same computation
 in Prometheus text; a ledger it cannot read is `comfyfarm_ledger_up 0`, never a page of missing-but-healthy-looking
 numbers.
+
+**D-34 Group permissions are stamped on the job.** *(new)* — Users may use only the worker groups granted to them.
+Checking the owner's permissions in the dispatcher would tie the hot path to the user model (and to identity providers
+that have no user rows). → Every job carries `allowed_groups` (NULL = any); submit stamps it, a permission change
+re-stamps the owner's queued jobs in the same transaction, and the dispatcher, `/api/health/dispatch` and the
+dashboard's *blocked* mark all read that one column. A job nobody may take is reported as unsatisfiable, not as a
+dispatch stall.
+
+**D-35 Sessions are confirmed, not trusted.** *(new)* — A signed cookie that carried roles kept a demoted or disabled
+user an admin until it expired (7 days). → The cookie carries the user and a per-account `session_epoch`; the gateway
+confirms it with the router (active? epoch current? which roles now?) and caches the answer 30 s. Password change and
+disabling bump the epoch, ending every session of the account. A counter rather than a timestamp, so clocks need not
+agree. If the router cannot confirm, the gateway answers 503 instead of letting the request through.

@@ -5,6 +5,7 @@ import logging
 import uuid
 
 from ..db import Database
+from . import access
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +64,8 @@ async def transition(conn, job_id: int, to: str, frm: tuple[str, ...], reason: s
 
 async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | None = None, group_id: int | None = None,
                  idempotency_key: str | None = None, browser_client_id: str | None = None, front: bool = False,
-                 output_hint: str | None = None, requirements: dict | None = None) -> tuple[dict, bool]:
+                 output_hint: str | None = None, requirements: dict | None = None,
+                 allowed_groups: list[int] | None = None) -> tuple[dict, bool]:
     """Insert a pending job. Returns (job, created). Unknown group ids degrade to 'no group' (D-22)."""
     key = str(uuid.UUID(idempotency_key)) if idempotency_key else None          # canonical lowercase (P2)
     requirements = validate_requirements(requirements)
@@ -80,10 +82,10 @@ async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | N
                 group_id = None
             prio = await queue_end(c, front)
             row = await c.fetchrow(
-                "INSERT INTO jobs(prompt_id, priority, group_id, owner, idempotency_key, browser_client_id, output_hint, requirements) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (prompt_id) DO NOTHING RETURNING *",
+                "INSERT INTO jobs(prompt_id, priority, group_id, owner, idempotency_key, browser_client_id, output_hint, requirements, "
+                "allowed_groups) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (prompt_id) DO NOTHING RETURNING *",
                 uuid.UUID(prompt_id), prio, group_id, owner, uuid.UUID(key) if key else None, browser_client_id, output_hint,
-                requirements)
+                requirements, allowed_groups)
             if row is None:                                    # concurrent submit with the same key
                 existing = await c.fetchrow("SELECT * FROM jobs WHERE prompt_id = $1", uuid.UUID(prompt_id))
                 if existing["owner"] != owner:
@@ -193,10 +195,11 @@ async def retry(db: Database, job_id: int) -> dict | None:
             if old is None:
                 return None
             prio = await queue_end(c, False)
+            allowed = await access.owner_allowed(c, old["owner"], old["allowed_groups"])   # today's permissions
             row = await c.fetchrow(
-                "INSERT INTO jobs(prompt_id, priority, group_id, owner, output_hint, requirements, retry_of) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-                uuid.uuid4(), prio, old["group_id"], old["owner"], old["output_hint"], old["requirements"], old["id"])
+                "INSERT INTO jobs(prompt_id, priority, group_id, owner, output_hint, requirements, retry_of, allowed_groups) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+                uuid.uuid4(), prio, old["group_id"], old["owner"], old["output_hint"], old["requirements"], old["id"], allowed)
             await c.execute("INSERT INTO job_payloads(job_id, prompt, extra_data) VALUES ($1, $2, $3)",
                             row["id"], old["prompt"], old["extra_data"] or {})
             await c.execute("INSERT INTO job_events(job_id, to_status, reason) VALUES ($1, 'pending', $2)",

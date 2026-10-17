@@ -71,10 +71,11 @@ async def farm(dsn, fakes):
     gw_port = await serve_asgi(gw, started)
     worker = await fakes(ws_fix=True)
     await add_worker(router_app.state.router, worker.url)
-    await add_user(dsn, "alice", "pw-alice", admin=False)
+    await add_user(dsn, "alice", "pw-alice", admin=False, groups=["g1"])
     await add_user(dsn, "root", "pw-root", admin=True)
     yield {"router": router_app.state.router, "router_url": f"http://127.0.0.1:{router_port}",
-           "gw": f"http://127.0.0.1:{gw_port}", "ws": f"ws://127.0.0.1:{gw_port}/ws", "ui": ui, "worker": worker}
+           "gw": f"http://127.0.0.1:{gw_port}", "ws": f"ws://127.0.0.1:{gw_port}/ws", "ui": ui, "worker": worker,
+           "servers": started}
     for server, task in started:
         server.should_exit = True
         await task
@@ -200,8 +201,9 @@ async def test_dashboard_through_gateway(farm):
         assert r.headers["location"] == "/comfyfarm/dashboard/"
         page = await c.get(f"{gw}/comfyfarm/dashboard/")
         assert page.status_code == 200 and "app.js" in page.text           # served by the router, not the UI worker
-        ov = (await c.get(f"{gw}/api/farm/overview?scope=all")).json()
-        assert ov["me"] == {"user": "root", "admin": True} and ov["workers"][0]["base_url"]   # roles travel via the gateway
+        me = (await c.get(f"{gw}/api/farm/me")).json()
+        assert me["user"] == "root" and me["admin"] is True                    # roles travel via the gateway
+        assert (await c.get(f"{gw}/api/admin/workers")).json()[0]["base_url"]
     async with httpx.AsyncClient() as c:
         # only fixed targets after login: anything else would be an open redirect
         r = await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "pw-alice", "next": "https://evil.example/"})
@@ -209,6 +211,60 @@ async def test_dashboard_through_gateway(farm):
         r = await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "nope", "next": "//evil.example"})
         assert r.headers["location"] == "/comfyfarm/login?next=/&e=1"
         await login(c, gw, "alice", "pw-alice")
-        ov = (await c.get(f"{gw}/api/farm/overview?scope=all")).json()
-        assert ov["me"]["admin"] is False and "base_url" not in ov["workers"][0]
+        assert (await c.get(f"{gw}/api/farm/me")).json()["admin"] is False
+        assert (await c.get(f"{gw}/api/admin/workers")).status_code == 403
         assert (await c.patch(f"{gw}/api/admin/workers/1", json={"maintenance": True})).status_code == 403
+
+
+async def test_sessions_end_on_password_change_disable_and_demotion(farm, monkeypatch):
+    """D-35: the cookie alone is not enough — the gateway re-confirms the account (cached SESSION_TTL; 0 here)."""
+    import comfyfarm.gateway as gwmod
+    monkeypatch.setattr(gwmod, "SESSION_TTL", 0.0)
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as root, httpx.AsyncClient() as alice, httpx.AsyncClient() as alice2:
+        await login(root, gw, "root", "pw-root")
+        await login(alice, gw, "alice", "pw-alice")
+        await login(alice2, gw, "alice", "pw-alice")                  # a second device
+        assert (await alice.get(f"{gw}/api/farm/me")).json()["user"] == "alice"
+        # a forged cookie role does not make an admin: roles come from the account
+        assert (await alice.get(f"{gw}/api/admin/users")).status_code == 403
+
+        r = await alice.post(f"{gw}/api/farm/me/password", json={"current": "pw-alice", "new": "pw-alice-2"})
+        assert r.status_code == 200 and r.json()["relogin"]
+        assert (await alice.get(f"{gw}/api/farm/me")).status_code == 401      # this browser…
+        assert (await alice2.get(f"{gw}/api/farm/me")).status_code == 401     # …and every other one
+        assert (await login(alice, gw, "alice", "pw-alice")).headers["location"].endswith("e=1")
+        await login(alice, gw, "alice", "pw-alice-2")
+        assert (await alice.get(f"{gw}/api/farm/me")).status_code == 200
+
+        # promotion and demotion apply to running sessions
+        assert (await root.patch(f"{gw}/api/admin/users/alice", json={"admin": True})).status_code == 200
+        assert (await alice.get(f"{gw}/api/farm/me")).json()["admin"] is True
+        assert (await root.patch(f"{gw}/api/admin/users/alice", json={"admin": False})).status_code == 200
+        assert (await alice.get(f"{gw}/api/admin/users")).status_code == 403
+
+        # disabling ends the session and blocks login
+        assert (await root.patch(f"{gw}/api/admin/users/alice", json={"disabled": True})).status_code == 200
+        assert (await alice.get(f"{gw}/api/farm/me")).status_code == 401
+        assert (await alice.get(f"{gw}/")).status_code == 303                  # pages bounce to the login form
+        assert (await login(alice, gw, "alice", "pw-alice-2")).headers["location"].endswith("e=1")
+
+
+async def test_session_cache_window_and_router_outage(farm, monkeypatch):
+    """Within SESSION_TTL a confirmed session is reused (that is the revocation delay); when the router cannot
+    confirm a session, the gateway refuses with 503 instead of letting it through unconfirmed."""
+    import comfyfarm.gateway as gwmod
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as root, httpx.AsyncClient() as alice:
+        await login(root, gw, "root", "pw-root")
+        await login(alice, gw, "alice", "pw-alice")
+        assert (await alice.get(f"{gw}/api/farm/me")).status_code == 200    # confirmed and cached
+        await root.patch(f"{gw}/api/admin/users/alice", json={"disabled": True})
+        assert (await alice.get(f"{gw}/api/farm/me")).status_code == 200    # still inside the cache window
+        monkeypatch.setattr(gwmod, "SESSION_TTL", 0.0)
+        assert (await alice.get(f"{gw}/api/farm/me")).status_code == 401    # window over
+        server, task = farm["servers"][0]                                   # stop the router
+        server.should_exit = True
+        await task
+        r = await root.get(f"{gw}/")
+        assert r.status_code == 503 and "router unavailable" in r.text

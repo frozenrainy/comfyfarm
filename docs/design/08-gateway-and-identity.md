@@ -44,6 +44,32 @@ operations open.
 | `local` | users in the database with scrypt password hashes (stdlib, no extra dependency); small sites |
 | `dev-none` | single user `dev`, refuses to start unless bound to 127.0.0.1 |
 
+## Accounts and permissions
+
+Every identity has a row in `users` — local accounts with a scrypt password, external ones (trusted-header, later OIDC)
+created on first sight without a password. Admins manage accounts in the dashboard (13-web-ui.md).
+
+**Group permissions (D-34).** A user may use the worker groups granted to them (`user_groups`, any number); admins may
+use all. Submitting to another group is refused (403, stock error shape); a user with no group cannot submit. A job
+carries `allowed_groups` — the owner's permissions, kept in step: a grant or revocation re-stamps the owner's queued
+jobs in the same transaction, so a revoked group stops taking them at once. The dispatcher and the monitoring numbers
+apply that column; neither needs to know about users. Ungrouped jobs run only in groups the owner may use.
+
+**Sessions (D-35).** The cookie carries the user and the account's `session_epoch`, not roles. The gateway asks the
+router (`/api/internal/session`, shared secret) whether the account is still active, the epoch still current, and which
+roles it has now; the answer is cached for 30 s per session. So:
+
+| Change | Takes effect |
+|---|---|
+| password changed (by the user or an admin), account disabled | epoch bumped → every session of the account ends within 30 s |
+| admin role granted or removed | the next confirmation (≤ 30 s) carries the new roles |
+| group permissions changed | at once (router-side, no session involved) |
+| router cannot confirm a session | gateway answers 503 — an unconfirmed session is never let through |
+
+The epoch is a counter, not a timestamp, so gateway and database clocks need not agree. Lock-out guards: nobody
+removes their own admin role, disables or deletes themselves, and the last active admin cannot be demoted, disabled or
+deleted.
+
 ## Submit path through the gateway
 
 1. Identify the user; reject unauthenticated requests (D-28).

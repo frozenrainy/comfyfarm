@@ -4,55 +4,26 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ComfyFarm</title>
+<script>document.documentElement.dataset.theme = localStorage.getItem("comfyfarm.theme") || "light";</script>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header>
-  <h1>ComfyFarm</h1>
-  <span id="updated" class="muted"></span>
+  <a class="brand" href="#/">ComfyFarm</a>
+  <nav id="nav">
+    <a href="#/" data-page="">Dashboard</a>
+    <a href="#/queue" data-page="queue">Queue</a>
+    <a href="#/history" data-page="history">History</a>
+    <a href="#/admin/workers" data-page="admin" class="admin-only">System</a>
+  </nav>
   <span class="spacer"></span>
-  <label id="scope-wrap" hidden><input type="checkbox" id="scope"> all users</label>
-  <span id="me" class="muted"></span>
+  <span id="updated" class="muted"></span>
+  <a href="#/settings" data-page="settings" id="me"></a>
   <a href="/">ComfyUI</a>
-  <a href="/comfyfarm/logout" id="logout">Log out</a>
+  <a href="/comfyfarm/logout">Log out</a>
 </header>
 <div id="stale" class="banner" hidden></div>
-<main>
-  <section>
-    <h2>Groups</h2>
-    <div id="groups" class="cards"></div>
-    <p id="ungrouped" class="warn" hidden></p>
-  </section>
-
-  <section>
-    <div class="section-head">
-      <h2>Queue</h2>
-      <select id="group-filter"><option value="">all groups</option></select>
-    </div>
-    <div class="scroll"><table id="queue">
-      <thead><tr><th>#</th><th>Status</th><th>Owner</th><th>Group</th><th>Worker</th><th>Progress</th><th>Waiting / running</th><th>Note</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-    <p class="empty muted" id="queue-empty">Nothing queued.</p>
-  </section>
-
-  <section>
-    <h2>Workers</h2>
-    <div class="scroll"><table id="workers">
-      <thead><tr><th>Name</th><th>Group</th><th>State</th><th>GPU</th><th>Job</th><th>Warnings</th><th class="admin-only">Note</th><th class="admin-only"></th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-  </section>
-
-  <section>
-    <h2>Recent</h2>
-    <div class="scroll"><table id="recent">
-      <thead><tr><th>Finished</th><th>Status</th><th>Owner</th><th>Group</th><th>Worker</th><th>Run time</th><th>Error</th><th>Note</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-    <p class="empty muted" id="recent-empty">No finished jobs.</p>
-  </section>
-</main>
+<main id="page"></main>
 <div id="toast" hidden></div>
 <script type="module" src="app.js"></script>
 </body>

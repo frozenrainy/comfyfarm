@@ -35,13 +35,13 @@ means online, not in maintenance and without a current job — exactly the dispa
 
 | Field (per group) | Definition | Pitfall it avoids |
 |---|---|---|
-| `pending` | pending jobs of the group **or ungrouped**, that some worker of the group meets (job requirements) | metric and dispatcher disagreeing about ungrouped jobs (D-03) |
+| `pending` | pending jobs of the group **or ungrouped**, that some worker of the group meets (job requirements) and whose owner may use the group (D-34) | metric and dispatcher disagreeing about ungrouped jobs (D-03) |
 | `paused` | paused jobs of the group | — |
 | `running` | jobs dispatching/running/cancelling on workers of the group | — |
 | `idle_workers` | idle workers of the group | — |
 | `dispatch_idle_seconds` | while an idle worker meets some waiting job: `min(now - last dispatch to a worker of the group, oldest wait of such a job)`, wait counted from the job's last transition to `pending`; otherwise `null` | "oldest pending age" alone measures backlog, not stall; `created_at` makes a resumed job look stalled for its whole age; a job only a busy worker can take is not a stall; `updated_at` would act as a heartbeat |
 | `running_longest_seconds` | oldest of: `now - started_at` for `running`/`cancelling` (dispatch time until the worker reports a start), `now - dispatched_at` for `dispatching` | measuring from `created_at` reports lifetime incl. queueing; looking at `started_at` only hides jobs stuck in `dispatching` |
-| `unsatisfiable_pending` | pending jobs of the group no worker of the group meets | such jobs wait forever without anyone noticing, or (counted as pending) fake a dispatch stall |
+| `unsatisfiable_pending` | pending jobs of the group no worker of the group can run (requirements, or the owner lost the permission) | such jobs wait forever without anyone noticing, or (counted as pending) fake a dispatch stall |
 | `rollout_started_at` | start of an active rollout, else `null` | a boolean "suppress alerts" flag that gets stuck silences monitoring forever |
 
 Top level: `ungrouped_unsatisfiable_pending` — ungrouped jobs no group can take (they belong to no group's numbers).

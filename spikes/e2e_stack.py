@@ -12,6 +12,7 @@ from comfyfarm.gateway import GatewaySettings, create_gateway
 ap = argparse.ArgumentParser()
 ap.add_argument("--gpu", required=True); ap.add_argument("--ui", required=True)
 ap.add_argument("--router-port", type=int, default=18300); ap.add_argument("--gateway-port", type=int, default=18400)
+ap.add_argument("--gpu2", help="optional second worker, put into a group 'rocm' that requires backend rocm")
 ap.add_argument("--gateway-host", default="127.0.0.1", help="0.0.0.0 to open the gateway to the LAN (the router stays on loopback)")
 a = ap.parse_args()
 SECRET, KEY = "e2e-gateway-secret", b"e2e-session-key-0123456789abcdef"
@@ -37,6 +38,9 @@ async def main():
     async with router.db.conn() as c:
         gid = await c.fetchval("INSERT INTO worker_groups(name) VALUES ('lab') RETURNING id")
         await c.execute("INSERT INTO workers(name, base_url, group_id) VALUES ('r9700', $1, $2)", a.gpu.rstrip("/"), gid)
+        if a.gpu2:
+            g2 = await c.fetchval("""INSERT INTO worker_groups(name, requirements) VALUES ('rocm', '{"backend": ["rocm"]}') RETURNING id""")
+            await c.execute("INSERT INTO workers(name, base_url, group_id) VALUES ('rocm-1', $1, $2)", a.gpu2.rstrip("/"), g2)
     print(f"READY gateway http://{a.gateway_host}:{a.gateway_port}  router http://127.0.0.1:{a.router_port}", flush=True)
     await asyncio.gather(t1, t2)
 

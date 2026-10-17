@@ -23,6 +23,7 @@ current_roles: contextvars.ContextVar[frozenset] = contextvars.ContextVar("comfy
 class Identity:
     user: str
     roles: frozenset = frozenset()
+    epoch: int | None = None        # local sessions: users.session_epoch at login (D-35)
 
 
 class TrustGatewayHeaders:
@@ -72,7 +73,7 @@ def verify_password(password: str, stored: str) -> bool:
 
 # ---- signed session cookie ----------------------------------------------------------------------------------------
 def sign_session(identity: Identity, key: bytes, ttl: int = 7 * 86400) -> str:
-    body = base64.urlsafe_b64encode(json.dumps({"u": identity.user, "r": sorted(identity.roles),
+    body = base64.urlsafe_b64encode(json.dumps({"u": identity.user, "e": identity.epoch,
                                                  "exp": int(time.time()) + ttl}).encode()).decode()
     mac = hmac.new(key, body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{mac}"
@@ -90,4 +91,5 @@ def read_session(token: str | None, key: bytes) -> Identity | None:
         return None
     if d.get("exp", 0) < time.time():
         return None
-    return Identity(d["u"], frozenset(d.get("r", [])))
+    # roles are not trusted from the cookie: the gateway asks the router for the current ones (D-35)
+    return Identity(d["u"], frozenset(), d.get("e"))

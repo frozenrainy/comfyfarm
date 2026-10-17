@@ -42,8 +42,9 @@ def outputs_count(outputs) -> tuple[int, int, dict | None]:
     return n, p, first
 
 
-def make_router(router, identity) -> APIRouter:
+def make_router(ctx) -> APIRouter:
     api = APIRouter()
+    router, identity = ctx.router, ctx.identity
 
     def job_item(r) -> dict:
         n, p, first = outputs_count(r["outputs"] if "outputs" in r else None)
@@ -204,24 +205,26 @@ def make_router(router, identity) -> APIRouter:
         return Response(status_code=200)
 
     # ---- node definitions (D-20) -------------------------------------------------------------------------------
-    async def group_for(c, header_group: str | None):
-        if header_group:
-            g = await c.fetchrow("SELECT id, name FROM worker_groups WHERE name = $1", header_group)
-            if g:
-                return g
-        if router.s.default_group:
-            g = await c.fetchrow("SELECT id, name FROM worker_groups WHERE name = $1", router.s.default_group)
-            if g:
-                return g
-        return await c.fetchrow("SELECT id, name FROM worker_groups ORDER BY id LIMIT 1")
+    async def group_for(c, who: str, header_group: str | None):
+        """The group whose node definitions this user sees: the one picked in the frontend, else the site default,
+        else the first — always among the groups the user may use (D-34)."""
+        allowed = await ctx.allowed(c, who)
+        for name in (header_group, router.s.default_group):
+            if name:
+                g = await c.fetchrow("SELECT id, name FROM worker_groups WHERE name = $1 AND "
+                                     "($2::bigint[] IS NULL OR id = ANY($2))", name, allowed)
+                if g:
+                    return g
+        return await c.fetchrow("SELECT id, name FROM worker_groups WHERE $1::bigint[] IS NULL OR id = ANY($1) "
+                                "ORDER BY id LIMIT 1", allowed)
 
     @api.get("/api/object_info")
     async def object_info(x_comfyfarm_user: str | None = Header(default=None), x_comfyfarm_group: str | None = Header(default=None)):
-        identity(x_comfyfarm_user)
+        who = identity(x_comfyfarm_user)
         async with router.db.conn() as c:
-            g = await group_for(c, x_comfyfarm_group)
+            g = await group_for(c, who, x_comfyfarm_group)
             if g is None:
-                raise HTTPException(503, "no worker groups configured")
+                raise HTTPException(503, "no worker group available to you")
             snap = await c.fetchrow("SELECT data FROM object_info_snapshots WHERE group_id = $1", g["id"])
         if snap is None:
             snap_data = await refresh_snapshot(g["id"])

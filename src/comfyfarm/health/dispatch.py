@@ -2,7 +2,8 @@
 and `/metrics` (Prometheus), so the two cannot disagree. Numbers only, per group; unknown is null, never 0.
 
 The job sets follow the dispatcher (core/dispatcher.py): a worker of group G takes jobs of G and ungrouped jobs, only
-those whose requirements it satisfies, and only while it satisfies G's own requirements.
+those whose requirements it satisfies and whose owner may use G (D-34), and only while it satisfies G's own
+requirements.
 """
 from __future__ import annotations
 
@@ -33,8 +34,10 @@ CROSS JOIN LATERAL (
          (SELECT count(*) FROM jobs p WHERE p.status = 'paused' AND p.deleted_at IS NULL AND p.group_id = g.id) AS paused
     FROM jobs j
     CROSS JOIN LATERAL (SELECT
-      EXISTS (SELECT 1 FROM workers w WHERE {_CAPABLE} AND comfyfarm_satisfies(w.capabilities, j.requirements)) AS capable,
-      EXISTS (SELECT 1 FROM workers w WHERE {_IDLE} AND comfyfarm_satisfies(w.capabilities, j.requirements)) AS ready,
+      (j.allowed_groups IS NULL OR g.id = ANY(j.allowed_groups)) AS permitted) p
+    CROSS JOIN LATERAL (SELECT
+      p.permitted AND EXISTS (SELECT 1 FROM workers w WHERE {_CAPABLE} AND comfyfarm_satisfies(w.capabilities, j.requirements)) AS capable,
+      p.permitted AND EXISTS (SELECT 1 FROM workers w WHERE {_IDLE} AND comfyfarm_satisfies(w.capabilities, j.requirements)) AS ready,
       -- back in the queue since (resume, connect failure): created_at alone would make a resumed job look stalled
       coalesce((SELECT max(e.at) FROM job_events e WHERE e.job_id = j.id AND e.to_status = 'pending'), j.created_at)
         AS waiting_since) x
@@ -46,7 +49,8 @@ ORDER BY g.id"""
 UNGROUPED_UNSATISFIABLE = f"""
 SELECT count(*) FROM jobs j
  WHERE j.status = 'pending' AND j.deleted_at IS NULL AND j.group_id IS NULL AND NOT EXISTS (
-   SELECT 1 FROM worker_groups g JOIN workers w ON {_CAPABLE} WHERE comfyfarm_satisfies(w.capabilities, j.requirements))"""
+   SELECT 1 FROM worker_groups g JOIN workers w ON {_CAPABLE} WHERE comfyfarm_satisfies(w.capabilities, j.requirements)
+     AND (j.allowed_groups IS NULL OR g.id = ANY(j.allowed_groups)))"""
 
 
 def _f(v):
@@ -84,7 +88,7 @@ GAUGES = [  # (field, metric, help)
     ("running_longest_seconds", "comfyfarm_running_longest_seconds",
      "Age of the oldest job on a worker (running: since start, dispatching: since dispatch); absent when none."),
     ("unsatisfiable_pending", "comfyfarm_unsatisfiable_pending_jobs",
-     "Pending jobs of the group whose requirements no enabled worker of the group meets."),
+     "Pending jobs of the group that no enabled worker of the group can run (requirements or permissions)."),
     ("rollout_started_at", "comfyfarm_rollout_started_timestamp_seconds",
      "Start of the active rollout (unix time); absent when none."),
 ]

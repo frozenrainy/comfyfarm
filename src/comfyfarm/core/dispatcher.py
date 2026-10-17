@@ -26,10 +26,11 @@ SELECT w.id, w.group_id, w.base_url, w.capabilities FROM workers w JOIN worker_g
  FOR UPDATE OF w SKIP LOCKED"""
 
 # Group jobs first, then ungrouped ones (policy 'lowest_priority', D-03); highest priority first; only jobs whose
-# own requirements this worker satisfies (docs/design/10).
+# own requirements this worker satisfies (docs/design/10) and whose owner may use this group (D-34).
 PICK_JOB = """
 SELECT id, prompt_id FROM jobs
  WHERE status = 'pending' AND deleted_at IS NULL AND (group_id = $1 OR group_id IS NULL)
+   AND (allowed_groups IS NULL OR $1 = ANY(allowed_groups))
    AND comfyfarm_satisfies($2, requirements)
  ORDER BY (group_id IS NULL), priority DESC, id
  LIMIT 1 FOR UPDATE SKIP LOCKED"""
