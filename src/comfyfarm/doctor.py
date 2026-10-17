@@ -1,0 +1,150 @@
+"""`comfyfarm doctor` — the questions an operator asks when something is off, answered in one run and in plain
+words: can the ledger be reached and written, is disk running out, are the workers reachable and locked down, do the
+workers of a group agree on nodes and models, is shared storage really shared, is a rollout stuck.
+
+Each check yields (status, title, detail) with status OK / WARN / FAIL. Exit code 1 when anything FAILs.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import time
+
+import asyncpg
+import httpx
+
+from .adapter.comfy import ComfyAdapter
+from .core import consistency
+from .core.settings import Settings
+
+OK, WARN, FAIL = "OK", "WARN", "FAIL"
+DISK_WARN_FREE = 0.10          # less than 10 % free → WARN
+TINY_PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478"
+                         "9c6360000002000154a24f5d0000000049454e44ae426082")
+
+
+async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None) -> list[tuple[str, str, str]]:
+    out: list[tuple[str, str, str]] = []
+    # ---- ledger -------------------------------------------------------------------------------------------------
+    try:
+        conn = await asyncpg.connect(s.dsn, timeout=10)
+        await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
+    except Exception as e:
+        out.append((FAIL, "ledger", f"cannot connect: {type(e).__name__}: {e}"))
+        return out
+    try:
+        ver = await conn.fetchval("SHOW server_version")
+        ro = await conn.fetchval("SELECT pg_is_in_recovery()")
+        migs = await conn.fetchval("SELECT count(*) FROM schema_migrations")
+        out.append((FAIL if ro else OK, "ledger", f"Postgres {ver}, {migs} migrations applied"
+                    + (", READ-ONLY (standby?) — the router cannot work" if ro else "")))
+        size = await conn.fetchval("SELECT pg_size_pretty(pg_database_size(current_database()))")
+        jobs = await conn.fetchrow("SELECT count(*) AS n, count(*) FILTER (WHERE status IN ('pending','paused')) AS waiting, "
+                                   "count(*) FILTER (WHERE status IN ('dispatching','running','cancelling')) AS running FROM jobs")
+        out.append((OK, "jobs", f"{jobs['n']} in the ledger ({jobs['waiting']} waiting, {jobs['running']} running), database {size}"))
+        admins = await conn.fetchval("SELECT count(*) FROM users WHERE 'admin' = ANY(roles) AND disabled_at IS NULL")
+        out.append((OK if admins else WARN, "accounts", f"{admins} active administrator(s)"
+                    + ("" if admins else " — create one: comfyfarm add-user <name> --admin")))
+        # ---- rollouts -------------------------------------------------------------------------------------------
+        stuck = await conn.fetch("SELECT id, status, created_at FROM rollouts WHERE status IN ('running','aborting','interrupted')")
+        for r in stuck:
+            age = time.time() - r["created_at"].timestamp()
+            out.append((WARN if r["status"] == "interrupted" else OK, f"rollout #{r['id']}",
+                        f"{r['status']} for {age / 60:.0f} min" + (" — resume or abort it in System → Rollout" if r["status"] == "interrupted" else "")))
+        # ---- workers --------------------------------------------------------------------------------------------
+        workers = [dict(r) for r in await conn.fetch(
+            "SELECT w.id, w.name, w.base_url, w.group_id, w.enabled, w.maintenance, w.state, w.capabilities, g.name AS group_name "
+            "FROM workers w LEFT JOIN worker_groups g ON g.id = w.group_id WHERE w.deleted_at IS NULL ORDER BY w.name")]
+    finally:
+        await conn.close()
+    adapter = ComfyAdapter()
+    try:
+        if not workers:
+            out.append((WARN, "workers", "none registered — add them in System → Workers"))
+        for w in workers:
+            if not w["enabled"]:
+                out.append((OK, f"worker {w['name']}", "disabled"))
+                continue
+            ok, kind, detail = await adapter.probe(w["base_url"])
+            if not ok:
+                out.append((FAIL, f"worker {w['name']}", f"not answering ({kind}: {detail}) — {w['base_url']}"))
+                continue
+            info = await adapter.worker_info(w["base_url"])
+            bits = [f"online{' (maintenance)' if w['maintenance'] else ''}", f"group {w['group_name'] or '— NONE: receives no jobs'}"]
+            st = OK
+            if w["group_id"] is None:
+                st = WARN
+            if info is None:
+                bits.append("extension: no answer"); st = WARN
+            elif not info.get("installed"):
+                bits.append("extension NOT installed: open to everyone on the network"); st = WARN
+            elif not info.get("secured"):
+                bits.append("UNSECURED: set COMFYFARM_ALLOW on the worker"); st = WARN
+            else:
+                bits.append(f"secured ({', '.join(info.get('allow', []))})")
+            caps = w["capabilities"] or {}
+            if caps.get("backend"):
+                bits.append(f"{caps['backend']} ComfyUI {caps.get('comfyui')}")
+            out.append((st, f"worker {w['name']}", " · ".join(bits)))
+        # ---- group consistency -----------------------------------------------------------------------------------
+        rep = consistency.report(workers)
+        for gid, g in rep.items():
+            name = next((w["group_name"] for w in workers if w["group_id"] == gid), str(gid))
+            if g["inconsistent"]:
+                for wid, d in g["workers"].items():
+                    if not d["consistent"]:
+                        wname = next(w["name"] for w in workers if w["id"] == wid)
+                        for line in consistency.warnings(d):
+                            out.append((WARN, f"group {name}", f"{wname} {line}"))
+            else:
+                out.append((OK, f"group {name}", f"{len(g['workers'])} worker(s) agree on nodes and models"))
+        # ---- shared storage ----------------------------------------------------------------------------------------
+        if ui_url:
+            name = "comfyfarm-doctor.png"
+            try:
+                r = await adapter.http.post(f"{ui_url.rstrip('/')}/upload/image", timeout=20,
+                                            files={"image": (name, TINY_PNG, "image/png")}, data={"overwrite": "true"})
+                if r.status_code != 200:
+                    out.append((FAIL, "shared storage", f"upload to the UI worker answered {r.status_code}"))
+                else:
+                    for w in workers:
+                        if not w["enabled"] or w["state"] != "online" or w["base_url"].rstrip("/") == ui_url.rstrip("/"):
+                            continue
+                        v = await adapter.http.get(f"{w['base_url']}/view", params={"filename": name, "type": "input"}, timeout=10)
+                        out.append((OK if v.status_code == 200 else FAIL, "shared storage",
+                                    f"{w['name']}: " + ("sees files uploaded through the UI worker" if v.status_code == 200 else
+                                                        f"does NOT see the uploaded file ({v.status_code}) — input/output must be one shared filesystem (design 01)")))
+            except httpx.HTTPError as e:
+                out.append((FAIL, "shared storage", f"check failed: {type(e).__name__}"))
+        else:
+            out.append((WARN, "shared storage", "not checked — pass --ui <UI worker URL> to verify that GPU workers see uploads"))
+    finally:
+        await adapter.close()
+    # ---- disk, artifacts -----------------------------------------------------------------------------------------
+    for label, path in (("disk (router)", os.getcwd()), ("disk (artifacts)", s.artifacts_dir)):
+        if not path:
+            continue
+        try:
+            u = shutil.disk_usage(path)
+        except OSError:
+            out.append((WARN, label, f"{path}: not accessible"))
+            continue
+        frac = u.free / u.total if u.total else 0
+        out.append((WARN if frac < DISK_WARN_FREE else OK, label, f"{u.free / 2**30:.1f} GB free of {u.total / 2**30:.0f} GB ({frac:.0%})"))
+    if s.artifacts_dir:
+        counts = {}
+        for kind in ("core", "venv", "nodes", "frontend"):
+            d = os.path.join(s.artifacts_dir, kind)
+            counts[kind] = sum(1 for n in (os.listdir(d) if os.path.isdir(d) else []) if os.path.isfile(os.path.join(d, n, "READY")))
+        out.append((OK, "artifacts", ", ".join(f"{v} {k}" for k, v in counts.items()) + " published"))
+    if pg_bin is not None or shutil.which("pg_dump"):
+        out.append((OK, "backup tooling", f"pg_dump found ({pg_bin or shutil.which('pg_dump')})"))
+    else:
+        out.append((WARN, "backup tooling", "pg_dump not on PATH — `comfyfarm backup` needs it (--pg-bin <dir>)"))
+    return out
+
+
+def render(results) -> str:
+    width = max(len(t) for _, t, _ in results) if results else 0
+    return "\n".join(f"{st:4} {t.ljust(width)}  {d}" for st, t, d in results)
