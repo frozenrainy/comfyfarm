@@ -70,6 +70,8 @@ class FakeWorker:
     def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16,
                  validate_endpoint: bool = True):
         self.version, self.backend, self.ws_fix, self.vram_gb = version, backend, ws_fix, vram_gb
+        self.argv = ["main.py", "--listen", "0.0.0.0"]          # system.argv (sys.argv without the interpreter, P15)
+        self.object_info_ok = True                             # False: /object_info answers 500 (a broken upgrade)
         self.validate_calls = 0
         self.sockets: dict[str, web.WebSocketResponse] = {}
         self.sockets_metadata: dict[str, dict] = {}
@@ -323,13 +325,15 @@ class FakeWorker:
         return web.Response(body=b"\x89PNG fake " + name.encode(), content_type="image/png")
 
     async def get_object_info(self, request):
+        if not self.object_info_ok:
+            return web.json_response({"error": "node import failed"}, status=500)
         return web.json_response({k: {"input": {"required": {n: [t] for n, t in spec.items()}}, "output": out,
                                       "output_node": k in OUTPUT_NODES} for k, (spec, out) in NODES.items()})
 
     async def get_system_stats(self, request):
         torch = "2.14.0+rocm7.2" if self.backend == "rocm" else "2.14.0+cu130"
         return web.json_response({"system": {"comfyui_version": self.version, "pytorch_version": torch, "os": "posix",
-                                             "argv": ["main.py", "--listen", "0.0.0.0"]},
+                                             "argv": self.argv},
                                   "devices": [{"name": f"Fake {self.backend.upper()} GPU", "type": "cuda", "vram_total": self.vram_gb * 1073741824}]})
 
     # ---------------- executor ----------------

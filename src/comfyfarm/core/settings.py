@@ -21,3 +21,4 @@ class Settings:
     dev_admins: tuple[str, ...] = ("admin",)   # M1 only: users treated as admins under dev identity
     default_group: str | None = None       # node definitions shown to users who have not picked a group (docs/design/08)
     gateway_secret: str | None = None      # identity headers are trusted only with this secret (docs/design/09)
+    artifacts_dir: str | None = None       # <ART> as the router sees it (optional): artifact lists + §9 checks

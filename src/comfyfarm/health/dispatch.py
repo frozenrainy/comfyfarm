@@ -24,7 +24,9 @@ SELECT g.id,
      FROM jobs j JOIN workers w ON w.id = j.worker_id
      WHERE w.group_id = g.id AND j.status IN ('dispatching','running','cancelling')) AS running_longest,
   (SELECT count(*) FROM jobs j JOIN workers w ON w.id = j.worker_id
-     WHERE w.group_id = g.id AND j.status IN ('dispatching','running','cancelling')) AS running
+     WHERE w.group_id = g.id AND j.status IN ('dispatching','running','cancelling')) AS running,
+  (SELECT min(ro.created_at) FROM rollouts ro JOIN rollout_steps st ON st.rollout_id = ro.id JOIN workers w ON w.id = st.worker_id
+     WHERE w.group_id = g.id AND ro.status IN ('running', 'aborting', 'interrupted')) AS rollout_started_at
 FROM worker_groups g
 CROSS JOIN LATERAL (
   SELECT count(*) FILTER (WHERE x.capable) AS pending,
@@ -57,7 +59,8 @@ def _f(v):
     return float(v) if v is not None else None
 
 
-async def snapshot(conn) -> dict:
+async def snapshot(conn, iso: bool = True) -> dict:
+    """`iso`: timestamps as ISO strings (JSON); False keeps datetimes (Prometheus renders them as unix time)."""
     groups = {}
     for r in await conn.fetch(SNAPSHOT):
         stall = None
@@ -72,7 +75,8 @@ async def snapshot(conn) -> dict:
             "dispatch_idle_seconds": stall,
             "running_longest_seconds": _f(r["running_longest"]),
             "unsatisfiable_pending": r["unsatisfiable"],
-            "rollout_started_at": None,        # rollouts arrive in M4 (docs/design/07)
+            "rollout_started_at": (r["rollout_started_at"].isoformat() if iso else r["rollout_started_at"])
+            if r["rollout_started_at"] else None,     # alert rules suppress on this, never on a stuck flag
         }
     return {"groups": groups, "ungrouped_unsatisfiable_pending": await conn.fetchval(UNGROUPED_UNSATISFIABLE)}
 

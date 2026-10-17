@@ -135,7 +135,7 @@ async def test_metrics_mirror_json_and_null_stays_absent(dsn, monkeypatch):
             assert "comfyfarm_dispatch_idle_seconds{" not in text            # null → absent, not 0
             assert "comfyfarm_rollout_started_timestamp_seconds{" not in text
 
-            async def broken(_c):
+            async def broken(_c, **_kw):
                 raise OSError("ledger gone")
             monkeypatch.setattr("comfyfarm.app.dispatch_snapshot", broken)
             down = await c.get("/metrics")

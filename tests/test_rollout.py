@@ -1,0 +1,298 @@
+"""Rollouts (docs/design/07, contract §7) against fake hosts that restart like the real launcher does."""
+import asyncio
+import json
+import os
+
+import httpx
+import pytest
+
+from comfyfarm.app import create_app
+from comfyfarm.rollout import render as rd
+from comfyfarm.testing.fake_host import FakeHost, FakeHostBackend
+from conftest import fast_settings, free_port, tiny, wait_status
+
+H = {"X-ComfyFarm-User": "admin"}
+FAST = {"observe_timeout": 5, "start_timeout": 6, "verify_timeout": 5}
+
+
+def publish(art, kind, name):
+    d = art / kind / name
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps({"contract": "comfy-upgrade/1", "kind": kind, "name": name}))
+    (d / "READY").write_text("")
+
+
+@pytest.fixture
+async def farm(dsn, tmp_path):
+    app = create_app(fast_settings(dsn))
+    async with app.router.lifespan_context(app):
+        r = app.state.router
+        art = tmp_path / "art"
+        for kind, name in [("core", "c1"), ("core", "c2"), ("venv", "v1"), ("venv", "v2")]:
+            publish(art, kind, name)
+        api = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm")
+        hosts = {}
+        gid = (await api.post("/api/admin/groups", json={"name": "g1"}, headers=H)).json()["id"]
+        p1 = (await api.post("/api/admin/profiles", json={"name": "p1", "core": "c1", "venv": "v1"}, headers=H)).json()["id"]
+        p2 = (await api.post("/api/admin/profiles", json={"name": "p2", "core": "c2", "venv": "v2",
+                                                         "flags": ["--preview-method", "auto"]}, headers=H)).json()["id"]
+        for i in (1, 2):
+            name = f"w{i}"
+            port = free_port()
+            paths = {k: str(tmp_path / name / k) for k in rd.PATH_KEYS}
+            paths["art"] = str(art)
+            h = FakeHost(port, router=api, instance=name, art=paths["art"], local=paths["local"],
+                         prefixes=[paths[k] for k in ("models", "input", "output", "user", "temp")], down_seconds=0.8)
+            wid = (await api.post("/api/admin/workers", json={"name": name, "base_url": h.url, "group": "g1"}, headers=H)).json()["id"]
+            ok = await api.put(f"/api/admin/instances/{wid}", headers=H, json={
+                "instance": name, "hosts": ["127.0.0.1"], "port": port, "paths": paths, "restart_backend": "manual"})
+            assert ok.status_code == 200, ok.text
+            assert (await api.post(f"/api/admin/instances/{wid}/assign", json={"profile_id": p1}, headers=H)).status_code == 200
+            h.argv = (await api.get(f"/api/admin/instances/{wid}/render", headers=H)).json()["argv"][1:]   # launched on p1
+            await h.start()
+            h.wid = wid
+            hosts[name] = h
+        r.rollout.make_backend = lambda _name, _cfg: FakeHostBackend(hosts)
+        r.rollout.poll = 0.2
+        for _ in range(50):                                     # health sees both online
+            if all(w["state"] == "online" for w in (await api.get("/api/admin/workers", headers=H)).json()):
+                break
+            await asyncio.sleep(0.1)
+        yield {"router": r, "api": api, "hosts": hosts, "p1": p1, "p2": p2, "gid": gid, "art": art}
+        for h in hosts.values():
+            if h.task:
+                h.task.cancel()
+            await h.stop()
+        await api.aclose()
+
+
+async def start(api, profile, workers, **kw):
+    res = await api.post("/api/admin/rollouts", headers=H, json={"profile_id": profile, "worker_ids": workers,
+                                                                 "options": {**FAST, **kw.pop("options", {})}, **kw})
+    assert res.status_code == 200, res.text
+    return res.json()["id"]
+
+
+async def wait_rollout(api, rid, timeout=40.0):
+    t = asyncio.get_running_loop().time()
+    while asyncio.get_running_loop().time() - t < timeout:
+        ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()
+        if ro["status"] not in ("running", "aborting"):
+            return ro
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"rollout still {ro['status']}: {ro['steps']}")
+
+
+async def instances(api):
+    return {i["worker"]: i for i in (await api.get("/api/admin/instances", headers=H)).json()}
+
+
+async def test_rollout_succeeds_one_at_a_time_idle_first(farm):
+    api, hosts = farm["api"], farm["hosts"]
+    w1, w2 = hosts["w1"], hosts["w2"]
+    assert {i["badge"] for i in (await instances(api)).values()} == {"match"}
+    # w1 busy with a long job: the idle w2 goes first (shortest remaining time)
+    pid = (await api.post("/api/prompt", json={"prompt": tiny(1, blur=30), "comfyfarm_group": farm["gid"]}, headers=H)).json()["prompt_id"]
+    await wait_status(farm["router"], pid, "running")
+    busy = next(h for h in hosts.values() if h.worker and pid in h.worker.post_log)
+    idle = w2 if busy is w1 else w1
+    rid = await start(api, farm["p2"], [busy.wid, idle.wid])
+    for _ in range(100):
+        h = (await api.get("/api/health/dispatch")).json()["groups"][str(farm["gid"])]
+        if h["rollout_started_at"]:
+            break
+        await asyncio.sleep(0.05)
+    assert h["rollout_started_at"]                                         # alert suppression while rolling
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "succeeded", ro
+    assert [s["status"] for s in ro["steps"]] == ["done", "done"]
+    assert w1.restarts == w2.restarts == 1
+    by_worker = {s["worker_id"]: s for s in ro["steps"]}
+    assert by_worker[idle.wid]["finished_at"] <= by_worker[busy.wid]["started_at"]   # idle first, one at a time
+    inst = await instances(api)
+    assert {i["badge"] for i in inst.values()} == {"match"} and {i["profile"] for i in inst.values()} == {"p2"}
+    assert not any(w["maintenance"] for w in (await api.get("/api/admin/workers", headers=H)).json())
+    assert (await api.get("/api/health/dispatch")).json()["groups"][str(farm["gid"])]["rollout_started_at"] is None
+    actions = [a["action"] for a in (await api.get("/api/admin/audit", headers=H)).json()]
+    assert actions.count("assign") >= 2 and "rollout succeeded" in actions and "rollout started" in actions
+
+
+def long_job(seed, blurs=3):
+    """~4 s per ImageBlur in the fake (one uninterruptible step each): a job that outlasts a blind drain."""
+    wf = {"1": {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": seed}}}
+    for i in range(blurs):
+        wf[str(i + 2)] = {"class_type": "ImageBlur", "inputs": {"image": [str(i + 1), 0], "blur_radius": 30, "sigma": 1.0}}
+    wf["99"] = {"class_type": "PreviewImage", "inputs": {"images": [str(blurs + 1), 0]}}
+    return wf
+
+
+async def test_restart_waits_for_the_running_job(farm):
+    api, hosts = farm["api"], farm["hosts"]
+    pid = (await api.post("/api/prompt", json={"prompt": long_job(3), "comfyfarm_group": farm["gid"]}, headers=H)).json()["prompt_id"]
+    await wait_status(farm["router"], pid, "running")
+    busy = next(h for h in hosts.values() if h.worker and pid in h.worker.post_log)
+    rid = await start(api, farm["p2"], [busy.wid])
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "succeeded", ro
+    await wait_status(farm["router"], pid, "completed")                     # not cut off by the restart
+    async with farm["router"].db.conn() as c:
+        finished = await c.fetchval("SELECT finished_at FROM jobs WHERE prompt_id = $1::uuid", pid)
+        restarted = await c.fetchval("SELECT min(at) FROM audit_log WHERE action = 'assign' AND actor LIKE 'rollout%'")
+    assert restarted >= finished
+
+
+async def test_launcher_refusal_reverts_and_stops_the_rollout(farm):
+    api, hosts = farm["api"], farm["hosts"]
+    # published to the router's eyes (name only) but not on the workers' disk: the launcher refuses (exit 2)
+    p3 = (await api.post("/api/admin/profiles", json={"name": "p3", "core": "c2", "venv": "v-missing"}, headers=H)).json()["id"]
+    rid = await start(api, p3, [hosts["w1"].wid, hosts["w2"].wid])
+    ro = await wait_rollout(api, rid)
+    s1, s2 = ro["steps"]
+    assert ro["status"] == "failed"
+    assert s1["status"] == "reverted" and "refused" in s1["error"]
+    assert s2["status"] == "skipped" and hosts["w2"].restarts == 0          # canary stop
+    inst = await instances(api)
+    assert inst["w1"]["profile"] == "p1" and inst["w1"]["badge"] == "match"  # back on the old version
+    workers = {w["name"]: w for w in (await api.get("/api/admin/workers", headers=H)).json()}
+    assert workers["w1"]["maintenance"] and not workers["w2"]["maintenance"]  # failed one stays out of service
+
+
+@pytest.mark.parametrize("modes,expect,why", [
+    (["noop", "noop"], "revert_failed", "not seen down"),
+    (["broken"], "reverted", "object_info"),
+    (["wrong_argv"], "reverted", "different argv"),
+    (["never_up"], "reverted", "never came back"),
+])
+async def test_failed_restarts_are_detected(farm, modes, expect, why):
+    api, h = farm["api"], farm["hosts"]["w1"]
+    h.modes = list(modes)
+    rid = await start(api, farm["p2"], [h.wid])
+    ro = await wait_rollout(api, rid)
+    step = ro["steps"][0]
+    assert ro["status"] == "failed" and step["status"] == expect, step
+    assert why in step["error"]
+    if expect == "reverted":
+        assert (await instances(api))["w1"]["badge"] == "match" and (await instances(api))["w1"]["profile"] == "p1"
+
+
+async def test_abort_while_draining(farm):
+    api, h = farm["api"], farm["hosts"]["w1"]
+    pid = (await api.post("/api/prompt", json={"prompt": tiny(2, blur=30), "comfyfarm_group": farm["gid"]}, headers=H)).json()["prompt_id"]
+    await wait_status(farm["router"], pid, "running")
+    worker_with_job = next(x for x in farm["hosts"].values() if pid in (x.worker.post_log if x.worker else []))
+    rid = await start(api, farm["p2"], [worker_with_job.wid])
+    for _ in range(50):
+        if (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()["steps"][0]["status"] == "draining":
+            break
+        await asyncio.sleep(0.1)
+    assert (await api.post(f"/api/admin/rollouts/{rid}/abort", headers=H)).json()["status"] == "aborting"
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "aborted" and ro["steps"][0]["status"] == "skipped"
+    assert worker_with_job.restarts == 0
+    assert not any(w["maintenance"] for w in (await api.get("/api/admin/workers", headers=H)).json())
+
+
+async def test_router_restart_interrupts_then_resume_finishes(farm):
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    engine_task = next(t for t in r.tasks if "Engine.run" in repr(t.get_coro()))
+    rid = await start(api, farm["p2"], [hosts["w1"].wid, hosts["w2"].wid])
+    for _ in range(750):
+        steps = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()["steps"]
+        if steps[0]["status"] == "starting":                   # restart requested, worker coming back
+            break
+        await asyncio.sleep(0.02)
+    assert steps[0]["status"] == "starting"
+    engine_task.cancel()                                       # the router dies mid-step
+    await asyncio.gather(engine_task, return_exceptions=True)
+    r.tasks.append(asyncio.create_task(r.rollout.run()))      # …and comes back
+    for _ in range(50):
+        if (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()["status"] == "interrupted":
+            break
+        await asyncio.sleep(0.1)
+    ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()
+    assert ro["status"] == "interrupted"
+    assert (await api.post("/api/admin/rollouts", headers=H, json={"profile_id": farm["p1"], "worker_ids": [hosts["w2"].wid]})).status_code == 409
+    await asyncio.sleep(1.5)
+    ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()
+    assert ro["status"] == "interrupted"                        # nobody drives it…
+    assert ro["steps"][0]["status"] == "starting"               # …not even a step task left over from before
+    assert (await api.post(f"/api/admin/rollouts/{rid}/resume", headers=H)).status_code == 200
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "succeeded", ro["steps"]
+    assert hosts["w1"].restarts == 1                            # already on the target: not restarted again
+    assert {i["badge"] for i in (await instances(api)).values()} == {"match"}
+
+
+async def test_abort_of_an_interrupted_rollout(farm):
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    async with r.db.conn() as c:                                 # as left behind by a crash mid-drain / mid-restart
+        rid = await c.fetchval("INSERT INTO rollouts(target_profile_id, created_by, status) VALUES ($1, 'x', 'interrupted') RETURNING id", farm["p2"])
+        await c.execute("UPDATE workers SET maintenance = true")
+        await c.execute("INSERT INTO rollout_steps(rollout_id, worker_id, position, to_profile_id, status, was_maintenance) VALUES "
+                        "($1, $2, 0, $4, 'draining', false), ($1, $3, 1, $4, 'starting', false)", rid, hosts["w1"].wid, hosts["w2"].wid, farm["p2"])
+    assert (await api.post(f"/api/admin/rollouts/{rid}/abort", headers=H)).json()["status"] == "aborted"
+    ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()
+    assert [s["status"] for s in ro["steps"]] == ["skipped", "failed"] and "check this worker" in ro["steps"][1]["error"]
+    m = {w["name"]: w["maintenance"] for w in (await api.get("/api/admin/workers", headers=H)).json()}
+    assert m == {"w1": False, "w2": True}
+
+
+async def test_profiles_instances_and_render_endpoint(farm):
+    api, hosts, p1, p2 = farm["api"], farm["hosts"], farm["p1"], farm["p2"]
+    # profiles in use are immutable except the note (D-36)
+    assert (await api.patch(f"/api/admin/profiles/{p1}", json={"venv": "v2"}, headers=H)).status_code == 409
+    assert (await api.patch(f"/api/admin/profiles/{p1}", json={"note": "current"}, headers=H)).status_code == 200
+    assert (await api.patch(f"/api/admin/profiles/{p2}", json={"venv": "v1"}, headers=H)).status_code == 200      # unused
+    assert (await api.delete(f"/api/admin/profiles/{p1}", headers=H)).status_code == 409
+    # the launcher's refusals are refused at the door
+    for bad in ({"flags": ["--enable-manager"]}, {"flags": ["--output-directory", "/tmp"]}, {"env": {"LD_PRELOAD": "x"}},
+                {"venv": "../../bin"}):
+        res = await api.post("/api/admin/profiles", json={"name": "bad", "core": "c1", "venv": "v1", **bad}, headers=H)
+        assert res.status_code == 400, bad
+    # render: only the instance's host; nothing for unknown or unassigned instances
+    assert (await api.get("/api/worker_profile", params={"instance": "w1"})).json()["rev"]
+    wid = hosts["w1"].wid
+    cfg = (await instances(api))["w1"]["instance"]
+    await api.put(f"/api/admin/instances/{wid}", headers=H, json={**cfg, "hosts": ["10.9.9.9"], "restart_config": {}})
+    assert (await api.get("/api/worker_profile", params={"instance": "w1"})).status_code == 403
+    assert (await api.get("/api/worker_profile", params={"instance": "nope"})).status_code == 404
+    # assignment without restart: the badge says so
+    assert (await api.post(f"/api/admin/instances/{hosts['w2'].wid}/assign", json={"profile_id": p2}, headers=H)).status_code == 200
+    assert (await instances(api))["w2"]["badge"] == "differs"
+    # a rollout needs instance configuration on every worker
+    plain = (await api.post("/api/admin/workers", json={"name": "plain", "base_url": f"http://127.0.0.1:{free_port()}"}, headers=H)).json()["id"]
+    res = await api.post("/api/admin/rollouts", headers=H, json={"profile_id": p2, "worker_ids": [plain]})
+    assert res.status_code == 400 and "instance" in res.text
+    assert (await api.get("/api/admin/profiles", headers={"X-ComfyFarm-User": "bob"})).status_code == 403
+    assert (await api.get("/api/admin/artifacts", headers=H)).json() == {"available": False}
+
+
+async def test_artifact_checks_when_the_router_sees_the_store(dsn, tmp_path):
+    """Contract §9: a venv for another platform or accelerator is refused; an unknown accelerator only warned about."""
+    art = tmp_path / "art"
+    for kind, name in [("core", "c1"), ("venv", "cu"), ("venv", "win"), ("venv", "plain")]:
+        publish(art, kind, name)
+    for name, extra in [("cu", {"accelerator": "cuda"}), ("win", {"platform": "windows", "accelerator": "rocm"})]:
+        m = json.loads((art / "venv" / name / "manifest.json").read_text())
+        (art / "venv" / name / "manifest.json").write_text(json.dumps({**m, **extra}))
+    app = create_app(fast_settings(dsn, artifacts_dir=str(art)))
+    async with app.router.lifespan_context(app):
+        r = app.state.router
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as api:
+            wid = (await api.post("/api/admin/workers", json={"name": "r1", "base_url": f"http://127.0.0.1:{free_port()}"}, headers=H)).json()["id"]
+            async with r.db.conn() as c:
+                await c.execute("UPDATE workers SET capabilities = '{\"backend\": \"rocm\", \"os\": \"posix\"}' WHERE id = $1", wid)
+            paths = {k: str(tmp_path / k) for k in rd.PATH_KEYS} | {"art": str(art)}
+            await api.put(f"/api/admin/instances/{wid}", headers=H, json={"instance": "r1", "port": 8188, "paths": paths})
+            ids = {}
+            for v in ("cu", "win", "plain", "missing"):
+                ids[v] = (await api.post("/api/admin/profiles", json={"name": f"p-{v}", "core": "c1", "venv": v}, headers=H)).json()["id"]
+            async def assign(v):
+                return await api.post(f"/api/admin/instances/{wid}/assign", json={"profile_id": ids[v]}, headers=H)
+            assert "built for cuda" in (await assign("cu")).text
+            assert "is for windows" in (await assign("win")).text
+            assert "not published" in (await assign("missing")).text
+            ok = await assign("plain")
+            assert ok.status_code == 200 and "does not declare its accelerator" in ok.json()["warnings"][0]
+            listing = (await api.get("/api/admin/artifacts", headers=H)).json()
+            assert listing["available"] and {a["name"] for a in listing["artifacts"]["venv"]} == {"cu", "win", "plain"}

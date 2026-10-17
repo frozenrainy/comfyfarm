@@ -37,12 +37,15 @@ class Router:
         self.health = HealthMonitor(self.db, self.adapter, settings, self.dispatcher.wake)
         self.events = EventHub(self.db, settings, self.dispatcher.wake)
         self.dispatcher.ready = self.events.ready
+        from .rollout.engine import Engine
+        self.rollout = Engine(self)
         self.tasks: list[asyncio.Task] = []
 
     async def start(self, loops: bool = True):
         await self.db.start()
         if loops:
-            self.tasks = [asyncio.create_task(x.run()) for x in (self.health, self.dispatcher, self.reconciler, self.events)]
+            self.tasks = [asyncio.create_task(x.run()) for x in (self.health, self.dispatcher, self.reconciler, self.events,
+                                                                  self.rollout)]
             self.tasks.append(asyncio.create_task(self.listen()))
 
     async def listen(self):
@@ -73,6 +76,7 @@ class Router:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
         await self.adapter.close()
+        await self.rollout.stop()
         await self.db.close()
 
 
@@ -112,13 +116,13 @@ def create_app(settings: Settings) -> FastAPI:
         await router.stop()
 
     app = FastAPI(title="ComfyFarm", lifespan=lifespan)
-    from .api import account, admin as admin_api, dashboard, stock
+    from .api import account, admin as admin_api, dashboard, rollout as rollout_api, stock
     from .api.context import Ctx
     from .identity import TrustGatewayHeaders
     app.add_middleware(TrustGatewayHeaders, secret=settings.gateway_secret, dev=settings.dev_identity is not None)
     ctx = Ctx(router, settings)
     identity, is_admin = ctx.identity, ctx.is_admin
-    for module in (stock, dashboard, account, admin_api):
+    for module in (stock, dashboard, account, admin_api, rollout_api):
         app.include_router(module.make_router(ctx))
 
     @app.exception_handler(Busy)
@@ -282,7 +286,7 @@ def create_app(settings: Settings) -> FastAPI:
         `comfyfarm_ledger_up 0` with a 200, so the scrape itself still succeeds and the outage is visible."""
         try:
             async with router.db.conn() as c:
-                snap = await dispatch_snapshot(c)
+                snap = await dispatch_snapshot(c, iso=False)
         except Exception as e:
             log.warning("metrics: ledger unreadable: %s", type(e).__name__)
             snap = None

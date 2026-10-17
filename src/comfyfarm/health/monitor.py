@@ -28,13 +28,15 @@ class HealthMonitor:
     async def tick(self):
         async with self.db.conn() as c:
             workers = [dict(r) for r in await c.fetch(
-                "SELECT id, base_url, state, capabilities FROM workers WHERE enabled AND deleted_at IS NULL")]
+                "SELECT id, base_url, state, capabilities, failing_since FROM workers WHERE enabled AND deleted_at IS NULL")]
         results = await asyncio.gather(*(self.adapter.probe(w["base_url"]) for w in workers))
         became_online = False
         for w, (ok, kind, detail) in zip(workers, results):
             if ok:
                 caps = None
-                if w["state"] != "online" or not w["capabilities"]:
+                # after any failure streak, not only after 'offline': a restart shorter than dead_after still changes
+                # the version and argv (the rollout badge reads them)
+                if w["state"] != "online" or not w["capabilities"] or w["failing_since"] is not None:
                     caps = await self.adapter.capabilities(w["base_url"])
                     if caps is not None:
                         caps["jobs_api"] = await self.adapter.supports_jobs_api(w["base_url"])
