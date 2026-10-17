@@ -7,7 +7,7 @@ import asyncpg
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from ..core import access
+from ..core import access, consistency
 from ..core import jobs as jobsvc
 from ..core import stats as statsvc
 from ..identity import hash_password
@@ -192,6 +192,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                                  "FROM workers w LEFT JOIN worker_groups g ON g.id = w.group_id "
                                  "LEFT JOIN jobs j ON j.id = w.current_job_id WHERE w.deleted_at IS NULL ORDER BY w.name")
         streams = router.events.streams
+        rep = consistency.report([dict(r) for r in rows])
         out = []
         for r in rows:
             warn = []
@@ -203,6 +204,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 warn.append("event stream down: no progress or previews")
             caps = r["capabilities"] or {}
             warn += security_warnings(caps)
+            warn += consistency.warnings(rep.get(r["group_id"], {}).get("workers", {}).get(r["id"]))
             devs = [d for d in caps.get("devices") or [] if isinstance(d, dict)]
             vram = max((d.get("vram_total") or 0 for d in devs), default=0)
             out.append({"id": r["id"], "name": r["name"], "base_url": r["base_url"], "group": r["group_name"],

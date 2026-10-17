@@ -27,7 +27,7 @@ async def test_api_submit_shapes_and_conflicts(dsn, fakes):
             h = (await c.get("/api/health/dispatch")).json()["groups"]
             g = next(iter(h.values()))
             assert set(g) == {"pending", "paused", "running", "idle_workers", "dispatch_idle_seconds",
-                              "running_longest_seconds", "unsatisfiable_pending", "rollout_started_at"}
+                              "running_longest_seconds", "unsatisfiable_pending", "rollout_started_at", "inconsistent_workers"}
 
 
 async def test_credentials_are_forwarded_not_stored(dsn, fakes):

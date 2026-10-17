@@ -5,6 +5,7 @@ The facts this module relies on are listed (and verified) in docs/design/04-work
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -137,6 +138,26 @@ class ComfyAdapter:
             return r.status_code == 200
         except Exception:
             return None
+
+    async def inventory(self, base_url: str) -> dict | None:
+        """Node class names and model files per folder (core routes /object_info, /models, /models/{folder}) with
+        their hashes — the group consistency check (core/consistency.py). None if anything did not answer."""
+        from ..core.consistency import hashes
+        try:
+            r = await self.http.get(f"{base_url}/object_info", timeout=90)
+            if r.status_code != 200:
+                return None
+            nodes = sorted(r.json())
+            folders = (await self.http.get(f"{base_url}/models", timeout=QUERY_TIMEOUT)).json()
+            models = {}
+            for f in folders:
+                lr = await self.http.get(f"{base_url}/models/{f}", timeout=QUERY_TIMEOUT)
+                models[f] = sorted(lr.json()) if lr.status_code == 200 else []
+        except Exception as e:
+            log.debug("inventory of %s failed: %s", base_url, type(e).__name__)
+            return None
+        nh, mh = hashes(nodes, models)
+        return {"at": time.time(), "nodes": nodes, "models": models, "nodes_hash": nh, "models_hash": mh}
 
     async def worker_info(self, base_url: str) -> dict | None:
         """The comfyfarm_worker extension's GET /comfyfarm/info (allow-list state, ws fix, version); None without

@@ -110,6 +110,7 @@ export function groupCards(groups) {
         row("Paused", String(hh.paused ?? "—")),
         row("Dispatch stalled", stall == null ? "—" : dur(stall), stallCls),
         row("Longest running", dur(hh.running_longest_seconds)),
-        hh.unsatisfiable_pending ? row("Cannot run", `${hh.unsatisfiable_pending} job(s)`, "alert") : null));
+        hh.unsatisfiable_pending ? row("Cannot run", `${hh.unsatisfiable_pending} job(s)`, "alert") : null,
+        hh.inconsistent_workers ? row("Consistency", `${hh.inconsistent_workers} worker(s) differ`, "caution") : null));
   });
 }

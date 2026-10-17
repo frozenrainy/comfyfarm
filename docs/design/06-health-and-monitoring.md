@@ -43,13 +43,14 @@ means online, not in maintenance and without a current job — exactly the dispa
 | `running_longest_seconds` | oldest of: `now - started_at` for `running`/`cancelling` (dispatch time until the worker reports a start), `now - dispatched_at` for `dispatching` | measuring from `created_at` reports lifetime incl. queueing; looking at `started_at` only hides jobs stuck in `dispatching` |
 | `unsatisfiable_pending` | pending jobs of the group no worker of the group can run (requirements, or the owner lost the permission) | such jobs wait forever without anyone noticing, or (counted as pending) fake a dispatch stall |
 | `rollout_started_at` | start of an active rollout, else `null` | a boolean "suppress alerts" flag that gets stuck silences monitoring forever |
+| `inconsistent_workers` | online workers whose node set or model files differ from the rest of their group (majority = reference; see *Group consistency*) | a job validated on one worker and executed on another with different nodes fails late and confusingly — the original farm had exactly this incident |
 
 Top level: `ungrouped_unsatisfiable_pending` — ungrouped jobs no group can take (they belong to no group's numbers).
 
 `GET /metrics` — the same computation (`health/dispatch.py`) as Prometheus gauges, label `group="<id>"`:
 `comfyfarm_pending_jobs`, `comfyfarm_paused_jobs`, `comfyfarm_running_jobs`, `comfyfarm_idle_workers`,
 `comfyfarm_dispatch_idle_seconds`, `comfyfarm_running_longest_seconds`, `comfyfarm_unsatisfiable_pending_jobs`,
-`comfyfarm_rollout_started_timestamp_seconds`, plus `comfyfarm_ungrouped_unsatisfiable_pending_jobs` and
+`comfyfarm_rollout_started_timestamp_seconds`, `comfyfarm_group_inconsistent_workers`, plus `comfyfarm_ungrouped_unsatisfiable_pending_jobs` and
 `comfyfarm_ledger_up`. A `null` is an **absent series**, never 0. When the ledger cannot be read the scrape still
 succeeds with only `comfyfarm_ledger_up 0`: "not observed" must not look like "nothing to report".
 
@@ -75,3 +76,15 @@ Rules learned the hard way:
 - Implemented: every exception log line includes the exception **type** (`httpx` exceptions often have an empty
   `str()`); a drain that keeps waiting logs a heartbeat line every 4 minutes so external log-based suppression windows
   do not expire mid-operation.
+
+## Group consistency
+
+A group promises "same nodes, same models" (D-03, 10) — and that promise is now checked. Whenever a worker's
+capabilities are refreshed (it came online, a rollout finished) the router also reads its **inventory**: node class
+names from `/object_info` and the file list of every `/models/{folder}` (core routes, no extension needed), stored
+with two hashes. Models change on disk without a restart, so one stale inventory is re-read per health tick
+(`inventory_period`, default 10 min). Within a group the most common (nodes, models) pair among workers in service
+is the reference; every other worker gets a warning naming the missing/extra nodes and the missing/extra files per
+folder, the group card shows "N worker(s) differ", and `inconsistent_workers` / the metric carry the count. A group
+with a single inventoried worker has nothing to compare and reports 0.
+

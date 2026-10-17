@@ -72,7 +72,8 @@ class Job:
 
 class FakeWorker:
     def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16,
-                 validate_endpoint: bool = True, secured: bool | None = None):
+                 validate_endpoint: bool = True, secured: bool | None = None, models: dict | None = None,
+                 nodes_extra: list[str] | None = None):
         # secured: None = no extension (/comfyfarm/info 404); True/False = the extension's allow-list state
         self.version, self.backend, self.ws_fix, self.vram_gb = version, backend, ws_fix, vram_gb
         self.argv = ["main.py", "--listen", "0.0.0.0"]          # system.argv (sys.argv without the interpreter, P15)
@@ -110,6 +111,11 @@ class FakeWorker:
         if validate_endpoint:                                   # the comfyfarm_worker extension's endpoint
             r.add_post("/comfyfarm/validate", self.validate_only)
         self.secured = secured
+        self.models = models or {"checkpoints": [], "loras": []}       # /models, /models/{folder}
+        self.nodes_extra = list(nodes_extra or [])                     # extra class names in /object_info
+        for p in ("", "/api"):
+            r.add_get(p + "/models", self.get_models)
+            r.add_get(p + "/models/{folder}", self.get_models_folder)
         if secured is not None:
             r.add_get("/comfyfarm/info", self.info)
         self.app.on_startup.append(self._start)
@@ -337,7 +343,17 @@ class FakeWorker:
         if not self.object_info_ok:
             return web.json_response({"error": "node import failed"}, status=500)
         # the real definitions of the fake's nodes (current frontends drop definitions missing name/category/…)
-        return web.json_response(REAL_DEFS)
+        defs = dict(REAL_DEFS)
+        for n in self.nodes_extra:
+            defs[n] = {**REAL_DEFS["ImageInvert"], "name": n, "display_name": n}
+        return web.json_response(defs)
+
+    async def get_models(self, request):
+        return web.json_response(sorted(self.models))
+
+    async def get_models_folder(self, request):
+        f = request.match_info["folder"]
+        return web.json_response(self.models.get(f, []))
 
     async def info(self, request):
         return web.json_response({"extension": "0.2-fake", "comfyui": self.version, "ws_fix": self.ws_fix,

@@ -78,6 +78,12 @@ async def snapshot(conn, iso: bool = True) -> dict:
             "rollout_started_at": (r["rollout_started_at"].isoformat() if iso else r["rollout_started_at"])
             if r["rollout_started_at"] else None,     # alert rules suppress on this, never on a stuck flag
         }
+    # group consistency (core/consistency.py): workers whose nodes/models differ from the rest of their group
+    from ..core.consistency import report
+    rows = await conn.fetch("SELECT id, group_id, state, enabled, maintenance, capabilities FROM workers WHERE deleted_at IS NULL")
+    rep = report([dict(r) for r in rows])
+    for gid, g in groups.items():
+        g["inconsistent_workers"] = rep.get(int(gid), {}).get("inconsistent", 0)
     return {"groups": groups, "ungrouped_unsatisfiable_pending": await conn.fetchval(UNGROUPED_UNSATISFIABLE)}
 
 
@@ -93,6 +99,8 @@ GAUGES = [  # (field, metric, help)
      "Age of the oldest job on a worker (running: since start, dispatching: since dispatch); absent when none."),
     ("unsatisfiable_pending", "comfyfarm_unsatisfiable_pending_jobs",
      "Pending jobs of the group that no enabled worker of the group can run (requirements or permissions)."),
+    ("inconsistent_workers", "comfyfarm_group_inconsistent_workers",
+     "Online workers whose node set or model files differ from the rest of their group."),
     ("rollout_started_at", "comfyfarm_rollout_started_timestamp_seconds",
      "Start of the active rollout (unix time); absent when none."),
 ]
@@ -108,7 +116,7 @@ def prometheus(snap: dict | None) -> str:
     for field, name, help_ in GAUGES:
         out += [f"# HELP {name} {help_}", f"# TYPE {name} gauge"]
         for gid, g in snap["groups"].items():
-            v = g[field]
+            v = g.get(field)
             if v is None:            # unknown stays absent: never 0 (docs/design/06)
                 continue
             if hasattr(v, "timestamp"):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from ..adapter.comfy import ComfyAdapter
 from ..db import Busy, Database
@@ -25,12 +26,16 @@ class HealthMonitor:
                 log.exception("health tick failed")
             await asyncio.sleep(self.s.health_period)
 
+    def _inventory_due(self, w: dict) -> bool:
+        inv = (w["capabilities"] or {}).get("inventory")
+        return inv is None or time.time() - float(inv.get("at", 0)) > self.s.inventory_period
+
     async def tick(self):
         async with self.db.conn() as c:
             workers = [dict(r) for r in await c.fetch(
                 "SELECT id, base_url, state, capabilities, failing_since FROM workers WHERE enabled AND deleted_at IS NULL")]
         results = await asyncio.gather(*(self.adapter.probe(w["base_url"]) for w in workers))
-        became_online = False
+        became_online = refreshed_one = False
         for w, (ok, kind, detail) in zip(workers, results):
             if ok:
                 caps = None
@@ -41,6 +46,15 @@ class HealthMonitor:
                     if caps is not None:
                         caps["jobs_api"] = await self.adapter.supports_jobs_api(w["base_url"])
                         caps["extension"] = await self.adapter.worker_info(w["base_url"])   # docs/design/09
+                        caps["inventory"] = await self.adapter.inventory(w["base_url"])     # group consistency
+                elif self._inventory_due(w) and not refreshed_one:
+                    # models change on disk without a restart: re-read one stale inventory per tick
+                    refreshed_one = True
+                    inv = await self.adapter.inventory(w["base_url"])
+                    if inv is not None:
+                        async with self.db.conn() as c:
+                            await c.execute("UPDATE workers SET capabilities = capabilities || jsonb_build_object('inventory', $2::jsonb) "
+                                            "WHERE id = $1", w["id"], inv)
                 async with self.db.conn() as c:
                     await c.execute(
                         "UPDATE workers SET state = 'online', failing_since = NULL, failure_kind = NULL, offline_since = NULL,"

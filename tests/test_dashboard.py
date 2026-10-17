@@ -52,7 +52,7 @@ async def test_health_fields_and_dispatcher_rules(ledger):
     gid, wid = await online_worker(r, "w1")
     g = (await snap(r))["groups"][str(gid)]
     assert set(g) == {"pending", "paused", "running", "idle_workers", "dispatch_idle_seconds", "running_longest_seconds",
-                      "unsatisfiable_pending", "rollout_started_at"}
+                      "unsatisfiable_pending", "rollout_started_at", "inconsistent_workers"}
     assert g["dispatch_idle_seconds"] is None and g["running_longest_seconds"] is None and g["rollout_started_at"] is None
 
     ok = await job(r, group_id=gid)
@@ -145,10 +145,12 @@ async def test_metrics_mirror_json_and_null_stays_absent(dsn, monkeypatch):
 
 def test_prometheus_values():
     s = {"groups": {"3": {"pending": 2, "paused": 0, "running": 1, "idle_workers": 0, "dispatch_idle_seconds": None,
-                          "running_longest_seconds": 12.5, "unsatisfiable_pending": 0, "rollout_started_at": None}},
+                          "running_longest_seconds": 12.5, "unsatisfiable_pending": 0, "rollout_started_at": None,
+                          "inconsistent_workers": 2}},
          "ungrouped_unsatisfiable_pending": 0}
     t = prometheus(s)
     assert 'comfyfarm_running_longest_seconds{group="3"} 12.5' in t and 'comfyfarm_paused_jobs{group="3"} 0' in t
+    assert 'comfyfarm_group_inconsistent_workers{group="3"} 2' in t
     assert "comfyfarm_dispatch_idle_seconds{" not in t
     assert prometheus(None).strip().endswith("comfyfarm_ledger_up 0")
 
