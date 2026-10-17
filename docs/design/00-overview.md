@@ -1,7 +1,8 @@
 # 00 — Overview
 
-> Status: design phase (2026-10). Nothing here is released yet; every claim about
-> ComfyUI behaviour is either verified by `spikes/protocol_probe.py` (see [04](04-worker-protocol.md)) or marked *unverified*.
+> Status: pre-release — milestones M1–M4 implemented and verified on hardware (see [12 roadmap](12-roadmap.md) for
+> what each contains and what is left). Every claim about ComfyUI behaviour is either verified by
+> `spikes/protocol_probe.py` (see [04](04-worker-protocol.md)) or marked *unverified*.
 
 ## What it is
 
