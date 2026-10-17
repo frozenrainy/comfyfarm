@@ -111,6 +111,7 @@ async def test_rollout_succeeds_one_at_a_time_idle_first(farm):
     assert by_worker[idle.wid]["finished_at"] <= by_worker[busy.wid]["started_at"]   # idle first, one at a time
     inst = await instances(api)
     assert {i["badge"] for i in inst.values()} == {"match"} and {i["profile"] for i in inst.values()} == {"p2"}
+    assert {i["comfyui"] for i in inst.values()} == {"c2-fake"}                 # version re-read, not just argv
     assert not any(w["maintenance"] for w in (await api.get("/api/admin/workers", headers=H)).json())
     assert (await api.get("/api/health/dispatch")).json()["groups"][str(farm["gid"])]["rollout_started_at"] is None
     actions = [a["action"] for a in (await api.get("/api/admin/audit", headers=H)).json()]

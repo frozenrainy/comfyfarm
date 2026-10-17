@@ -1,0 +1,32 @@
+Rolling upgrades on real hardware — 2026-10-17
+==============================================
+
+Worker: 1x Radeon AI PRO R9700 32 GB (gfx1201), Ubuntu 26.04, kernel 7.0, PyTorch 2.14.1+rocm7.2.
+Router + gateway on a second machine on the same LAN. Restart backend: ssh forced command (agent.py) →
+`systemctl --user restart --no-block comfyfarm@<instance>`; the unit runs launcher.py (RestartPreventExitStatus=2).
+
+Artifacts (published with publish.py on the worker host, store on a local NVMe):
+  core/comfyui-0.41.0, core/comfyui-0.41.2   git archive of the release tags (1298 files each)
+  nodes/farm-ext-1                           the comfyfarm_worker extension
+  venv/rocm72-a                              uv, python 3.12, torch 2.14.1+rocm7.2 + ComfyUI 0.41.2 requirements,
+                                             accelerator rocm, arch gfx1201 — 17.0 GB, built in 22 s from uv's cache
+
+First start (assignment without restart, then `systemctl --user start`): up after 15 s, badge `match`,
+"Adding extra search path custom_nodes <LOCAL>/nodes/farm-ext-1", worker extension loaded from the artifact.
+
+Rollout 1 — 0.41.0 → 0.41.2, idle worker, smoke workflow on
+  +0 s pending · +1 s draining · +5 s restarting (ssh) · +8 s starting (seen down) · +13 s verifying · +14 s done
+  system_stats comfyui_version 0.41.2, badge match, launcher kept 0.41.0's local copy (prune keeps 3)
+
+Rollout 2 — 0.41.2 → profile whose venv was never published (launcher must refuse)
+  +1 s draining · +5 s reverting: "the launcher refused the render (exit 2)" (systemd ExecMainStatus=2, read through
+  the agent) · +13 s reverted, back on 0.41.2 with badge match, worker left in maintenance (safe default)
+  worker log: "comfyfarm-launcher: refused: artifact not ready: <ART>/venv/rocm72-zz/READY"
+
+Rollout 3 — 0.41.2 → 0.41.0 while a real job runs (WAN 2.2 VACE 14B fp8, 320×320, 9 frames, 6 steps)
+  +0 s job in progress · +1 s draining "waiting for the running job" · +30 s job completed (9 images) ·
+  +34 s restarting · +37 s starting · +42 s verifying · +43 s done — the job was not interrupted; the restart came
+  only after both the ledger and the worker's own /queue were empty twice.
+
+Found and fixed during this run: after a restart shorter than the health probe interval the router kept showing the
+old ComfyUI version (only argv was re-read) → the engine now re-reads all capabilities on `match`.

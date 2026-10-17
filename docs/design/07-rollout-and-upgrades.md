@@ -73,3 +73,24 @@ within `comfy-upgrade/1` (export edition v1.1, §9):
 2. Treat a venv manifest without `accelerator` as *unknown* and never auto-assign it; an admin may assign it explicitly.
    With `accelerator`, auto-assignment also requires the worker's backend (and, when `arch` is present, the GPU's arch)
    to match.
+
+## Implementation notes (M4b)
+
+- Code: `rollout/render.py` (render + badge), `rollout/engine.py`, `rollout/backends.py`, `api/rollout.py`; worker
+  side `launcher.py`, `agent.py`, `publish.py` (standard library only, no router imports). Setup: [guide](../guide/rollouts.md).
+- One rollout at a time (unique index); its state lives in `rollouts` / `rollout_steps`, every change in `audit_log`.
+- Drained = no job of the worker in the ledger **and** its `/queue` empty, twice 2 s apart, once more under the
+  startup lock right before the restart. A worker that does not answer counts as empty (a dead worker runs nothing).
+- Seen down = two consecutive *connection refused* probes (a blocked loop is busy, not down). The backend's `status`
+  is read at most every 5 s; `ExecMainStatus == "2"` fails the step at once ("launcher refused").
+- Startup serialisation is an in-process lock: one router drives a rollout. Multi-router HA (later) needs it in the ledger.
+- Verify: `/object_info` parses and is non-empty; `POST /prompt` with an unknown node class answers 400; optional smoke
+  workflow (EmptyImage → PreviewImage) must succeed.
+- Failure after the assignment changed → revert that worker (old profile, restart, `match`), left in maintenance;
+  failure before (drain timeout) → nothing changed, back to service. Either stops new steps (canary stop).
+- Interrupted rollouts are resumed or aborted by a person (D-38).
+- Contract interpretations this implementation makes where the text is silent: `tree_sha256` lines are
+  `f <path> <size>` / `l <path> <target>`, sorted, newline-joined, excluding the top-level `manifest.json` and `READY`
+  (only our publisher and launcher compare it); `rev` hashes the render as JSON with sorted keys and no whitespace;
+  the extra-model-paths yaml carries only `custom_nodes`; a venv's base interpreter lies outside the venv and must
+  exist at the same path on every worker using it.

@@ -218,3 +218,23 @@ user an admin until it expired (7 days). → The cookie carries the user and a p
 confirms it with the router (active? epoch current? which roles now?) and caches the answer 30 s. Password change and
 disabling bump the epoch, ending every session of the account. A counter rather than a timestamp, so clocks need not
 agree. If the router cannot confirm, the gateway answers 503 instead of letting the request through.
+
+**D-36 A profile in use is immutable.** *(new)* — Editing a profile that workers are assigned to would change what
+they run at their next restart — any restart, not a controlled one — and the badge would flip to `differs` on every
+worker at once. → Profiles assigned to an instance or targeted by an active rollout accept only note changes; a change
+is a copy rolled out like any other (drained, verified, revertible). Unused profiles stay editable.
+
+**D-37 The launcher validates what the render *means*, not only its shape.** *(new)* — An allow-list of ComfyUI
+options is not enough: `--extra-model-paths-config` can point `custom_nodes` at the input directory (whatever a user
+uploaded would be imported as code), `--front-end-root` at any directory (served to every browser), and path options
+into the artifact store (which must stay read-only). → The launcher accepts only the render's own yaml and only with
+exactly the synced node artifacts as content, a frontend only as a published artifact, no directory inside `<ART>`,
+the core in argv only if it is the one synced, and every READY the render depends on. The router runs the same
+validator (minus READY) before any assignment, so a render the launcher would refuse is refused at the door.
+
+**D-38 An interrupted rollout waits for a human.** *(new)* — After a router restart, resuming a rollout on its own
+would restart workers nobody is watching any more, and a step caught mid-restart has an unknown outcome. → The engine
+cancels its step tasks with itself (they were left running unattended), marks the rollout `interrupted` at the next
+start and leaves its workers in maintenance. *Resume* re-runs unfinished steps from the top (a worker already on the
+target is not restarted again); *Abort* returns draining workers to service and marks workers caught mid-restart
+failed for a person to check.

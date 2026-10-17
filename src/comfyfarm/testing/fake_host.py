@@ -31,6 +31,7 @@ class FakeHost:
         self.mode = "normal"            # every restart…
         self.modes: list[str] = []      # …unless one is queued here (consumed one per restart)
         self.argv = ["main.py", "--listen", "0.0.0.0"]
+        self.version = "0.41.0-fake"
         self.status = {"ActiveState": "active", "ExecMainStatus": "0", "NRestarts": 0}
         self.restarts = 0
         self.worker: FakeWorker | None = None
@@ -42,7 +43,7 @@ class FakeHost:
         return f"http://127.0.0.1:{self.port}"
 
     async def start(self, object_info_ok: bool = True):
-        self.worker = FakeWorker(ws_fix=True, backend=self.backend)
+        self.worker = FakeWorker(ws_fix=True, backend=self.backend, version=self.version)
         self.worker.argv = list(self.argv)
         self.worker.object_info_ok = object_info_ok
         self.runner = web.AppRunner(self.worker.app, shutdown_timeout=0.5)
@@ -79,6 +80,7 @@ class FakeHost:
             return
         if mode != "wrong_argv":
             self.argv = render["argv"][1:]
+            self.version = render["argv"][1].split("/core/")[1].split("/")[0] + "-fake"   # "<core name>-fake"
         await self.start(object_info_ok=mode != "broken")
         self.status = {"ActiveState": "active", "ExecMainStatus": "0", "NRestarts": self.status["NRestarts"] + 1}
 

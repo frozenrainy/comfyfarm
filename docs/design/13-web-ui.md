@@ -11,7 +11,7 @@ Pages are hash routes; each page mounts into the shell and exposes `refresh()`. 
 | Queue `#/queue` | everybody | own unfinished jobs (admins: everybody's), search (id, note; admins also owner), status and group filters; pause/resume/cancel; admins reorder (⤒ ↑ ↓ ⤓) |
 | History `#/history` | everybody | finished jobs, newest first, 50 per page; search (id, note, error message; admins also owner), status/group/date filters; retry; notes |
 | Settings `#/settings` | everybody | theme (light — the default —, dark, auto), password change (local accounts; ends all sessions), groups one may use |
-| System `#/admin/…` | admins | **Workers** (add, edit name/URL, group, maintenance, disable, delete, notes, warnings) · **Groups** (create, rename, requirements, refresh node list, delete when empty) · **Users** (create, admin role, groups, new password, disable, delete) · **Statistics** |
+| System `#/admin/…` | admins | **Workers** (add, edit name/URL, group, maintenance, disable, delete, notes, warnings) · **Groups** (create, rename, requirements, refresh node list, delete when empty) · **Users** (create, admin role, groups, new password, disable, delete) · **Rollout** (instances with badge, profiles, start/abort/resume rollouts with live steps, manual-restart call-out, audit log; [guide](../guide/rollouts.md)) · **Statistics** |
 
 Statistics (admin page; the dashboard shows the same numbers for one user): a period of **at most 30 days** — presets
 24 h / 7 days / 30 days or two calendar dates in the browser's time zone. Totals, a daily bar chart (completed / failed

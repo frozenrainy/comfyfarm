@@ -4,7 +4,7 @@
     python3 publish.py nodes    <ART> <name> --from <dir of custom node packages>
     python3 publish.py frontend <ART> <name> --from <built frontend dist>
     python3 publish.py venv     <ART> <name> --python python3.12 -r requirements.txt [--accelerator rocm --arch gfx1201]
-                                [--pip-arg=--index-url=…]
+                                [--pip-arg=--index-url=…] [--uv /path/to/uv]   (uv: same rules, its wheel cache)
 
 Rules kept: a name is never reused (an existing directory is refused); READY is written last, only after the copy or
 build and the checks; a venv is built at its final path (absolute paths are baked in) and must not reference anything
@@ -93,17 +93,24 @@ def venv_escapes(path: str) -> list[str]:
 
 
 def publish_venv(art: str, name: str, python: str, requirements: list[str], accelerator: str | None,
-                 arch: list[str], pip_args: list[str]) -> dict:
+                 arch: list[str], pip_args: list[str], uv: str | None = None) -> dict:
+    """The interpreter itself stays outside (a venv links to its base Python): every worker that uses the store
+    needs that base at the same path."""
     path = target(art, "venv", name)
-    subprocess.run([python, "-m", "venv", path], check=True)       # at its final path: absolute paths are baked in
     py = os.path.join(path, "bin", "python")
+    pip = [uv, "pip"] if uv else [py, "-m", "pip"]
+    target_py = ["--python", py] if uv else []
+    if uv:
+        subprocess.run([uv, "venv", "--python", python, path], check=True)   # at its final path
+    else:
+        subprocess.run([python, "-m", "venv", path], check=True)             # at its final path
     try:
         for r in requirements:
-            subprocess.run([py, "-m", "pip", "install", "-r", r] + pip_args, check=True)
-        subprocess.run([py, "-m", "pip", "check"], check=True)
+            subprocess.run(pip + ["install"] + target_py + ["-r", r] + pip_args, check=True)
+        subprocess.run(pip + ["check"] + target_py, check=True)
         if bad := venv_escapes(path):
             raise Refused("the venv references things outside itself: " + "; ".join(bad))
-        freeze = subprocess.run([py, "-m", "pip", "freeze"], check=True, capture_output=True, text=True).stdout
+        freeze = subprocess.run(pip + ["freeze"] + target_py, check=True, capture_output=True, text=True).stdout
     except (subprocess.CalledProcessError, Refused):
         print(f"publish: venv/{name} failed and stays unpublished (no READY); remove it or use another name", file=sys.stderr)
         raise
@@ -131,10 +138,11 @@ def main(argv=None) -> int:
     ap.add_argument("--accelerator", choices=["cuda", "rocm", "cpu"])
     ap.add_argument("--arch", action="append", default=[])
     ap.add_argument("--pip-arg", action="append", default=[])
+    ap.add_argument("--uv", help="build with this uv binary instead of venv + pip")
     a = ap.parse_args(argv)
     try:
         if a.kind == "venv":
-            m = publish_venv(a.art, a.name, a.python, a.requirements, a.accelerator, a.arch, a.pip_arg)
+            m = publish_venv(a.art, a.name, a.python, a.requirements, a.accelerator, a.arch, a.pip_arg, a.uv)
         else:
             if not a.src:
                 ap.error("--from is required")

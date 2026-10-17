@@ -16,6 +16,7 @@ ap.add_argument("--gpu2", help="optional second worker, put into a group 'rocm' 
 ap.add_argument("--rollout-demo", type=int, default=0, metavar="N",
                 help="N in-process fake hosts (ports 18511…) restarted like the launcher does, with profiles 'stable', "
                      "'next' and 'next-broken' (its venv is missing on the hosts' disk: the launcher refuses → revert)")
+ap.add_argument("--router-host", default="127.0.0.1", help="0.0.0.0 when launchers on other hosts fetch renders")
 ap.add_argument("--gateway-host", default="127.0.0.1", help="0.0.0.0 to open the gateway to the LAN (the router stays on loopback)")
 a = ap.parse_args()
 SECRET, KEY = "e2e-gateway-secret", b"e2e-session-key-0123456789abcdef"
@@ -33,7 +34,7 @@ async def main():
     app = create_app(Settings(dsn=dsn, gateway_secret=SECRET, default_group="lab", instance="e2e",
                               artifacts_dir=str(art) if a.rollout_demo else None))
     gw = create_gateway(GatewaySettings(f"http://127.0.0.1:{a.router_port}", a.ui.rstrip("/"), SECRET, KEY))
-    rs = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=a.router_port, log_level="warning"))
+    rs = uvicorn.Server(uvicorn.Config(app, host=a.router_host, port=a.router_port, log_level="warning"))
     gs = uvicorn.Server(uvicorn.Config(gw, host=a.gateway_host, port=a.gateway_port, log_level="warning"))
     t1, t2 = asyncio.create_task(rs.serve()), asyncio.create_task(gs.serve())
     while not (rs.started and gs.started):
@@ -48,7 +49,7 @@ async def main():
             await c.execute("INSERT INTO workers(name, base_url, group_id) VALUES ('rocm-1', $1, $2)", a.gpu2.rstrip("/"), g2)
     if a.rollout_demo:
         await rollout_demo(router, a.router_port, art, gid, a.rollout_demo)
-    print(f"READY gateway http://{a.gateway_host}:{a.gateway_port}  router http://127.0.0.1:{a.router_port}", flush=True)
+    print(f"READY gateway http://{a.gateway_host}:{a.gateway_port}  router http://{a.router_host}:{a.router_port}", flush=True)
     await asyncio.gather(t1, t2)
 
 async def rollout_demo(router, router_port, art, gid, n):

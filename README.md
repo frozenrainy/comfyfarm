@@ -4,9 +4,9 @@ A job router for a farm of [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 
 side. Users keep the stock ComfyUI frontend; ComfyFarm queues their jobs, hands each one to a suitable idle worker, and
 relays progress, previews and errors back to the browser that submitted it.
 
-> **Status: pre-release.** Milestones M1–M4a are implemented (core dispatch, events + gateway, monitoring, web UI with
-> accounts and group permissions); rolling upgrades (M4b) and the mixed CUDA/ROCm acceptance run (M5) come before a
-> first release. See the
+> **Status: pre-release.** Milestones M1–M4 are implemented (core dispatch, events + gateway, monitoring, web UI with
+> accounts and group permissions, rolling upgrades); the mixed CUDA/ROCm acceptance run (M5) comes before a first
+> release. See the
 > [roadmap](docs/design/12-roadmap.md) for what each milestone contains.
 
 ## Why another one?
@@ -26,7 +26,9 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
 - Mixed CUDA/ROCm farms with capability-aware routing.
 - A web UI (dashboard, queue, history, administration; light/dark) with user accounts and per-user worker-group
   permissions, and `/metrics` for Prometheus with stall numbers defined so that an unknown value never reads as healthy.
-- Safe rolling restarts and ComfyUI upgrades via the shared `comfy-upgrade/1` contract (planned, M4).
+- Rolling ComfyUI upgrades one worker at a time — drained, verified, reverted on failure — via the shared
+  `comfy-upgrade/1` contract, with a stdlib-only launcher that refuses anything but published artifacts
+  ([setup](docs/guide/rollouts.md)).
 - Postgres ledger; single box by default, HA as an optional module.
 
 ## Documents

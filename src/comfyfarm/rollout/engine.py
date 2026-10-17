@@ -372,9 +372,14 @@ class Engine:
                 raise StepFailed("the launcher refused the render (exit 2)")
             last = await self.argv(w["base_url"])
             if last == render["argv"][1:]:
-                async with self.db.conn() as c:     # badge and capabilities current right away
-                    await c.execute("UPDATE workers SET capabilities = capabilities || jsonb_build_object('argv', $2::jsonb) "
-                                    "WHERE id = $1", w["id"], last)
+                # badge, version and jobs API current right away (a restart shorter than the health probe interval
+                # leaves no failure streak behind that would make the monitor re-read them)
+                caps = await self.r.adapter.capabilities(w["base_url"])
+                if caps is not None:
+                    caps["jobs_api"] = await self.r.adapter.supports_jobs_api(w["base_url"])
+                async with self.db.conn() as c:
+                    await c.execute("UPDATE workers SET capabilities = coalesce($3, capabilities) || jsonb_build_object('argv', $2::jsonb) "
+                                    "WHERE id = $1", w["id"], last, caps)
                 return
             await asyncio.sleep(self.poll)
         why = "never came back" if last is None else "came back with a different argv (badge: differs)"
