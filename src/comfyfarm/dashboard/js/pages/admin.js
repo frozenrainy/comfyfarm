@@ -1,8 +1,9 @@
 // System administration: workers, groups, users, statistics (admins only; the router enforces it as well).
 import { TZ, act, api, button, dailyChart, dur, formDialog, h, hours, namedRow, noteInput, periodPicker, pill, progressOf,
          qs, setPill, setText, statCards, syncNote, syncRows, table, when } from "../core.js";
+import { rollout } from "./rollout.js";
 
-const TABS = [["workers", "Workers"], ["groups", "Groups"], ["users", "Users"], ["stats", "Statistics"]];
+const TABS = [["workers", "Workers"], ["groups", "Groups"], ["users", "Users"], ["rollout", "Rollout"], ["stats", "Statistics"]];
 const BACKENDS = ["cuda", "rocm", "xpu", "mps", "cpu"];
 const OSES = [["posix", "Linux / macOS"], ["nt", "Windows"]];
 
@@ -13,7 +14,7 @@ export default {
     root.append(h("nav", { class: "tabs" }, ...TABS.map(([k, label]) => h("a", { href: `#/admin/${k}`, class: k === sub ? "on" : "" }, label))));
     const body = h("div");
     root.append(body);
-    return { workers, groups, users, stats }[sub](body, ctx);
+    return { workers, groups, users, rollout, stats }[sub](body, ctx);
   },
 };
 

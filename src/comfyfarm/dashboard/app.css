@@ -139,7 +139,20 @@ dialog.form h3 { margin: 0 0 .8rem; }
 .field { margin-bottom: .7rem; display: flex; flex-direction: column; gap: .2rem; }
 .field .label { font-size: .85rem; color: var(--muted); }
 .field .hint { font-size: .78rem; color: var(--muted); }
-.field input:not([type=checkbox]):not([type=radio]), .field select { width: 100%; padding: .35rem .45rem; }
+.field input:not([type=checkbox]):not([type=radio]), .field select, .field textarea { width: 100%; padding: .35rem .45rem; }
+textarea { font: .85rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); background: var(--panel);
+           border: 1px solid var(--line); border-radius: 5px; }
+dialog.form.wide { width: min(56rem, 94vw); }
+pre.code { font: .78rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--panel-2); border: 1px solid var(--line);
+           border-radius: 6px; padding: .6rem; max-height: 60vh; overflow: auto; white-space: pre; overflow-wrap: normal; word-break: normal; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
+.callout { border: 1px solid var(--amber); color: var(--text); background: var(--panel); border-left-width: 4px; border-radius: 6px;
+           padding: .6rem .9rem; margin: .6rem 0; }
+.callout strong { color: var(--amber); }
+.s-match, .s-done, .s-succeeded { color: var(--ok); }
+.s-differs, .s-reverted, .s-interrupted, .s-aborting, .s-reverting, .s-draining, .s-restarting, .s-starting, .s-verifying { color: var(--amber); }
+.s-revert_failed, .s-aborted { color: var(--bad); }
+.s-unassigned, .s-skipped { color: var(--muted); }
 .checks { display: flex; flex-wrap: wrap; gap: .3rem .9rem; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
 .dialog-actions button { font-size: .9rem; padding: .3rem .9rem; }

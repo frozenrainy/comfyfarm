@@ -251,8 +251,10 @@ def make_router(ctx: Ctx) -> APIRouter:
     async def list_instances(x_comfyfarm_user: str | None = Header(default=None)):
         ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
+            # explicit instance columns: `i.*` would bring a NULL worker_id for workers without an instance
             rows = await c.fetch("SELECT w.id AS worker_id, w.name AS worker, w.state, w.enabled, w.maintenance, w.capabilities, "
-                                 "g.name AS group_name, i.*, p.name AS profile_name FROM workers w "
+                                 "g.name AS group_name, i.instance, i.role, i.platform, i.hosts, i.listen, i.port, i.paths, "
+                                 "i.restart_backend, i.restart_config, i.profile_id, p.name AS profile_name FROM workers w "
                                  "LEFT JOIN worker_groups g ON g.id = w.group_id LEFT JOIN instances i ON i.worker_id = w.id "
                                  "LEFT JOIN profiles p ON p.id = i.profile_id WHERE w.deleted_at IS NULL ORDER BY w.name")
             profiles = {r["id"]: r for r in await c.fetch("SELECT * FROM profiles")}

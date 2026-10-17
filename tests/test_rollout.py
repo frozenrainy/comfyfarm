@@ -261,6 +261,9 @@ async def test_profiles_instances_and_render_endpoint(farm):
     assert (await instances(api))["w2"]["badge"] == "differs"
     # a rollout needs instance configuration on every worker
     plain = (await api.post("/api/admin/workers", json={"name": "plain", "base_url": f"http://127.0.0.1:{free_port()}"}, headers=H)).json()["id"]
+    listed = (await api.get("/api/admin/instances", headers=H)).json()
+    assert sorted(i["worker_id"] for i in listed) == sorted([hosts["w1"].wid, hosts["w2"].wid, plain])   # no NULL ids
+    assert next(i for i in listed if i["worker_id"] == plain)["instance"] is None
     res = await api.post("/api/admin/rollouts", headers=H, json={"profile_id": p2, "worker_ids": [plain]})
     assert res.status_code == 400 and "instance" in res.text
     assert (await api.get("/api/admin/profiles", headers={"X-ComfyFarm-User": "bob"})).status_code == 403

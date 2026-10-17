@@ -160,7 +160,7 @@ export function button(label, onclick, opts = {}) {
 
 // ---- dialogs ---------------------------------------------------------------------------------------------------
 // fields: [{name, label, type: text|password|number|checkbox|checkboxes|select, value, options:[{value,label}], hint}]
-export function formDialog(title, fields, submitLabel = "Save") {
+export function formDialog(title, fields, submitLabel = "Save", { wide = false, noSubmit = false } = {}) {
   return new Promise((resolve) => {
     const inputs = {};
     const rows = fields.map((f) => {
@@ -176,6 +176,14 @@ export function formDialog(title, fields, submitLabel = "Save") {
         const cb = h("input", { type: "checkbox", checked: f.value });
         inputs[f.name] = () => cb.checked;
         control = h("label", { class: "check" }, cb, ` ${f.text || ""}`);
+      } else if (f.type === "textarea") {
+        const ta = h("textarea", { rows: f.rows || 4, placeholder: f.placeholder, spellcheck: "false" });
+        ta.value = f.value ?? "";
+        inputs[f.name] = () => ta.value;
+        control = ta;
+      } else if (f.type === "pre") {
+        inputs[f.name] = () => null;
+        control = h("pre", { class: "code" }, f.value ?? "");
       } else if (f.type === "select") {
         const sel = h("select", {}, ...(f.options || []).map((o) => h("option", { value: o.value }, o.label)));
         sel.value = f.value ?? "";
@@ -189,18 +197,19 @@ export function formDialog(title, fields, submitLabel = "Save") {
       }
       return h("div", { class: "field" }, h("div", { class: "label" }, f.label), control, f.hint ? h("div", { class: "hint" }, f.hint) : null);
     });
-    const dlg = h("dialog", { class: "form" });
+    const dlg = h("dialog", { class: wide ? "form wide" : "form" });
     const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };
     const form = h("form", { method: "dialog", onsubmit: (e) => {
       e.preventDefault();
       done(Object.fromEntries(Object.entries(inputs).map(([k, get]) => [k, get()])));
     } }, h("h3", {}, title), ...rows,
-      h("div", { class: "dialog-actions" }, button("Cancel", () => done(null)), h("button", { type: "submit", class: "primary" }, submitLabel)));
+      h("div", { class: "dialog-actions" }, button(noSubmit ? "Close" : "Cancel", () => done(null)),
+        noSubmit ? null : h("button", { type: "submit", class: "primary" }, submitLabel)));
     dlg.append(form);
     dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(null); });
     document.body.append(dlg);
     dlg.showModal();
-    form.querySelector("input:not([type=checkbox]), select")?.focus();
+    form.querySelector("input:not([type=checkbox]), select, textarea")?.focus();
   });
 }
 

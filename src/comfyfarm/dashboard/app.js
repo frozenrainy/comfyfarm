@@ -63,6 +63,6 @@ function route() {
   tick();
 }
 
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => { if (state.me) route(); });   // before loadMe: its .then(route) routes
 document.addEventListener("visibilitychange", () => { if (!document.hidden && current?.poll) tick(); });
 loadMe().then(route, (e) => showFreshness(e));
