@@ -214,3 +214,12 @@ async def test_history_search_filters_and_pages(farm):
     old = (dt.date.today() - dt.timedelta(days=400)).isoformat()
     assert (await ok(await c.get(f"/api/farm/history?start={old}&end={old}", headers=H("ann"))))["total"] == 0
     assert (await c.get("/api/farm/history?status=running", headers=H("ann"))).status_code == 400
+
+
+async def test_queue_badge_summary(farm):
+    r, c = farm
+    await group(c, "g1")
+    for i in range(3):
+        await submit(c, "admin", 40 + i)
+    assert (await ok(await c.get("/api/farm/summary", headers=H("admin")))) == {"queued": 3, "running": 0}
+    assert (await ok(await c.get("/api/farm/summary", headers=H("tester")))) == {"queued": 0, "running": 0}

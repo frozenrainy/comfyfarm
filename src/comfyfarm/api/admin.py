@@ -15,6 +15,16 @@ from .account import password_problem
 from .context import Ctx
 
 USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
+# Site settings: key → (type, default, description). Unknown keys are refused.
+SETTINGS = {
+    "login_user_list": (bool, False, "Login page offers the user names as a drop-down (anyone who can open the login "
+                                     "page sees them; passwords are still required)"),
+}
+
+
+async def get_setting(c, key: str):
+    v = await c.fetchval("SELECT value FROM settings WHERE key = $1", key)
+    return SETTINGS[key][1] if v is None else v
 
 
 class GroupIn(BaseModel):
@@ -345,6 +355,32 @@ def make_router(ctx: Ctx) -> APIRouter:
                     raise HTTPException(409, "this is the last active admin")
                 await c.execute("DELETE FROM users WHERE username = $1", username)
         return {"deleted": True}
+
+    # ---- site settings ------------------------------------------------------------------------------------------
+    @api.get("/api/admin/settings")
+    async def read_settings(x_comfyfarm_user: str | None = Header(default=None)):
+        ctx.admin(x_comfyfarm_user)
+        async with db.conn() as c:
+            return {k: {"value": await get_setting(c, k), "default": d, "description": text}
+                    for k, (_t, d, text) in SETTINGS.items()}
+
+    @api.put("/api/admin/settings")
+    async def write_settings(body: dict, x_comfyfarm_user: str | None = Header(default=None)):
+        who = ctx.admin(x_comfyfarm_user)
+        for k, v in body.items():
+            if k not in SETTINGS:
+                raise HTTPException(400, f"unknown setting {k!r}")
+            if not isinstance(v, SETTINGS[k][0]):
+                raise HTTPException(400, f"{k} must be {SETTINGS[k][0].__name__}")
+        async with db.conn() as c:
+            async with c.transaction():
+                for k, v in body.items():
+                    await c.execute("INSERT INTO settings(key, value, updated_by) VALUES ($1, $2, $3) ON CONFLICT (key) "
+                                    "DO UPDATE SET value = excluded.value, updated_at = now(), updated_by = excluded.updated_by",
+                                    k, v, who)
+                    await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ($1, 'setting changed', $2, $3)",
+                                    who, k, {"value": v})
+        return {"saved": True}
 
     # ---- statistics -------------------------------------------------------------------------------------------
     @api.get("/api/admin/stats")

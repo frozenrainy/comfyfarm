@@ -12,18 +12,20 @@
   <a class="brand" href="#/">ComfyFarm</a>
   <nav id="nav">
     <a href="#/" data-page="">Dashboard</a>
-    <a href="#/queue" data-page="queue">Queue</a>
+    <a href="#/comfyui" data-page="comfyui">Workflow</a>
+    <a href="#/queue" data-page="queue">Queue <span id="qbadge" class="badge" hidden></span></a>
     <a href="#/history" data-page="history">History</a>
     <a href="#/admin/workers" data-page="admin" class="admin-only">System</a>
   </nav>
   <span class="spacer"></span>
   <span id="updated" class="muted"></span>
   <a href="#/settings" data-page="settings" id="me"></a>
-  <a href="/">ComfyUI</a>
+  <a href="/" target="_blank" rel="noopener" title="ComfyUI on its own, in a new tab">ComfyUI ↗</a>
   <a href="/comfyfarm/logout">Log out</a>
 </header>
 <div id="stale" class="banner" hidden></div>
 <main id="page"></main>
+<div id="workflow" hidden></div>
 <div id="toast" hidden></div>
 <script type="module" src="app.js"></script>
 </body>

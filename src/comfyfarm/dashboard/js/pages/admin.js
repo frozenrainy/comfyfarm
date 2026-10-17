@@ -3,7 +3,8 @@ import { TZ, act, api, button, dailyChart, dur, formDialog, h, hours, namedRow, 
          qs, setPill, setText, statCards, syncNote, syncRows, table, when } from "../core.js";
 import { rollout } from "./rollout.js";
 
-const TABS = [["workers", "Workers"], ["groups", "Groups"], ["users", "Users"], ["rollout", "Rollout"], ["stats", "Statistics"]];
+const TABS = [["workers", "Workers"], ["groups", "Groups"], ["users", "Users"], ["rollout", "Rollout"], ["stats", "Statistics"],
+              ["settings", "Settings"]];
 const BACKENDS = ["cuda", "rocm", "xpu", "mps", "cpu"];
 const OSES = [["posix", "Linux / macOS"], ["nt", "Windows"]];
 
@@ -14,7 +15,7 @@ export default {
     root.append(h("nav", { class: "tabs" }, ...TABS.map(([k, label]) => h("a", { href: `#/admin/${k}`, class: k === sub ? "on" : "" }, label))));
     const body = h("div");
     root.append(body);
-    return { workers, groups, users, rollout, stats }[sub](body, ctx);
+    return { workers, groups, users, rollout, stats, settings }[sub](body, ctx);
   },
 };
 
@@ -260,6 +261,28 @@ function stats(root, { refresh }) {
           [["Busy", (w) => (w.utilization == null ? "—" : w.utilization > 0 && w.utilization < 0.001 ? "<0.1%" : `${(w.utilization * 100).toFixed(1)}%`)]]),
         h("p", { class: "muted small" }, "Jobs count in the period they finished. GPU time = worker held the job (dispatch → finish, " +
           "model loading included). Busy = share of the period the worker held any job."));
+    },
+  };
+}
+
+// ---- site settings ------------------------------------------------------------------------------------------------
+const SETTING_LABELS = { login_user_list: "Pick the user name from a list on the login page" };
+
+function settings(root, { refresh }) {
+  const box = h("div", { class: "panel stack" });
+  root.append(h("section", {}, head("Settings"), box));
+  let sig = "";
+  return {
+    async refresh() {
+      const all = await api("GET", "/api/admin/settings");
+      const next = JSON.stringify(all);
+      if (next === sig) return;
+      sig = next;
+      box.replaceChildren(...Object.entries(all).map(([key, st]) => h("div", {},
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: st.value === true, onchange: (e) =>
+          act(() => api("PUT", "/api/admin/settings", { [key]: e.target.checked }), "Saved", refresh) }),
+          ` ${SETTING_LABELS[key] || key}`),
+        h("div", { class: "muted small" }, st.description))));
     },
   };
 }

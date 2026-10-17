@@ -1,0 +1,278 @@
+{
+ "_source": "ComfyUI 0.41.0 /object_info, captured for the fake worker",
+ "nodes": {
+  "EmptyImage": {
+   "category": "image",
+   "description": "",
+   "display_name": "Empty Image",
+   "has_intermediate_output": false,
+   "input": {
+    "required": {
+     "batch_size": [
+      "INT",
+      {
+       "default": 1,
+       "max": 4096,
+       "min": 1
+      }
+     ],
+     "color": [
+      "INT",
+      {
+       "default": 0,
+       "display": "color",
+       "max": 16777215,
+       "min": 0,
+       "step": 1
+      }
+     ],
+     "height": [
+      "INT",
+      {
+       "default": 512,
+       "max": 16384,
+       "min": 1,
+       "step": 1
+      }
+     ],
+     "width": [
+      "INT",
+      {
+       "default": 512,
+       "max": 16384,
+       "min": 1,
+       "step": 1
+      }
+     ]
+    }
+   },
+   "input_order": {
+    "required": [
+     "width",
+     "height",
+     "batch_size",
+     "color"
+    ]
+   },
+   "is_input_list": false,
+   "name": "EmptyImage",
+   "output": [
+    "IMAGE"
+   ],
+   "output_is_list": [
+    false
+   ],
+   "output_name": [
+    "IMAGE"
+   ],
+   "output_node": false,
+   "python_module": "nodes",
+   "search_aliases": []
+  },
+  "ImageBlur": {
+   "api_node": false,
+   "category": "image/filters",
+   "deprecated": false,
+   "description": "",
+   "dev_only": false,
+   "display_name": "Blur Image",
+   "essentials_category": null,
+   "experimental": false,
+   "has_intermediate_output": false,
+   "input": {
+    "required": {
+     "blur_radius": [
+      "INT",
+      {
+       "default": 1,
+       "max": 31,
+       "min": 1,
+       "step": 1
+      }
+     ],
+     "image": [
+      "IMAGE",
+      {}
+     ],
+     "sigma": [
+      "FLOAT",
+      {
+       "default": 1.0,
+       "max": 10.0,
+       "min": 0.1,
+       "step": 0.1
+      }
+     ]
+    }
+   },
+   "input_order": {
+    "required": [
+     "image",
+     "blur_radius",
+     "sigma"
+    ]
+   },
+   "is_input_list": false,
+   "name": "ImageBlur",
+   "output": [
+    "IMAGE"
+   ],
+   "output_is_list": [
+    false
+   ],
+   "output_matchtypes": null,
+   "output_name": [
+    "IMAGE"
+   ],
+   "output_node": false,
+   "output_tooltips": [
+    null
+   ],
+   "price_badge": null,
+   "python_module": "comfy_extras.nodes_post_processing",
+   "search_aliases": null
+  },
+  "ImageInvert": {
+   "category": "image/color",
+   "description": "",
+   "display_name": "Invert Image Colors",
+   "essentials_category": "Image Tools",
+   "has_intermediate_output": false,
+   "input": {
+    "required": {
+     "image": [
+      "IMAGE"
+     ]
+    }
+   },
+   "input_order": {
+    "required": [
+     "image"
+    ]
+   },
+   "is_input_list": false,
+   "name": "ImageInvert",
+   "output": [
+    "IMAGE"
+   ],
+   "output_is_list": [
+    false
+   ],
+   "output_name": [
+    "IMAGE"
+   ],
+   "output_node": false,
+   "python_module": "nodes",
+   "search_aliases": [
+    "reverse colors"
+   ]
+  },
+  "PreviewImage": {
+   "category": "image",
+   "description": "Preview the images without saving them to the ComfyUI output directory.",
+   "display_name": "Preview Image",
+   "essentials_category": "Basics",
+   "has_intermediate_output": false,
+   "input": {
+    "hidden": {
+     "extra_pnginfo": "EXTRA_PNGINFO",
+     "prompt": "PROMPT"
+    },
+    "required": {
+     "images": [
+      "IMAGE"
+     ]
+    }
+   },
+   "input_order": {
+    "hidden": [
+     "prompt",
+     "extra_pnginfo"
+    ],
+    "required": [
+     "images"
+    ]
+   },
+   "is_input_list": false,
+   "name": "PreviewImage",
+   "output": [
+    "IMAGE"
+   ],
+   "output_is_list": [
+    false
+   ],
+   "output_name": [
+    "images"
+   ],
+   "output_node": true,
+   "python_module": "nodes",
+   "search_aliases": [
+    "preview",
+    "preview image",
+    "show image",
+    "view image",
+    "display image",
+    "image viewer"
+   ]
+  },
+  "SaveImage": {
+   "category": "image",
+   "description": "Saves the input images to your ComfyUI output directory.",
+   "display_name": "Save Image",
+   "essentials_category": "Basics",
+   "has_intermediate_output": false,
+   "input": {
+    "hidden": {
+     "extra_pnginfo": "EXTRA_PNGINFO",
+     "prompt": "PROMPT"
+    },
+    "required": {
+     "filename_prefix": [
+      "STRING",
+      {
+       "default": "ComfyUI",
+       "tooltip": "The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."
+      }
+     ],
+     "images": [
+      "IMAGE",
+      {
+       "tooltip": "The images to save."
+      }
+     ]
+    }
+   },
+   "input_order": {
+    "hidden": [
+     "prompt",
+     "extra_pnginfo"
+    ],
+    "required": [
+     "images",
+     "filename_prefix"
+    ]
+   },
+   "is_input_list": false,
+   "name": "SaveImage",
+   "output": [
+    "IMAGE"
+   ],
+   "output_is_list": [
+    false
+   ],
+   "output_name": [
+    "images"
+   ],
+   "output_node": true,
+   "python_module": "nodes",
+   "search_aliases": [
+    "save",
+    "save image",
+    "export image",
+    "output image",
+    "write image",
+    "download"
+   ]
+  }
+ }
+}

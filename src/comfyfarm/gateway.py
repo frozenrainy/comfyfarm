@@ -41,7 +41,31 @@ ROUTER_PREFIXES = ("/api/prompt", "/api/jobs", "/api/queue", "/api/history", "/a
                    "/api/farm/", "/api/admin/", "/api/health/",
                    "/comfyfarm/dashboard", "/prompt", "/queue", "/history", "/interrupt", "/object_info")
 DASHBOARD = "/comfyfarm/dashboard/"
-AFTER_LOGIN = ("/", DASHBOARD)
+AFTER_LOGIN = ("/", DASHBOARD)           # the dashboard is the landing page; "/" (bare ComfyUI) only when asked for
+# Same look as the dashboard; the theme the browser last used there (localStorage) before the first paint.
+LOGIN_PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+<title>ComfyFarm</title>
+<script>
+if (window.top !== window) window.top.location.href = location.href;   // an expired session inside the Workflow tab
+document.documentElement.dataset.theme = localStorage.getItem("comfyfarm.theme") || "light";
+</script>
+<style>
+:root {{ --bg:#f7f7f5; --panel:#fff; --line:#e3e3df; --text:#1f2328; --muted:#6a6f76; --accent:#0b5cad; --bad:#c62828; color-scheme:light }}
+:root[data-theme=dark] {{ --bg:#15171a; --panel:#1d2024; --line:#33383f; --text:#e6e8eb; --muted:#9aa1aa; --accent:#6cb0ff; --bad:#ff6b6b; color-scheme:dark }}
+@media (prefers-color-scheme: dark) {{ :root[data-theme=auto] {{ --bg:#15171a; --panel:#1d2024; --line:#33383f; --text:#e6e8eb; --muted:#9aa1aa; --accent:#6cb0ff; --bad:#ff6b6b; color-scheme:dark }} }}
+* {{ box-sizing:border-box }}
+body {{ margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--text);
+        font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; word-break:keep-all }}
+form {{ background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:1.6rem 1.8rem; width:min(22rem,92vw);
+        display:flex; flex-direction:column; gap:.7rem }}
+h1 {{ font-size:1.15rem; margin:0 0 .3rem }}
+input, select {{ font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:.5rem .6rem; width:100% }}
+button {{ font:inherit; padding:.5rem; border:0; border-radius:6px; background:var(--accent); color:var(--panel); cursor:pointer; font-weight:600 }}
+p {{ margin:0 }} .bad {{ color:var(--bad) }} .note {{ color:var(--muted) }}
+</style></head><body>
+<form method=post action=/comfyfarm/login><h1>ComfyFarm</h1>{msg}<input type=hidden name=next value="{next}">
+{user_field}<input name=password type=password placeholder=Password autocomplete=current-password><button>Log in</button></form>
+</body></html>"""
 IDENTITY_HEADERS = {"x-comfyfarm-user", "x-comfyfarm-roles", "x-comfyfarm-gateway", "comfy-user",
                     "x-comfyfarm-gateway-login"}
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
@@ -165,18 +189,30 @@ def create_gateway(s: GatewaySettings) -> Starlette:
 
     # ---- login -------------------------------------------------------------------------------------------------
     def safe_next(v) -> str:
-        return v if v in AFTER_LOGIN else "/"      # fixed list: a free-form target would be an open redirect
+        return v if v in AFTER_LOGIN else DASHBOARD   # fixed list: a free-form target would be an open redirect
+
+    async def login_users() -> list[str] | None:
+        """User names for the login form's drop-down, if an admin enabled it (System → Settings); None otherwise or
+        when the router cannot say — the form then falls back to a text field."""
+        try:
+            r = await http.get(f"{s.router_url}/api/internal/login-options", headers={"x-comfyfarm-gateway-login": s.secret},
+                               timeout=3)
+            return r.json().get("users") if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            return None
 
     async def login_page(request: Request):
         err = request.query_params.get("e")
         note = "Password changed. Log in again." if request.query_params.get("m") == "pw" else ""
         nxt = safe_next(request.query_params.get("next"))
-        return HTMLResponse(f"""<!doctype html><meta charset=utf-8><title>ComfyFarm</title>
-<style>body{{font-family:system-ui;max-width:22rem;margin:12vh auto;color:#222}}input{{width:100%;padding:.5rem;margin:.3rem 0}}
-button{{padding:.5rem 1rem}}</style><h2>ComfyFarm</h2>{'<p style=color:#b00>Login failed</p>' if err else ''}{f'<p>{note}</p>' if note else ''}
-<form method=post action=/comfyfarm/login><input type=hidden name=next value="{nxt}">
-<input name=username placeholder=Username autofocus>
-<input name=password type=password placeholder=Password><button>Log in</button></form>""")
+        users = await login_users() if s.provider == "local" else None
+        if users:
+            options = "".join(f"<option>{html.escape(u)}</option>" for u in users)
+            user_field = f'<select name=username autofocus><option value="" disabled selected>User</option>{options}</select>'
+        else:
+            user_field = "<input name=username placeholder=User autocomplete=username autofocus>"
+        msg = ('<p class=bad>Login failed</p>' if err else '') + (f'<p class=note>{html.escape(note)}</p>' if note else '')
+        return HTMLResponse(LOGIN_PAGE.format(next=html.escape(nxt), user_field=user_field, msg=msg))
 
     async def login(request: Request):
         if not same_origin_ok(request):

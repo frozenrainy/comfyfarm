@@ -8,8 +8,8 @@ import settings from "./js/pages/settings.js";
 import admin from "./js/pages/admin.js";
 
 const PAGES = { "": dashboard, queue, history, settings, admin };
-const POLL_HIDDEN = 15000;
-let current = null, timer = null, lastOk = null, generation = 0;
+const POLL_HIDDEN = 15000, BADGE_EVERY = 5000;
+let current = null, timer = null, lastOk = null, generation = 0, frame = null;
 
 async function loadMe() {
   state.me = await api("GET", "/api/farm/me");
@@ -43,16 +43,55 @@ async function tick() {
   if (page.poll) timer = setTimeout(tick, document.hidden ? POLL_HIDDEN : page.poll);
 }
 
+// ---- Workflow tab: stock ComfyUI (same origin, through the gateway) under the ComfyFarm header -------------------
+function showWorkflow(on) {
+  document.body.classList.toggle("workflow", on);
+  $("#workflow").hidden = !on;
+  if (on && !frame) {                       // created once: switching tabs hides it, never reloads it
+    frame = document.createElement("iframe");
+    frame.title = "ComfyUI";
+    frame.src = "/";
+    frame.allow = "clipboard-read; clipboard-write; fullscreen";
+    $("#workflow").append(frame);
+  }
+}
+
+async function updateBadge() {
+  try {
+    const s = await api("GET", "/api/farm/summary");
+    const b = $("#qbadge"), n = s.queued + s.running;
+    b.hidden = n === 0;
+    setText(b, String(n));
+    b.classList.toggle("running", s.running > 0);
+    b.title = `${s.running} running · ${s.queued} waiting`;
+  } catch { /* the page's own refresh reports outages */ }
+}
+
+// Messages from the ComfyUI extension in the Workflow tab — only from that frame, only from this origin.
+window.addEventListener("message", (e) => {
+  if (e.origin !== location.origin || !frame || e.source !== frame.contentWindow) return;
+  if (e.data?.type === "comfyfarm:queued") {
+    updateBadge();
+    if (current?.poll) tick();
+  }
+});
+
 function route() {
   const [path, query] = location.hash.replace(/^#\/?/, "").split("?");
   const [name, sub] = path.split("/");
-  const page = PAGES[name] ?? dashboard;
   generation++;
   clearTimeout(timer);
   current?.unmount?.();
+  for (const a of document.querySelectorAll("header [data-page]")) a.classList.toggle("on", a.dataset.page === (name in PAGES || name === "comfyui" ? name : ""));
+  showWorkflow(name === "comfyui");
+  if (name === "comfyui") {
+    current = null;
+    $("#stale").hidden = true;
+    return;
+  }
+  const page = PAGES[name] ?? dashboard;
   const root = $("#page");
   root.replaceChildren();
-  for (const a of document.querySelectorAll("header [data-page]")) a.classList.toggle("on", a.dataset.page === (PAGES[name] ? name : ""));
   if (page.adminOnly && !state.me.admin) {
     root.textContent = "Administrators only.";
     current = null;
@@ -66,3 +105,5 @@ function route() {
 window.addEventListener("hashchange", () => { if (state.me) route(); });   // before loadMe: its .then(route) routes
 document.addEventListener("visibilitychange", () => { if (!document.hidden && current?.poll) tick(); });
 loadMe().then(route, (e) => showFreshness(e));
+updateBadge();
+setInterval(updateBadge, BADGE_EVERY);

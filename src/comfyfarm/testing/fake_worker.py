@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import logging
+import pathlib
 import re
 import struct
 import time
@@ -41,6 +42,8 @@ NODES = {
     "SaveImage": ({"images": "IMAGE", "filename_prefix": "STRING"}, []),
 }
 OUTPUT_NODES = {"PreviewImage", "SaveImage"}
+REAL_DEFS = json.loads((pathlib.Path(__file__).parent / "fake_object_info.json").read_text())["nodes"]
+assert set(REAL_DEFS) == set(NODES), "fake_object_info.json must cover exactly the fake's nodes"
 
 
 def node_cost(node: dict) -> tuple[int, float]:
@@ -327,8 +330,8 @@ class FakeWorker:
     async def get_object_info(self, request):
         if not self.object_info_ok:
             return web.json_response({"error": "node import failed"}, status=500)
-        return web.json_response({k: {"input": {"required": {n: [t] for n, t in spec.items()}}, "output": out,
-                                      "output_node": k in OUTPUT_NODES} for k, (spec, out) in NODES.items()})
+        # the real definitions of the fake's nodes (current frontends drop definitions missing name/category/…)
+        return web.json_response(REAL_DEFS)
 
     async def get_system_stats(self, request):
         torch = "2.14.0+rocm7.2" if self.backend == "rocm" else "2.14.0+cu130"

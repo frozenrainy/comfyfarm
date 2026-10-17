@@ -161,3 +161,13 @@ pre.code { font: .78rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; back
 #toast { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); background: var(--toast); color: #fff;
          padding: .5rem 1rem; border-radius: 6px; max-width: 90vw; z-index: 10; }
 #toast.bad { background: var(--bad); }
+
+/* Workflow tab: ComfyUI below the header, in an iframe that lives as long as the page (state survives tab switches) */
+body.workflow { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+body.workflow main { display: none; }
+#workflow { flex: 1; min-height: 0; }
+#workflow iframe { border: 0; width: 100%; height: 100%; display: block; background: #202020; }
+.badge { display: inline-block; min-width: 1.3em; padding: 0 .35em; border-radius: 999px; background: var(--accent); color: var(--panel);
+         font-size: .72rem; font-weight: 600; text-align: center; line-height: 1.5; }
+.badge.running { background: var(--ok); }
+.badge[hidden] { display: none; }        /* an author `display` beats the hidden attribute otherwise */

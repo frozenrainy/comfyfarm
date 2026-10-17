@@ -7,6 +7,7 @@ Pages are hash routes; each page mounts into the shell and exposes `refresh()`. 
 
 | Page | Who | Content |
 |---|---|---|
+| Workflow `#/comfyui` | everybody | the stock ComfyUI (served through the gateway, same origin) in an iframe under the ComfyFarm header. Created once and only hidden on other tabs, so an unsaved workflow, running previews and its WebSocket survive tab switches. `ComfyUI ↗` opens it bare in a new tab |
 | Dashboard `#/` | everybody | own unfinished jobs with their **place in line** (within their group, counting everybody's jobs) and a *blocked* mark when no group the owner may use can run the job; cards of the groups the user may use; own usage (24 h / 7 days / 30 days); last 10 finished jobs |
 | Queue `#/queue` | everybody | own unfinished jobs (admins: everybody's), search (id, note; admins also owner), status and group filters; pause/resume/cancel; admins reorder (⤒ ↑ ↓ ⤓) |
 | History `#/history` | everybody | finished jobs, newest first, 50 per page; search (id, note, error message; admins also owner), status/group/date filters; retry; notes |
@@ -18,6 +19,21 @@ Statistics (admin page; the dashboard shows the same numbers for one user): a pe
 / cancelled), and tables by group, user and worker. Jobs count in the period they finished; *GPU time* is worker
 occupancy (dispatch → finish, model loading included); *avg wait* is submit → dispatch, *avg run* start → finish of
 completed jobs; *busy* is the share of the period a worker held any job.
+
+Header: a **queue badge** with the user's unfinished jobs (polled every 5 s; the ComfyUI extension posts a same-origin
+message to the shell after each submit, so it updates at once — the shell accepts messages only from its own frame and
+origin).
+
+**Login** is the gateway's page in the dashboard's look (theme from the browser's last choice) and lands on the
+dashboard. *System → Settings → login user list* turns the user field into a drop-down of active local accounts
+(convenient on a small trusted network; anyone who can open the login page then sees the names — off by default).
+Inside the Workflow frame an expired session would show the login page; it takes over the whole window instead.
+
+**Group picker in ComfyUI.** The extension adds a `Group: …` button to ComfyUI's action bar next to Run (official
+`actionBarButtons` API). It lists the groups the user may use plus *Site default*; the choice is kept in the browser
+(localStorage) and sent with every submit and node-list request. Changing it reloads ComfyUI (node definitions are per
+group, D-20; the open workflow is restored). A remembered group the user may no longer use is dropped in the
+extension's `init` hook, which runs before the node definitions are fetched.
 
 Rules the implementation keeps:
 

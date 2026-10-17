@@ -143,6 +143,16 @@ def make_router(ctx: Ctx) -> APIRouter:
                 "recent": [job_doc(r) for r in recent],
                 "stats": {k: mystats[k] for k in ("since", "until", "total", "groups", "daily")}}
 
+    @api.get("/api/farm/summary")
+    async def summary(x_comfyfarm_user: str | None = Header(default=None)):
+        """The header's queue badge: the caller's unfinished jobs (polled; cheap)."""
+        who = ctx.identity(x_comfyfarm_user)
+        async with db.conn() as c:
+            r = await c.fetchrow("SELECT count(*) FILTER (WHERE status IN ('pending','paused')) AS queued, "
+                                 "count(*) FILTER (WHERE status IN ('dispatching','running','cancelling')) AS running "
+                                 "FROM jobs WHERE owner = $1 AND deleted_at IS NULL", who)
+        return {"queued": r["queued"], "running": r["running"]}
+
     @api.get("/api/farm/stats")
     async def my_stats(x_comfyfarm_user: str | None = Header(default=None), days: int | None = None,
                        start: str | None = None, end: str | None = None, tz: str | None = None):

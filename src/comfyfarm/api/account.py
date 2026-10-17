@@ -51,6 +51,18 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(401, "bad credentials")
         return {"user": u["username"], "epoch": u["session_epoch"]}
 
+    @api.get("/api/internal/login-options")
+    async def login_options(request: Request):
+        """For the gateway's login form: the user names, only if an admin enabled the drop-down."""
+        gateway_only(request)
+        from .admin import get_setting
+        async with db.conn() as c:
+            if not await get_setting(c, "login_user_list"):
+                return {"users": None}
+            rows = await c.fetch("SELECT username FROM users WHERE disabled_at IS NULL AND password_hash IS NOT NULL "
+                                 "ORDER BY lower(username)")
+        return {"users": [r["username"] for r in rows]}
+
     @api.post("/api/internal/session")
     async def internal_session(request: Request):
         """Is this session still good, and with which roles? Asked by the gateway at most every SESSION_TTL per

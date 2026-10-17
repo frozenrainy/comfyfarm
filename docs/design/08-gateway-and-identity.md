@@ -49,6 +49,11 @@ operations open.
 Every identity has a row in `users` — local accounts with a scrypt password, external ones (trusted-header, later OIDC)
 created on first sight without a password. Admins manage accounts in the dashboard (13-web-ui.md).
 
+**Login page.** Served by the gateway (it must work before any session), styled like the dashboard, landing on the
+dashboard (`next` accepts only `/` and the dashboard: a free target would be an open redirect). An admin setting can
+offer the active local user names as a drop-down; the gateway asks the router for them (`/api/internal/login-options`,
+shared secret) and falls back to a text field when the router does not answer.
+
 **Group permissions (D-34).** A user may use the worker groups granted to them (`user_groups`, any number); admins may
 use all. Submitting to another group is refused (403, stock error shape); a user with no group cannot submit. A job
 carries `allowed_groups` — the owner's permissions, kept in step: a grant or revocation re-stamps the owner's queued

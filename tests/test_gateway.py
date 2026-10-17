@@ -207,9 +207,9 @@ async def test_dashboard_through_gateway(farm):
     async with httpx.AsyncClient() as c:
         # only fixed targets after login: anything else would be an open redirect
         r = await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "pw-alice", "next": "https://evil.example/"})
-        assert r.headers["location"] == "/"
+        assert r.headers["location"] == "/comfyfarm/dashboard/"
         r = await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "nope", "next": "//evil.example"})
-        assert r.headers["location"] == "/comfyfarm/login?next=/&e=1"
+        assert r.headers["location"] == "/comfyfarm/login?next=/comfyfarm/dashboard/&e=1"
         await login(c, gw, "alice", "pw-alice")
         assert (await c.get(f"{gw}/api/farm/me")).json()["admin"] is False
         assert (await c.get(f"{gw}/api/admin/workers")).status_code == 403
@@ -268,3 +268,31 @@ async def test_session_cache_window_and_router_outage(farm, monkeypatch):
         await task
         r = await root.get(f"{gw}/")
         assert r.status_code == 503 and "router unavailable" in r.text
+
+
+async def test_login_lands_on_the_dashboard_and_optional_user_list(farm):
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        assert (await login(c, gw, "alice", "pw-alice")).headers["location"] == "/comfyfarm/dashboard/"   # default landing
+        assert (await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "pw-alice", "next": "/"})).headers["location"] == "/"
+        assert (await c.put(f"{gw}/api/admin/settings", json={"login_user_list": True})).status_code == 403   # admins only
+    page = (await httpx.AsyncClient().get(f"{gw}/comfyfarm/login")).text
+    assert "<input name=username" in page and "<select" not in page                     # off by default: no names
+    assert "window.top !== window" in page                                             # breaks out of the Workflow iframe
+    async with httpx.AsyncClient() as root:
+        await login(root, gw, "root", "pw-root")
+        assert (await root.put(f"{gw}/api/admin/settings", json={"login_user_list": "yes"})).status_code == 400
+        assert (await root.put(f"{gw}/api/admin/settings", json={"nope": True})).status_code == 400
+        assert (await root.put(f"{gw}/api/admin/settings", json={"login_user_list": True})).status_code == 200
+        assert (await root.get(f"{gw}/api/admin/settings")).json()["login_user_list"]["value"] is True
+        await add_user_disabled(farm, "mallory")
+    page = (await httpx.AsyncClient().get(f"{gw}/comfyfarm/login")).text
+    assert "<select name=username" in page and "<option>alice</option>" in page and "<option>root</option>" in page
+    assert "mallory" not in page                                                       # disabled accounts are not offered
+    async with httpx.AsyncClient() as c:                                               # the list does not replace the password
+        assert (await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "x"})).headers["location"].endswith("e=1")
+
+
+async def add_user_disabled(farm, name):
+    async with farm["router"].db.conn() as c:
+        await c.execute("INSERT INTO users(username, password_hash, disabled_at) VALUES ($1, 'scrypt$1$x$y', now())", name)
