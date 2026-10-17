@@ -45,8 +45,12 @@ def count(root: str) -> tuple[int, int]:
 
 def write_manifest(path: str, kind: str, name: str, **extra) -> dict:
     files, size = count(path)
+    try:
+        digest = tree_sha256(path)
+    except ValueError as e:                          # contract §2: unsupported entry kinds / newline names
+        raise Refused(str(e))
     m = {"contract": CONTRACT, "kind": kind, "name": name, "created": dt.datetime.now(dt.timezone.utc).isoformat(),
-         "build_host": socket.gethostname(), "files": files, "bytes": size, "tree_sha256": tree_sha256(path), **extra}
+         "build_host": socket.gethostname(), "files": files, "bytes": size, "tree_sha256": digest, **extra}
     with open(os.path.join(path, "manifest.json"), "w") as f:
         json.dump(m, f, indent=1)
     return m
@@ -65,6 +69,10 @@ def publish_tree(art: str, kind: str, name: str, src: str) -> dict:
     path = target(art, kind, name)
     if kind == "core" and not os.path.isfile(os.path.join(src, "main.py")):
         raise Refused(f"{src} does not look like a ComfyUI release (no main.py)")
+    try:
+        tree_sha256(src)                                  # refuse odd entries before copying anything (contract §2)
+    except ValueError as e:
+        raise Refused(str(e))
     tmp = f"{path}.tmp-{os.getpid()}"
     shutil.copytree(src, tmp, symlinks=True, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
     os.rename(tmp, path)

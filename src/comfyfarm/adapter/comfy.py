@@ -138,6 +138,20 @@ class ComfyAdapter:
         except Exception:
             return None
 
+    async def worker_info(self, base_url: str) -> dict | None:
+        """The comfyfarm_worker extension's GET /comfyfarm/info (allow-list state, ws fix, version); None without
+        the extension or without an answer — the two are told apart by the caller (404 vs no answer)."""
+        try:
+            r = await self.http.get(f"{base_url}/comfyfarm/info", timeout=QUERY_TIMEOUT)
+        except Exception:
+            return None
+        if r.status_code == 404:
+            return {"installed": False}
+        try:
+            return {"installed": True, **r.json()} if r.status_code == 200 else None
+        except ValueError:
+            return None
+
     async def cancel(self, base_url: str, prompt_id: str, jobs_api: bool = True) -> bool | None:
         """Cancel wherever the job is (pending or running). True = something was cancelled, False = nothing to
         cancel (finished/unknown), None = no answer. Interrupt is cooperative (P7): the job may run on for a while."""

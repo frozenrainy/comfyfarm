@@ -1,6 +1,6 @@
 # comfy-upgrade/1 — ComfyUI farm upgrade contract (export edition)
 
-Status: v1.1, 2026-10-16 (1.1 = additive fields in §9; still `comfy-upgrade/1`). Audience: any farm router implementation that wants to share the same **builder**, **launcher** and **artifact store**.
+Status: v1.2, 2026-10-18 (1.1 = additive fields in §9; 1.2 = clarifications of `tree_sha256` and `rev` in §2/§3, agreed by both implementations; still `comfy-upgrade/1`). Audience: any farm router implementation that wants to share the same **builder**, **launcher** and **artifact store**.
 This is the canonical, export-safe text of the contract. Both implementations version against this document; internal editions only add site notes.
 
 > Principle: **the builder and the launcher never import router code.** A router is compatible if it speaks the HTTP/JSON shapes below.
@@ -45,7 +45,13 @@ Out of scope (implementation-specific): front door / gateway, identity provider,
 {"contract": "comfy-upgrade/1", "kind": "core|venv|nodes|frontend", "name": "...",
  "created": "ISO-8601", "build_host": "...", "files": 0, "bytes": 0, "tree_sha256": "..."}
 ```
-- `tree_sha256`: SHA-256 over the sorted list of (relative path, size) for files and (relative path, target) for symlinks. The launcher uses it to decide whether a local copy is current.
+- `tree_sha256` — a **change-detection key, not an integrity guarantee**. Definition (v1.2):
+  - Every entry that is not a directory is listed; symlinks are not followed (a symlink to a directory is listed as a symlink).
+  - One line per entry: `f <rel> <size>` for a regular file, `l <rel> <readlink target verbatim>` for a symlink. Any other kind (socket, FIFO, device) is refused at publish time.
+  - Excluded: only the top-level `manifest.json` and `READY`.
+  - `<rel>`: `/`-separated, no leading `./`, UTF-8 without normalisation. A name containing a newline, or one that is not valid UTF-8, is refused at publish time (so code-point order and byte order agree).
+  - Lines are sorted by their **full bytes** (the whole `f …`/`l …` line, so every file line precedes every symlink line — this is not a sort by path), ascending, and joined with `\n` **between** lines (no trailing newline); the hash is SHA-256 of that text. An empty tree hashes the empty string. Test vectors: appendix A.
+  - Consumers (launchers) compare the manifest value as an opaque string (MUST) and never recompute it to decide whether a local copy is current (MUST NOT); a builder that publishes with a different encoding only makes its own artifacts look changed.
 - Optional per kind: core `source_sha256`; venv `base`, `class`, `changed[]`, `sm{}`, `pip_check_inherited[]`, `python`.
 
 ## 3. Render JSON — `GET /api/worker_profile?instance=<inst>`
@@ -78,7 +84,7 @@ Out of scope (implementation-specific): front door / gateway, identity provider,
  "rev": "<12 hex>"
 }
 ```
-- `rev` = first 12 hex of SHA-1 over the render **with `rev` absent and the yaml path still a placeholder**. **Embedding `rev` in the yaml file name inside `argv` is part of the contract** (see §5).
+- `rev` is an **opaque, deterministic 12-hex value** computed by the router from the render's content (v1.2: the formula is the router's own; implementations need not agree, because the same router both computes and compares it). **Embedding `rev` in the yaml file name inside `argv` is part of the contract** (MUST, see §5); consumers never recompute it.
 - Models are passed with `--models-directory` (many custom nodes read `folder_paths.models_dir` directly; extra-paths yaml does not change it). Custom nodes are passed via the yaml.
 - Optional: `--front-end-root <ART>/frontend/<f>` when a frontend artifact is pinned.
 
@@ -161,3 +167,35 @@ Proposed by the second implementation (mixed CUDA/ROCm farm with a Windows worke
 ## Versioning
 - Breaking changes bump the major (`comfy-upgrade/2`). The launcher refuses a different major.
 - Additive fields are allowed within a major; consumers must ignore unknown fields.
+
+---
+
+## Appendix A — `tree_sha256` test vectors (v1.2)
+
+Tree (sizes in bytes): files `zz.txt`(1), `a/f`(2), `a-b/g`(3), `a/sub/h`(0), `lib/m`(4), `한글/파일 이름.txt`(5),
+`a/manifest.json`(6); top-level `manifest.json`(9) and `READY`(0) (excluded); an empty directory `empty/`; symlinks
+`lib64 -> lib` (a directory symlink) and `a/zz-link -> ../zz.txt`.
+
+Hashed text (lines joined with `\n`, no trailing newline):
+
+```
+f a-b/g 3
+f a/f 2
+f a/manifest.json 6
+f a/sub/h 0
+f lib/m 4
+f zz.txt 1
+f 한글/파일 이름.txt 5
+l a/zz-link ../zz.txt
+l lib64 lib
+```
+
+`tree_sha256 = d55960db78d265abea7da6772ede6c3fbb8e9090b6359d552861198ead243ccc`
+
+What it pins down: a nested `a/manifest.json` is not excluded (only the top-level one); an empty directory produces no
+line; a directory symlink is an `l` line and is not followed; `a-b` sorts before `a/` (0x2D < 0x2F); every `f` line
+precedes every `l` line; non-ASCII names and spaces are hashed as UTF-8 bytes.
+
+An empty tree, and a tree holding only `manifest.json` and `READY`:
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (SHA-256 of the empty string).
+

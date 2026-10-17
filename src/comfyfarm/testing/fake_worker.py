@@ -71,7 +71,8 @@ class Job:
 
 class FakeWorker:
     def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16,
-                 validate_endpoint: bool = True):
+                 validate_endpoint: bool = True, secured: bool | None = None):
+        # secured: None = no extension (/comfyfarm/info 404); True/False = the extension's allow-list state
         self.version, self.backend, self.ws_fix, self.vram_gb = version, backend, ws_fix, vram_gb
         self.argv = ["main.py", "--listen", "0.0.0.0"]          # system.argv (sys.argv without the interpreter, P15)
         self.object_info_ok = True                             # False: /object_info answers 500 (a broken upgrade)
@@ -107,6 +108,9 @@ class FakeWorker:
         r.add_post("/_fake/mode", self.set_mode)
         if validate_endpoint:                                   # the comfyfarm_worker extension's endpoint
             r.add_post("/comfyfarm/validate", self.validate_only)
+        self.secured = secured
+        if secured is not None:
+            r.add_get("/comfyfarm/info", self.info)
         self.app.on_startup.append(self._start)
 
     # ---------------- fault injection ----------------
@@ -332,6 +336,10 @@ class FakeWorker:
             return web.json_response({"error": "node import failed"}, status=500)
         # the real definitions of the fake's nodes (current frontends drop definitions missing name/category/…)
         return web.json_response(REAL_DEFS)
+
+    async def info(self, request):
+        return web.json_response({"extension": "0.2-fake", "comfyui": self.version, "ws_fix": self.ws_fix,
+                                  "secured": self.secured, "allow": ["10.0.0.1/32"] if self.secured else [], "invalid": []})
 
     async def get_system_stats(self, request):
         torch = "2.14.0+rocm7.2" if self.backend == "rocm" else "2.14.0+cu130"

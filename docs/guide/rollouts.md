@@ -48,6 +48,10 @@ COMFY_LAUNCH_PREFIXES=/data/models,/data/run  # every directory the render may n
 The launcher talks to the router directly, not through the gateway. Check a render without starting anything:
 `set -a; . <instance>.env; python3 launcher.py --check` → `ok <rev>` or `refused: <reason>` (exit 2).
 
+Worker access control (design 09): put `COMFYFARM_ALLOW=<router address>,<gateway address>` into the profile's `env`
+(or the worker's environment when it is not launched by ComfyFarm). The worker extension then answers 403 to anyone
+else on the network; without it the dashboard shows the worker as *unsecured*.
+
 Restart agent, ssh flavour — one key per host, usable for nothing else:
 
 ```

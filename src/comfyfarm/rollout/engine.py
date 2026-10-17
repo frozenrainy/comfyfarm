@@ -377,6 +377,7 @@ class Engine:
                 caps = await self.r.adapter.capabilities(w["base_url"])
                 if caps is not None:
                     caps["jobs_api"] = await self.r.adapter.supports_jobs_api(w["base_url"])
+                    caps["extension"] = await self.r.adapter.worker_info(w["base_url"])
                 async with self.db.conn() as c:
                     await c.execute("UPDATE workers SET capabilities = coalesce($3, capabilities) || jsonb_build_object('argv', $2::jsonb) "
                                     "WHERE id = $1", w["id"], last, caps)

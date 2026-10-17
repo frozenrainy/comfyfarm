@@ -66,7 +66,8 @@ OPTIONS: dict[str, tuple[object, bool]] = {
     "--enable-asset-hashing": (0, False), "--feature-flag": (1, False),
 }
 # Environment keys a render may set (exact names or prefixes). Not PATH, PYTHONPATH, LD_*: those run other code.
-ENV_PREFIXES = ("PYTORCH_", "TORCH_", "CUDA_", "HIP_", "HSA_", "ROCM_", "MIOPEN_", "AMD_", "TRITON_", "NCCL_")
+ENV_PREFIXES = ("PYTORCH_", "TORCH_", "CUDA_", "HIP_", "HSA_", "ROCM_", "MIOPEN_", "AMD_", "TRITON_", "NCCL_",
+                "COMFYFARM_")        # the worker extension's own settings (COMFYFARM_ALLOW)
 ENV_KEYS = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "TOKENIZERS_PARALLELISM", "TZ"}
 
 
@@ -201,14 +202,19 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
 
 
 # ---- local copies -------------------------------------------------------------------------------------------------
-def tree_sha256(root: str) -> str:
-    """Contract §2: SHA-256 over the sorted (relative path, size) of files and (relative path, target) of symlinks.
-    Line format: 'f <path> <size>' / 'l <path> <target>', newline-separated. The top-level manifest.json and READY
-    are left out (the manifest carries this hash; READY is created after it). Only this implementation's publisher
-    and launcher compare these values, so the exact encoding is ours to choose."""
+def tree_lines(root: str) -> list[bytes]:
+    """The lines tree_sha256 hashes, in hash order (exposed for the contract's test vectors)."""
+    return _tree_lines(root)
+
+
+def _collect(root: str) -> list[bytes]:
+    """Contract §2 (v1.2): 'f <rel> <size>' / 'l <rel> <target>' lines, full-line bytes sorted ascending, joined by
+    newline between lines, SHA-256. Top-level manifest.json and READY are left out (the manifest carries this hash;
+    READY is created after it). A change-detection key: the launcher compares manifest values as opaque strings and
+    never recomputes this."""
     items = []
     for dirpath, dirnames, filenames in os.walk(root):
-        for n in sorted(dirnames):
+        for n in dirnames:
             p = os.path.join(dirpath, n)
             if os.path.islink(p):
                 items.append(f"l {os.path.relpath(p, root)} {os.readlink(p)}")
@@ -217,8 +223,26 @@ def tree_sha256(root: str) -> str:
             rel = os.path.relpath(p, root)
             if rel in ("READY", "manifest.json"):
                 continue
-            items.append(f"l {rel} {os.readlink(p)}" if os.path.islink(p) else f"f {rel} {os.path.getsize(p)}")
-    return hashlib.sha256("\n".join(sorted(items)).encode()).hexdigest()
+            if os.path.islink(p):
+                items.append(f"l {rel} {os.readlink(p)}")
+            elif os.path.isfile(p):
+                items.append(f"f {rel} {os.path.getsize(p)}")
+            else:
+                raise ValueError(f"not a regular file or symlink: {rel}")     # sockets, FIFOs, devices (contract §2)
+            if "\n" in rel:
+                raise ValueError(f"newline in a file name: {rel!r}")
+    try:
+        return sorted(x.encode("utf-8") for x in items)                      # full-line bytes, ascending
+    except UnicodeEncodeError:                                                 # a name that is not valid UTF-8
+        raise ValueError("file name is not valid UTF-8")
+
+
+def _tree_lines(root: str) -> list[bytes]:
+    return _collect(root)
+
+
+def tree_sha256(root: str) -> str:
+    return hashlib.sha256(b"\n".join(tree_lines(root))).hexdigest()
 
 
 def manifest_hash(path: str) -> str | None:

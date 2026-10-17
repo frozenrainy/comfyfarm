@@ -1,4 +1,6 @@
-"""ComfyFarm worker extension (prototype) — fixes the WebSocket reconnect race without patching ComfyUI core.
+"""ComfyFarm worker extension — three things a farm needs from a stock ComfyUI worker, without patching its core:
+a source allow-list (allow.py; the worker is otherwise open to everyone on the network), a validation endpoint, and
+a fix for the WebSocket reconnect race.
 
 ComfyUI's /ws handler removes `sockets[sid]` in `finally` without checking that the entry is still its own socket.
 When a client reconnects with the same clientId, the old connection's cleanup deletes the new registration and every
@@ -11,6 +13,10 @@ import hashlib, inspect, json, logging, uuid
 
 import aiohttp
 from aiohttp import web
+
+from .allow import from_env, make_middleware
+
+EXT_VERSION = "0.2"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")
@@ -103,7 +109,31 @@ def _install_validate():
     log.info("comfyfarm: /comfyfarm/validate installed")
 
 
-for _step, _fn in (("reconnect fix", _install), ("validate endpoint", _install_validate)):
+def _install_allow():
+    """Refuse requests from anyone but the router/gateway (COMFYFARM_ALLOW) and report the state on
+    GET /comfyfarm/info. The middleware is appended before the app starts (custom nodes import first), so it covers
+    every route including /ws. An unset or malformed allow-list leaves the worker open and says so."""
+    from server import PromptServer
+    import comfyui_version
+    server = PromptServer.instance
+    policy = from_env()
+    if policy.secured:
+        server.app.middlewares.append(make_middleware(policy))
+        log.info("comfyfarm: requests accepted only from %s (and loopback)", ", ".join(policy.describe()["allow"]))
+    elif policy.bad:
+        log.warning("comfyfarm: COMFYFARM_ALLOW has invalid entries %s — worker left OPEN", policy.bad)
+    else:
+        log.warning("comfyfarm: COMFYFARM_ALLOW not set — this worker accepts requests from any address")
+    ws_fix = any(getattr(r, "path", None) == "/ws" and r.handler.__name__ == "websocket_handler" and
+                 r.handler.__module__ == __name__ for r in server.routes._items)
+
+    @server.routes.get("/comfyfarm/info")
+    async def comfyfarm_info(request):
+        return web.json_response({"extension": EXT_VERSION, "comfyui": comfyui_version.__version__, "ws_fix": ws_fix,
+                                  **policy.describe()})
+
+
+for _step, _fn in (("reconnect fix", _install), ("validate endpoint", _install_validate), ("allow-list", _install_allow)):
     try:
         _fn()
     except Exception as e:  # never break worker startup

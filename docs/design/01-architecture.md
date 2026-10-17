@@ -11,15 +11,16 @@ comfyfarm/
                rebuildable mapping, catch-up) → queue status broadcast
   health/      busy/dead classification, capability detection, monitoring endpoints, optional worker-agent probes
   rollout/     drain → restart → verify → undrain, canary stop, comfy-upgrade/1 render + badge, restart backends
+  launcher.py, agent.py, publish.py   worker-side tools (stdlib only, copied to hosts; see guide/rollouts.md)
   gateway/     single entry point for browsers: routes user data to the UI worker, jobs/ws/object_info to the
                router, temp previews to the executing worker; pre-submit validation; static asset caching
-  identity/    identity provider interface (header / OIDC / static users / none-for-dev) returning user + roles
-  ha/          (optional) "may I write?" answered by Postgres recovery state; ops tooling lives outside the package
+  identity.py  identity providers: local (scrypt), trusted-header, dev  (planned: OIDC)
+  ha/          (planned) "may I write?" answered by Postgres recovery state; ops tooling lives outside the package
   api/         REST for the dashboard and the frontend extension
-  ui/          dashboard (queue, workers, groups, stats, rollout)
-  plugins/     webhooks, VRAM collection, notes, …
-worker_ext/    comfyfarm_worker custom node (optional, see 04)
-frontend_ext/  ComfyUI frontend extension: group picker, idempotent submit with retry, stall watchdog
+  dashboard/   web UI (13): dashboard, workflow tab, queue, history, settings, system (workers/groups/users/rollout/stats)
+  plugins/     (planned) webhooks, VRAM collection, …  (notes are built in)
+worker_ext/    comfyfarm_worker custom node: source allow-list (09), validation endpoint, /ws reconnect fix (04)
+ui_ext/        ComfyUI frontend extension: group picker next to Run, idempotent submit with retry  (planned: stall watchdog)
 ```
 
 **Boundary rules**

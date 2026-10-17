@@ -116,3 +116,73 @@ def test_publish_venv(tmp_path):
     d = art / "venv" / "plain-1"
     assert (d / "READY").exists() and (d / "freeze.txt").exists() and m["accelerator"] == "cpu" and m["platform"] == "posix"
     assert os.path.realpath(d / "bin" / "python").startswith("/")
+
+
+def test_tree_hash_encoding_is_the_contract_one(tmp_path):
+    """Contract §2 v1.2: full-line bytes sorted, '\\n' between lines, directory symlinks listed, top-level manifest/READY excluded."""
+    import hashlib
+    root = tmp_path / "t"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "z.so").write_bytes(b"12345")
+    (root / "a").write_bytes(b"xy")
+    (root / "lib64").symlink_to("lib")                       # directory symlink: listed, not followed
+    (root / "link.txt").symlink_to("a")
+    (root / "manifest.json").write_text("{}")
+    (root / "READY").write_text("")
+    (root / "sub").mkdir()
+    (root / "sub" / "manifest.json").write_text("not excluded: not top-level")
+    lines = sorted([b"f a 2", b"f lib/z.so 5", b"l lib64 lib", b"l link.txt a", b"f sub/manifest.json 27"])
+    assert launcher.tree_sha256(str(root)) == hashlib.sha256(b"\n".join(lines)).hexdigest()
+    (tmp_path / "empty").mkdir()
+    assert launcher.tree_sha256(str(tmp_path / "empty")) == hashlib.sha256(b"").hexdigest()
+
+
+def test_publish_refuses_odd_entries(tmp_path):
+    import os
+    art, src = tmp_path / "art", tmp_path / "n1"
+    src.mkdir()
+    (src / "ok.py").write_text("x")
+    os.mkfifo(src / "pipe")
+    with pytest.raises(publish.Refused, match="not a regular file"):
+        publish.publish_tree(str(art), "nodes", "n1", str(src))
+    src2 = tmp_path / "n2"
+    src2.mkdir()
+    (src2 / "bad\nname").write_text("x")
+    with pytest.raises(publish.Refused, match="newline"):
+        publish.publish_tree(str(art), "nodes", "n2", str(src2))
+
+
+VECTOR_LINES = [b"f a-b/g 3", b"f a/f 2", b"f a/manifest.json 6", b"f a/sub/h 0", b"f lib/m 4", b"f zz.txt 1",
+                "f 한글/파일 이름.txt 5".encode(), b"l a/zz-link ../zz.txt", b"l lib64 lib"]
+VECTOR_HASH = "d55960db78d265abea7da6772ede6c3fbb8e9090b6359d552861198ead243ccc"
+
+
+def test_contract_tree_vector(tmp_path):
+    """Contract appendix A: the agreed test vector (both implementations produce it). Line ORDER is asserted, not only
+    the hash: whole-line order puts every `f` line before every `l` line, unlike a sort by path."""
+    t = tmp_path / "t"
+    for d in ("a/sub", "a-b", "lib", "empty", "한글"):
+        (t / d).mkdir(parents=True)
+    for rel, n in (("zz.txt", 1), ("a/f", 2), ("a-b/g", 3), ("a/sub/h", 0), ("lib/m", 4), ("한글/파일 이름.txt", 5),
+                   ("a/manifest.json", 6), ("manifest.json", 9), ("READY", 0)):
+        (t / rel).write_bytes(b"x" * n)
+    (t / "lib64").symlink_to("lib")
+    (t / "a" / "zz-link").symlink_to("../zz.txt")
+    assert launcher.tree_lines(str(t)) == VECTOR_LINES
+    assert launcher.tree_sha256(str(t)) == VECTOR_HASH
+    # negative control: a sort by path would put `l lib64` before `f zz.txt`
+    by_path = sorted(VECTOR_LINES, key=lambda l: l.split(b" ", 2)[1])
+    assert by_path != VECTOR_LINES
+
+
+def test_tree_refuses_non_utf8_names(tmp_path):
+    import os
+    root = tmp_path / "u"
+    root.mkdir()
+    try:
+        with open(os.path.join(os.fsencode(str(root)), b"bad\xff"), "wb") as f:
+            f.write(b"x")
+    except (OSError, ValueError):
+        pytest.skip("this filesystem refuses non-UTF-8 names (APFS does); the rule is exercised on ext4/xfs")
+    with pytest.raises(ValueError, match="UTF-8"):
+        launcher.tree_sha256(str(root))

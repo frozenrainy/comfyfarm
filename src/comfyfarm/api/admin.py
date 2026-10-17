@@ -70,6 +70,23 @@ def iso(t):
     return t.isoformat() if t else None
 
 
+def security_warnings(caps: dict) -> list[str]:
+    """docs/design/09: a worker is 'secured' only when the comfyfarm_worker extension enforces a source allow-list.
+    Unknown (worker never probed) says nothing rather than crying wolf."""
+    ext = caps.get("extension")
+    if ext is None:
+        return []
+    if not ext.get("installed"):
+        return ["worker extension not installed: open to everyone on the network, no reconnect fix"]
+    out = []
+    if not ext.get("secured"):
+        out.append("unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway"
+                   + (f" (invalid entries: {ext['invalid']})" if ext.get("invalid") else ""))
+    if not ext.get("ws_fix"):
+        out.append("reconnect fix not active on this ComfyUI version: events may stop after a reconnect")
+    return out
+
+
 def check_url(url: str) -> str:
     url = url.strip().rstrip("/")
     if not re.match(r"^https?://[^\s/]+", url):
@@ -185,6 +202,7 @@ def make_router(ctx: Ctx) -> APIRouter:
             if r["enabled"] and r["state"] == "online" and r["id"] in streams and not streams[r["id"]][0].connected:
                 warn.append("event stream down: no progress or previews")
             caps = r["capabilities"] or {}
+            warn += security_warnings(caps)
             devs = [d for d in caps.get("devices") or [] if isinstance(d, dict)]
             vram = max((d.get("vram_total") or 0 for d in devs), default=0)
             out.append({"id": r["id"], "name": r["name"], "base_url": r["base_url"], "group": r["group_name"],

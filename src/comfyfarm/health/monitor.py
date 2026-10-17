@@ -40,6 +40,7 @@ class HealthMonitor:
                     caps = await self.adapter.capabilities(w["base_url"])
                     if caps is not None:
                         caps["jobs_api"] = await self.adapter.supports_jobs_api(w["base_url"])
+                        caps["extension"] = await self.adapter.worker_info(w["base_url"])   # docs/design/09
                 async with self.db.conn() as c:
                     await c.execute(
                         "UPDATE workers SET state = 'online', failing_since = NULL, failure_kind = NULL, offline_since = NULL,"

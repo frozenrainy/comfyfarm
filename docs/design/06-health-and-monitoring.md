@@ -69,8 +69,9 @@ Rules learned the hard way:
 
 ## Logs
 
-- Rotate by size; separate `error.log` (real failures only) from the main log — a level split is a stronger filter than
-  regular expressions in the monitoring system.
-- Every exception log line includes the exception **type** (`httpx` exceptions often have an empty `str()`).
-- Long-running operations (a drain can take hours) emit a heartbeat line every 4 minutes so external log-based
-  suppression windows do not expire mid-operation.
+- *Planned:* rotate by size; separate `error.log` (real failures only) from the main log — a level split is a
+  stronger filter than regular expressions in the monitoring system. (Today the router logs to stdout for the service
+  manager to collect.)
+- Implemented: every exception log line includes the exception **type** (`httpx` exceptions often have an empty
+  `str()`); a drain that keeps waiting logs a heartbeat line every 4 minutes so external log-based suppression windows
+  do not expire mid-operation.

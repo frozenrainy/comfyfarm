@@ -67,7 +67,8 @@ async def test_admin_api_and_maintenance(dsn, fakes):
             await c.patch(f"/api/admin/workers/{wid}", json={"maintenance": False}, headers=admin)
             await wait_status(app.state.router, pid, "completed")
             ws = (await c.get("/api/admin/workers", headers=admin)).json()
-            assert ws[0]["capabilities"]["backend"] == "cuda" and ws[0]["warnings"] == []
+            assert ws[0]["capabilities"]["backend"] == "cuda"
+            assert ws[0]["warnings"] == ["worker extension not installed: open to everyone on the network, no reconnect fix"]
 
 
 async def test_notify_wakes_the_dispatcher(dsn, router_factory, fakes):
