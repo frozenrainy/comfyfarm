@@ -347,3 +347,11 @@ def test_prune_keeps_what_any_instance_runs_and_orders_by_use(tmp_path):
     launcher.sync(entries["c4"])
     launcher.prune(str(local), "core", {"c4"})
     assert "c1" in os.listdir(local / "core") and "c5" in os.listdir(local / "core")
+
+
+def test_env_token_edges():
+    """Contract §4 token: empty is valid (a UI worker with every GPU hidden), letters are ASCII only, and every part —
+    not only the first character — is checked for a leading '.'."""
+    assert launcher.env_problem("CUDA_VISIBLE_DEVICES", "") is None
+    assert launcher.env_problem("MIOPEN_FIND_MODE", "빠름")
+    assert launcher.env_problem("MIOPEN_FIND_MODE", "LAZY,.x")

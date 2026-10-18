@@ -109,8 +109,8 @@ Out of scope (implementation-specific): front door / gateway, identity provider,
     and ComfyUI imports code from those places. Elsewhere under `<LOCAL>` (e.g. `<LOCAL>/temp/<inst>`) is allowed.
   - (v1.3) environment values never contain filesystem paths (MUST NOT). Each allowed key has one value format, checked
     by the launcher (MUST):
-    - `token` — one line of letters, digits, spaces and `. _ : , ; = + -`; no part (split at spaces and `, : ; =`)
-      starts with `.` or `~`
+    - `token` — one line of zero or more ASCII letters, digits, spaces and `. _ : , ; = + -` (empty is valid:
+      `CUDA_VISIBLE_DEVICES=` hides every GPU); no part (split at spaces and `, : ; =`) starts with `.` or `~`
     - `addrs` — a comma-separated list of IP addresses / CIDR blocks
     - `url` — `http(s)://host[:port]`, at most a trailing `/`, no path
     - `zone` — a time-zone name (`Area/Location`)
