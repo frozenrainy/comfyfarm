@@ -1,6 +1,6 @@
 # comfy-upgrade/1 — ComfyUI farm upgrade contract (export edition)
 
-Status: v1.2, 2026-10-18 (1.1 = additive fields in §9; 1.2 = clarifications of `tree_sha256` and `rev` in §2/§3, agreed by both implementations; still `comfy-upgrade/1`). Audience: any farm router implementation that wants to share the same **builder**, **launcher** and **artifact store**.
+Status: v1.3, 2026-10-18 (1.1 = additive fields in §9; 1.2 = clarifications of `tree_sha256` and `rev` in §2/§3; 1.3 = stricter launcher validation in §2–§4 — links, `cwd`, user-writable directories, environment value formats, frontend pinning, pruning, malformed renders — agreed by both implementations; still `comfy-upgrade/1`). Audience: any farm router implementation that wants to share the same **builder**, **launcher** and **artifact store**.
 This is the canonical, export-safe text of the contract. Both implementations version against this document; internal editions only add site notes.
 
 > Principle: **the builder and the launcher never import router code.** A router is compatible if it speaks the HTTP/JSON shapes below.
@@ -39,6 +39,9 @@ Out of scope (implementation-specific): front door / gateway, identity provider,
 - `READY` is created only after publish **and** checks. Published artifacts are **read-only** (they may share inodes via hardlinks — never modify in place).
 - A venv is **built at its final path** (absolute paths are embedded). It must not reference anything outside itself (`.pth` files, editable installs).
 - `core` = the official release archive unpacked as is (no symlinks, no edits).
+- (v1.3) A symlink whose **target**, or a directory symlink whose **name**, contains a newline or is not valid UTF-8 is
+  refused at publish time, like such file names (the `tree_sha256` line would be ambiguous). Symlinks in `nodes` and
+  `frontend` artifacts SHOULD be relative and point inside the artifact; a launcher MAY refuse others.
 
 `manifest.json` — required fields:
 ```json
@@ -86,7 +89,10 @@ Out of scope (implementation-specific): front door / gateway, identity provider,
 ```
 - `rev` is an **opaque, deterministic 12-hex value** computed by the router from the render's content (v1.2: the formula is the router's own; implementations need not agree, because the same router both computes and compares it). **Embedding `rev` in the yaml file name inside `argv` is part of the contract** (MUST, see §5); consumers never recompute it.
 - Models are passed with `--models-directory` (many custom nodes read `folder_paths.models_dir` directly; extra-paths yaml does not change it). Custom nodes are passed via the yaml.
-- Optional: `--front-end-root <ART>/frontend/<f>` when a frontend artifact is pinned.
+- Optional: `--front-end-root <ART>/frontend/<f>` when a frontend artifact is pinned — that exact form only.
+  `--front-end-version` is not an allowed option: ComfyUI would download a frontend at run time, which is not a
+  published artifact (v1.3).
+- (v1.3) `cwd` is exactly `<LOCAL>/core/<c>`, the directory of `argv[1]` (MUST).
 
 ## 4. Launcher
 - Configuration (environment): `COMFY_LAUNCH_ROUTER`, `COMFY_LAUNCH_INSTANCE`, `COMFY_LAUNCH_ARTIFACTS`, `COMFY_LAUNCH_LOCAL`, `COMFY_LAUNCH_PREFIXES` (comma-separated allowed path prefixes).
@@ -95,8 +101,32 @@ Out of scope (implementation-specific): front door / gateway, identity provider,
   - `argv[0]` is `<ART>/venv/<name>/bin/python`; `argv[1]` is `<LOCAL>/core/<name>/main.py`
   - every following token is a **known option**; path values are under the allowed prefixes; flags and env keys are on allow-lists
   - every `require` READY exists; `sync`, `files` and `mkdirs` stay inside their designated locations
+  - (v1.3) `cwd` equals the directory of `argv[1]`
+  - (v1.3) the directories users write to — `--input-directory`, `--output-directory`, `--user-directory`,
+    `--temp-directory` and any other user-writable directory option — do not overlap `<ART>` or the launcher-managed
+    parts of `<LOCAL>` (`<LOCAL>/core`, `<LOCAL>/nodes`, `<LOCAL>/frontend`, `<LOCAL>/run`) in **either direction**:
+    neither inside them nor a parent of them (MUST). An upload's subfolder reaches everything below the input directory,
+    and ComfyUI imports code from those places. Elsewhere under `<LOCAL>` (e.g. `<LOCAL>/temp/<inst>`) is allowed.
+  - (v1.3) environment values never contain filesystem paths (MUST NOT). Each allowed key has one value format, checked
+    by the launcher (MUST):
+    - `token` — one line of letters, digits, spaces and `. _ : , ; = + -`; no part (split at spaces and `, : ; =`)
+      starts with `.` or `~`
+    - `addrs` — a comma-separated list of IP addresses / CIDR blocks
+    - `url` — `http(s)://host[:port]`, at most a trailing `/`, no path
+    - `zone` — a time-zone name (`Area/Location`)
+
+    Which keys a launcher allows, and the format of each, is that launcher's allow-list (e.g. `COMFYFARM_ALLOW` = `addrs`,
+    `TZ` = `zone`, everything else `token`). Paths a runtime needs — kernel and compile caches, tuning databases, offline
+    model caches — are not set by the render; a launcher that wants them per instance sets them itself under `<LOCAL>`
+    (MAY).
+  - (v1.3) a render that is malformed in any way (not an object, missing keys, wrong types) is a refusal (exit 2), never
+    a crash
 - Exit codes: `--check` passed = 0 / **refused = 2** (one-line reason on stderr) / on success the process `execve`s into ComfyUI (PID preserved for the service manager).
-- Local copies: re-synced only when `tree_sha256` differs (temp dir, then rename). Keep the 3 most recent per kind.
+- Local copies: re-synced only when `tree_sha256` differs (temp dir, then rename). Pruning keeps, per kind, the 3 most
+  recently **used** copies — last use as recorded by the launcher itself, not a modification time carried over from the
+  artifact — **plus every copy that any instance sharing the same `<LOCAL>` currently runs** (v1.3). Sync intermediates
+  (a temp directory being written, an old copy being replaced) are never counted as copies; a launcher MAY remove one
+  only when its writer is gone.
 - Old `extra_model_paths.*.yaml` files in `<LOCAL>/run/<inst>` are removed at start.
 
 ## 5. State check ("badge")

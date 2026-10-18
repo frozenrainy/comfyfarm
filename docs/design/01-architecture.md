@@ -96,6 +96,6 @@ reconcile: running/dispatching/cancelling jobs vs /api/jobs/{id} → authoritati
 | Web | FastAPI + uvicorn (single worker process) | Many long-lived WS; one process keeps in-memory caches coherent |
 | DB | Postgres ≥ 15, `asyncpg`, plain SQL migrations | `SKIP LOCKED`, `LISTEN/NOTIFY`, `timestamptz`, lz4 TOAST for big payloads; no ORM so the SQL that decides correctness is visible |
 | Worker HTTP/WS | `httpx`, `websockets` | Explicit timeouts and exception classes the adapter can map |
-| Dashboard | small SPA served by the router (framework decided in M3) | — |
+| Dashboard | plain ES modules served by the router, no framework and no build step (D-32) | — |
 | Packaging | `uv`, one wheel; container image later | — |
 | License | Apache-2.0 | Patent grant; common for infrastructure projects |

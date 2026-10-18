@@ -45,10 +45,12 @@ COMFY_LAUNCH_LOCAL=<LOCAL>                    # local copies of core/nodes + run
 COMFY_LAUNCH_PREFIXES=/data/models,/data/run  # every directory the render may name (models, input, output, user, temp)
 ```
 
-The directories users write to (input, output, user, temp) must lie outside `<ART>` and `<LOCAL>` and must not
-contain them either: `<LOCAL>` holds the core and node copies ComfyUI imports as code. The launcher refuses such a
-render, and the dashboard refuses such instance paths. Profile environment values must not be paths (`/`, `\`, or a
-part starting with `~` or `.`); `COMFYFARM_ALLOW` takes addresses and CIDR blocks.
+The directories users write to (input, output, user, temp) must not overlap `<ART>` or `<LOCAL>/core`, `nodes`,
+`frontend`, `run` — neither inside them nor above them: ComfyUI imports code from there. Elsewhere under `<LOCAL>`
+(`<LOCAL>/temp/<instance>`, say) is fine. The launcher refuses such a render, and the dashboard refuses such instance
+paths. Profile environment values are never paths: `COMFYFARM_ALLOW` takes addresses and CIDR blocks, `TZ` a zone
+name, every other key a plain value (letters, digits, spaces, `. _ : , ; = + -`, no part starting with `.` or `~`) —
+contract §4.
 
 The launcher talks to the router directly, not through the gateway. Check a render without starting anything:
 `set -a; . <instance>.env; python3 launcher.py --check` → `ok <rev>` or `refused: <reason>` (exit 2).

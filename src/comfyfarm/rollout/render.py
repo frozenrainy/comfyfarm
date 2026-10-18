@@ -71,16 +71,19 @@ def build(profile: dict, inst: dict) -> dict:
 
 
 def path_problems(paths: dict, win: bool) -> list[str]:
-    """The launcher's rule for user-writable directories, for both platforms: never inside <ART> or <LOCAL>, and never
-    a parent of them (an upload's subfolder would reach the code below)."""
+    """The launcher's rule for user-writable directories, for both platforms: never inside <ART> or the launcher-managed
+    parts of <LOCAL> (core, nodes, frontend, run), and never a parent of them (an upload's subfolder would reach the
+    code below)."""
     norm = (lambda p: ntpath.normcase(ntpath.normpath(p))) if win else posixpath.normpath     # noqa: E731
     sep = "\\" if win else "/"
 
     def inside(a: str, b: str) -> bool:
         a, b = norm(a), norm(b)
         return a == b or a.startswith(b.rstrip(sep) + sep)
-    return [f"paths.{k} overlaps paths.{c}" for k in WRITABLE_KEYS for c in ("art", "local")
-            if inside(paths[k], paths[c]) or inside(paths[c], paths[k])]
+    code = {"paths.art": paths["art"], **{f"paths.local/{d}": paths["local"].rstrip("/\\") + sep + d
+                                          for d in launcher.MANAGED_LOCAL}}
+    return [f"paths.{k} overlaps {name}" for k in WRITABLE_KEYS for name, c in code.items()
+            if inside(paths[k], c) or inside(c, paths[k])]
 
 
 def check(profile: dict, inst: dict) -> dict:

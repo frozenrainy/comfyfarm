@@ -252,8 +252,9 @@ def test_sync_skips_current_copies_and_publish_hash(tmp_path):
 
 
 def test_user_writable_dirs_stay_out_of_code(tmp_path):
-    """QA-1: uploads must never land where ComfyUI imports code — not inside <LOCAL> (core and node copies) or <ART>,
-    and not in a parent of them either (an upload's subfolder reaches everything below the input directory)."""
+    """QA-1: uploads must never land where ComfyUI imports code — not inside <ART> or the launcher-managed parts of
+    <LOCAL> (core, nodes, frontend, run), and not in a parent of them either (an upload's subfolder reaches everything
+    below the input directory). Elsewhere under <LOCAL>, a temp directory say, is fine (contract §4)."""
     from fastapi import HTTPException
     from comfyfarm.api.rollout import InstanceIn, check_instance
     profile, inst = make_world(tmp_path)
@@ -261,12 +262,16 @@ def test_user_writable_dirs_stay_out_of_code(tmp_path):
     every = [p[k] for k in ("models", "input", "output", "user", "temp")] + [str(tmp_path)]
     validate(rd.build(profile, inst), inst, prefixes=every)                         # positive control
     check_instance(InstanceIn(**{**inst, "port": 8188}))
+    local_temp = dict(inst, paths={**p, "temp": f"{p['local']}/temp/gpu-1"})          # <LOCAL>/temp: not managed
+    validate(rd.build(profile, local_temp), local_temp, prefixes=every)
+    rd.check(profile, local_temp)
+    check_instance(InstanceIn(**{**local_temp, "port": 8188}))
     for key, value in [("input", f"{p['local']}/core/{profile['core']}/custom_nodes"), ("user", f"{p['local']}/nodes/base-nodes"),
                        ("input", p["local"]), ("temp", f"{p['local']}/run/gpu-1/tmp"), ("output", str(tmp_path))]:
         bad = dict(inst, paths={**p, key: value})
-        with pytest.raises(launcher.Refused, match="outside <ART> and <LOCAL>"):
+        with pytest.raises(launcher.Refused, match="must not overlap <ART> or <LOCAL>"):
             validate(rd.build(profile, bad), bad, prefixes=every)
-        with pytest.raises(rd.BadProfile, match="outside <ART> and <LOCAL>"):
+        with pytest.raises(rd.BadProfile, match="must not overlap <ART> or <LOCAL>"):
             rd.check(profile, bad)
         with pytest.raises(HTTPException, match="overlaps"):
             check_instance(InstanceIn(**{**bad, "port": 8188}))
@@ -293,7 +298,8 @@ def test_env_values_that_name_paths_are_refused(tmp_path):
     for k, v in [("HSA_TOOLS_LIB", f"{p['input']}/evil.so"), ("TRITON_PTXAS_PATH", "/tmp/ptxas"),
                  ("MIOPEN_CUSTOM_CACHE_DIR", p["input"]), ("TRITON_CACHE_DIR", "../../run"), ("TORCH_EXTENSIONS_DIR", "~/ext"),
                  ("NCCL_NET_PLUGIN", "x:./libevil.so"), ("ROCM_PATH", "C:\\rocm"), ("TZ", "/data/run/in/zone"),
-                 ("COMFYFARM_ALLOW", "10.0.0.1,/etc/x"), ("HIP_VISIBLE_DEVICES", "0\n1")]:
+                 ("COMFYFARM_ALLOW", "10.0.0.1,/etc/x"), ("HIP_VISIBLE_DEVICES", "0\n1"), ("OMP_NUM_THREADS", "$(id)"),
+                 ("TZ", "UTC+9;rm"), ("MIOPEN_FIND_MODE", "%TEMP%")]:
         r = rd.build(dict(profile, env={k: v}), inst)
         with pytest.raises(launcher.Refused, match=k):
             validate(r, inst)

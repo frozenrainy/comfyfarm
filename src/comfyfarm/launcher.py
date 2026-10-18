@@ -72,10 +72,16 @@ OPTIONS: dict[str, tuple[object, bool]] = {
 # TRITON_PTXAS_PATH, MIOPEN_CUSTOM_CACHE_DIR, ...), so values are checked too (env_problem): no paths.
 ENV_PREFIXES = ("PYTORCH_", "TORCH_", "CUDA_", "HIP_", "HSA_", "ROCM_", "MIOPEN_", "AMD_", "TRITON_", "NCCL_",
                 "COMFYFARM_")        # the worker extension's own settings (COMFYFARM_ALLOW)
+# Value formats of the keys that are not plain tokens (env_problem); a launcher decides them for the keys it allows.
+ENV_FORMATS = {"COMFYFARM_ALLOW": "addrs", "TZ": "zone"}
+ENV_TOKEN = re.compile(r"[A-Za-z0-9._:,;=+ -]*")
+ENV_URL = re.compile(r"https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?")
 ENV_KEYS = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "TOKENIZERS_PARALLELISM", "TZ"}
-# Directories ComfyUI lets users write to (uploads, outputs, user files). They must not overlap <ART> or <LOCAL> in
-# either direction: <LOCAL> holds the core and node copies ComfyUI imports as code, and an upload's subfolder can reach
-# anything below the input directory.
+# Directories ComfyUI lets users write to (uploads, outputs, user files). They must not overlap <ART> or the parts of
+# <LOCAL> the launcher manages (core, nodes, frontend, run) in either direction: those hold what ComfyUI imports as code,
+# and an upload's subfolder can reach anything below the input directory. Elsewhere under <LOCAL> (a temp directory,
+# say) is fine.
+MANAGED_LOCAL = ("core", "nodes", "frontend", "run")
 WRITABLE = ("--input-directory", "--output-directory", "--temp-directory", "--user-directory", "--previews-directory")
 
 
@@ -98,29 +104,31 @@ TZ_NAME = re.compile(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$")       # IANA zone 
 
 
 def env_problem(key: str, value) -> str | None:
-    """Why the render must not set `key=value`, or None. A value must not name a file or directory: no '/' or '\\',
-    and no part (split at whitespace , : ; =) starting with '~' or '.'. A bare word can only name something in the
-    working directory (the core copy) or be looked up in the system's own search paths, never where users write or
-    anywhere outside the artifacts. Two keys need a '/' and get a typed check instead: COMFYFARM_ALLOW (addresses and
-    CIDR blocks) and TZ (a zone name; other TZ values follow the general rule)."""
+    """Why the render must not set `key=value`, or None (contract §4). A value never names a file or directory; each
+    allowed key has a format: `addrs` (addresses / CIDR blocks), `zone` (a time zone name), `url` (http(s)://host[:port]
+    with no path), or — every other key — `token`: letters, digits, spaces and . _ : , ; = + -, no part (split at
+    spaces , : ; =) starting with '.' or '~'. A bare word can only be looked up in the working directory (the core
+    copy) or the system's own search paths, never where users write or anywhere outside the artifacts."""
     if not env_key_ok(key):
         return f"environment key not allowed: {key!r}"
     if not isinstance(value, str) or any(ord(ch) < 32 for ch in value):
         return f"environment value of {key} must be one line of text"
-    if key == "COMFYFARM_ALLOW":
+    fmt = ENV_FORMATS.get(key, "token")
+    if fmt == "addrs":
         for item in value.replace(";", ",").split(","):
             try:
                 if item.strip():
                     ipaddress.ip_network(item.strip(), strict=False)
             except ValueError:
-                return f"COMFYFARM_ALLOW: {item.strip()!r} is not an address or CIDR block"
+                return f"{key}: {item.strip()!r} is not an address or CIDR block"
         return None
-    if key == "TZ" and TZ_NAME.match(value):
-        return None
-    if "/" in value or "\\" in value or any(t.startswith(("~", ".")) for t in re.split(r"[\s,:;=]+", value)):
-        return f"environment value of {key} names a path: {value!r}"
+    if fmt == "zone":
+        return None if TZ_NAME.match(value) else f"{key}: {value!r} is not a time zone name"
+    if fmt == "url":
+        return None if ENV_URL.fullmatch(value) else f"{key}: {value!r} is not http(s)://host[:port]/ without a path"
+    if not ENV_TOKEN.fullmatch(value) or any(t.startswith((".", "~")) for t in re.split(r"[\s,:;=]+", value)):
+        return f"environment value of {key} is not a plain value (letters, digits, spaces, . _ : , ; = + -; no paths): {value!r}"
     return None
-
 
 def _norm(path: str) -> str:
     if not isinstance(path, str) or "\0" in path or not os.path.isabs(path):
@@ -181,8 +189,10 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
         for v in values:
             if is_path and opt != "--front-end-root" and (not under(v, roots) or under(v, [art])):   # that one: below
                 raise Refused(f"{opt} {v!r} is outside the allowed prefixes")
-            if opt in WRITABLE and (under(v, [art, local]) or under(art, [v]) or under(local, [v])):
-                raise Refused(f"{opt} {v!r} must lie outside <ART> and <LOCAL> (users write there; code is imported from there)")
+            code = [art] + [f"{local}/{d}" for d in MANAGED_LOCAL]
+            if opt in WRITABLE and (under(v, code) or any(under(c, [v]) for c in code)):
+                raise Refused(f"{opt} {v!r} must not overlap <ART> or <LOCAL>/{{{','.join(MANAGED_LOCAL)}}} "
+                              "(users write there; code is imported from there)")
         opts.append((opt, values))
     env = render.get("env", {})
     if not isinstance(env, dict):
