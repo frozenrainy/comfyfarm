@@ -177,9 +177,17 @@ class Check:
         probe = ("import importlib.util, sys; v = '%d.%d.%d' % sys.version_info[:3]\n"
                  "if importlib.util.find_spec('torch'):\n import torch; v += ' · torch ' + torch.__version__\n"
                  "print('comfyfarm-venv:', v)")                       # marked: GPU runtimes print noise of their own
+        usable = {"amd": {"rocm", "cpu", None}, "nvidia": {"cuda", "cpu", None}, "none": {"cpu", None}}.get(self.cfg.get("gpu", "any"))
         for ready in sorted(glob.glob(os.path.join(art, "venv", "*", "READY"))) if art else []:
             v = os.path.dirname(ready)
             name = os.path.basename(v)
+            try:
+                with open(os.path.join(v, "manifest.json")) as f:
+                    accel = json.load(f).get("accelerator")
+            except (OSError, ValueError):
+                accel = None
+            if usable is not None and accel not in usable:
+                continue                                 # a ROCm venv on a CPU-only UI host, a CUDA venv on an AMD host
             py = os.path.join(v, "bin", "python")
             code, out = self.cmd([py, "-c", probe], timeout=300)
             mark = re.search(r"comfyfarm-venv: (.+)", out)

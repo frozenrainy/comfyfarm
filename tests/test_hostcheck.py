@@ -157,3 +157,20 @@ def test_a_venv_missing_a_system_library_names_the_package(tmp_path, router):
     out = hostcheck.Check(env, {"gpu": "amd", "paths": paths}, root=root, cmd=ok, user="comfyfarm").run()
     r = next(x for x in out if x["name"] == "venv rocm-x")
     assert r["level"] == "OK" and "torch 2.14.1+rocm7.2" in r["detail"] and "(null)" not in r["detail"]
+
+
+def test_only_the_venvs_this_host_can_use_are_checked(tmp_path, router):
+    """Rehearsal: the UI worker's host (no GPU) failed on the ROCm venv it will never run."""
+    root, paths, art, local = host(tmp_path, kfd=False)
+    for name, accel in (("rocm-v", "rocm"), ("cuda-v", "cuda"), ("cpu-v", "cpu")):
+        v = os.path.join(art, "venv", name)
+        os.makedirs(os.path.join(v, "bin")); open(os.path.join(v, "READY"), "w").close()
+        with open(os.path.join(v, "manifest.json"), "w") as f:
+            json.dump({"accelerator": accel}, f)
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    names = lambda gpu: sorted(r["name"] for r in hostcheck.Check(env, {"gpu": gpu, "paths": paths}, root=root,   # noqa: E731
+                                                                     cmd=fake_cmd(), user="comfyfarm").run() if r["name"].startswith("venv"))
+    assert names("none") == ["venv cpu-v"]
+    assert names("amd") == ["venv cpu-v", "venv rocm-v"]
+    assert names("nvidia") == ["venv cpu-v", "venv cuda-v"]
+    assert names("any") == ["venv cpu-v", "venv cuda-v", "venv rocm-v"]
