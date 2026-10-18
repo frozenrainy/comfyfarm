@@ -245,3 +245,24 @@ WebSocket handler; the UI extension extends the GPL frontend. Publishing them un
 violation. → `worker_ext/` and `ui_ext/` are GPL-3.0-or-later (LICENSE + SPDX headers in each, attribution for the
 derived handler); the router, gateway, dashboard and the worker-side tools under `src/` stay Apache-2.0 — they only
 speak HTTP/WebSocket to ComfyUI and never import the extensions. (Risk assessment by review, not legal advice.)
+
+**D-40 Worker tools are installed by root during setup; the router's everyday key cannot replace them.** *(new)* —
+A router that could rewrite `launcher.py` on a worker could make it accept anything, which would empty D-37. → Worker
+setup (docs/design/14) installs the launcher, agent, host check, unit and instance configuration as root-owned files
+the service account cannot change, and puts the router's key into a root-owned `authorized_keys` with a forced command
+that allows `restart`, `status` and the read-only `check` only. Upgrading the worker tools is a new setup run.
+
+**D-41 How setup gets root is the operator's choice, shown with its cost.** *(new, operator decision)* — Setup needs
+root for minutes, once per host. Running a one-line command per host keeps root away from the router entirely; letting
+the router log in with an admin account is faster for many hosts but gives the router root for those minutes. → The
+dashboard offers both, side by side with what each means. The command path checks the downloaded script against the
+checksum the dashboard shows; the ssh path takes the password for that run only (askpass for ssh, stdin for sudo —
+never a command line, the ledger, a log or the audit trail). Both run the same script and report the same way; the host
+keys come with the report and are pinned (no trust on first use afterwards).
+
+**D-42 A published venv carries its interpreter.** *(new, found preparing a second host)* — `uv venv` links
+`bin/python` to uv's interpreter store in the builder's home: the published venv ran only on the build host, against
+contract §2 ("references nothing outside itself"). → Publishing copies the base interpreter (a relocatable
+python-build-standalone, as uv installs it) into `<venv>/.python/` — or uses the operating system's own Python under
+`/usr` — and refuses a venv whose `bin/python` or `pyvenv.cfg` `home` lies anywhere else. The host check runs every
+venv's interpreter on each host.

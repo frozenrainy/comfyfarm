@@ -1,6 +1,6 @@
 # 14 — Setting up worker hosts
 
-Status: **design** (2026-10-18). Goal: once the control plane runs, an operator turns an empty Linux host into a
+Status: **implemented** (2026-10-18) — `worker_setup.py`, `hostcheck.py`, agent `check`, `api/setup.py`, dashboard *Set up a worker* / *Check host*, doctor host lines; end-to-end rehearsal on empty hosts pending. Goal: once the control plane runs, an operator turns an empty Linux host into a
 working GPU worker from the dashboard — checked, secured and assigned — without reading the install guide line by line.
 
 ## What a worker host needs

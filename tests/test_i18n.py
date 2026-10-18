@@ -17,7 +17,7 @@ def used_keys() -> set[str]:
         keys |= set(re.findall(r'data-i18n(?:-title)?="([^"]*)"', s))
         for m in re.finditer(r"BACKEND_HINT\s*=\s*\{(.*?)\};", s, re.S):            # [example, "English explanation"]
             keys |= set(re.findall(r"'[^']*',\s*" + LITERAL, m.group(1)))
-        for table in ("STATUS", "TABS", "OSES", "THEMES", "SETTING_LABELS", "PATHS"):  # [value, "English label"]
+        for table in ("STATUS", "TABS", "OSES", "THEMES", "SETTING_LABELS", "PATHS", "GPUS"):  # [value, "English label"]
             for m in re.finditer(table + r"\s*=\s*([\[{].*?[\]}]);", s, re.S):
                 keys |= {b for a, b in re.findall(LITERAL + r"\s*[,:]\s*" + LITERAL, m.group(1))}
     return keys

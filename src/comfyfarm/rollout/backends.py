@@ -52,6 +52,11 @@ class Backend:
         """{ActiveState, ExecMainStatus, NRestarts} or None if unknown. ExecMainStatus "2" = the launcher refused."""
         return None
 
+    async def check(self, instance: str) -> list[dict] | None:
+        """The host check (docs/design/14) through the agent: [{level, name, detail}], None when this backend has
+        no agent to ask. Raises BackendError when the agent could not be asked."""
+        return None
+
 
 class Manual(Backend):
     """The dashboard asks an operator to restart the instance and waits (default 30 minutes) to see it happen."""
@@ -84,6 +89,18 @@ def _parse_status(text: str) -> dict | None:
             return None
     d = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)      # systemctl show
     return {k: d[k] for k in ("ActiveState", "ExecMainStatus", "NRestarts") if k in d} or None
+
+
+def _parse_check(rc: int, text: str) -> list[dict]:
+    """The agent's `check` answer: a JSON list of {level, name, detail}; anything else says why it could not run."""
+    if rc == 0:
+        try:
+            out = json.loads(text)
+            if isinstance(out, list) and all(isinstance(r, dict) and {"level", "name", "detail"} <= set(r) for r in out):
+                return out
+        except ValueError:
+            pass
+    raise BackendError(f"the host check did not run (exit {rc}): {text[-300:] or 'no output'}")
 
 
 class Ssh(Backend):
@@ -122,6 +139,10 @@ class Ssh(Backend):
     async def status(self, instance):
         rc, out = await _run(self.argv("status", instance))
         return _parse_status(out) if rc == 0 else None
+
+    async def check(self, instance):
+        rc, out = await _run(self.argv("check", instance), timeout=240)
+        return _parse_check(rc, out)
 
 
 def _is_ip(host: str) -> bool:
@@ -183,6 +204,13 @@ class HttpAgent(Backend):
             return r.json() if r.status_code == 200 else None
         except (httpx.HTTPError, ValueError, BackendError):
             return None
+
+    async def check(self, instance):
+        try:
+            r = await self._call("GET", "check", instance)
+        except httpx.HTTPError as e:
+            raise BackendError(f"the agent did not answer: {type(e).__name__}")
+        return _parse_check(0 if r.status_code == 200 else r.status_code, r.text)
 
 
 class SystemdLocal(Backend):

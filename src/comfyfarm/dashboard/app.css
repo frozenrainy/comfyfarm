@@ -171,3 +171,14 @@ body.workflow main { display: none; }
          font-size: .72rem; font-weight: 600; text-align: center; line-height: 1.5; }
 .badge.running { background: var(--ok); }
 .badge[hidden] { display: none; }        /* an author `display` beats the hidden attribute otherwise */
+/* worker setup (docs/design/14) */
+.s-OK, .s-reported, .s-finished { color: var(--ok); }
+.s-WARN, .s-waiting, .s-running { color: var(--amber); }
+.s-FAIL { color: var(--bad); }
+.choices { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; margin: .4rem 0 .8rem; }
+.choice { border: 1px solid var(--line); border-radius: 8px; padding: .7rem .8rem; cursor: pointer; }
+.choice.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.choice h4 { margin: 0 0 .3rem; font-size: .95rem; }
+.choice p { margin: 0; font-size: .8rem; color: var(--muted); }
+pre.code.log { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
+@media (max-width: 720px) { .choices { grid-template-columns: 1fr; } }

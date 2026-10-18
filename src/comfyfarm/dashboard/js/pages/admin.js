@@ -3,6 +3,7 @@ import { TZ, act, api, button, dailyChart, dur, formDialog, h, hours, namedRow, 
          qs, setPill, setText, statCards, syncNote, syncRows, t, table, when } from "../core.js";
 import { locale } from "../i18n.js";
 import { rollout } from "./rollout.js";
+import { setupWorker } from "./setup.js";
 
 const TABS = [["workers", "Workers"], ["groups", "Groups"], ["users", "Users"], ["rollout", "Rollout"], ["stats", "Statistics"],
               ["settings", "Settings"]];       // [route, English label]
@@ -76,7 +77,10 @@ function workers(root, { refresh }) {
     ], t("Add"));
     if (v) act(() => api("POST", "/api/admin/workers", v), t("Worker added — it appears online after its first health check"), refresh);
   }, { cls: "primary" });
-  root.append(h("section", {}, head(t("Workers"), add), tb.el,
+  const guided = button(t("Set up a worker"), () => setupWorker(refresh), { cls: "primary",
+    title: t("Turn an empty Linux host into a worker: setup script, host check, then the worker is added") });
+  add.classList.remove("primary");
+  root.append(h("section", {}, head(t("Workers"), guided, add), tb.el,
     h("p", { class: "muted small" }, t("Maintenance: no new jobs, the running one finishes. Disable: also no health checks. " +
       "Delete keeps the worker's history."))));
 

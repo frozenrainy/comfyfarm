@@ -1,0 +1,152 @@
+// Worker setup (docs/design/14): describe the host → run the setup script on it (the operator, or the router over ssh —
+// the operator chooses, D-41) → read the host check → add the worker, configure its instance, assign, start.
+import { act, api, button, formDialog, h, pill, setText, t, toast } from "../core.js";
+
+const GPUS = [["amd", "AMD (ROCm)"], ["nvidia", "NVIDIA (CUDA)"], ["any", "Any / not sure"], ["none", "None (CPU only)"]];
+const PATHS = [["art", "Artifact store <ART> (same path on every host)", "/srv/comfyfarm/art"],
+               ["local", "Local root <LOCAL> (this host's disk)", "/var/lib/comfyfarm/local"],
+               ["models", "Models directory", "/srv/comfyfarm/models"],
+               ["input", "Input directory (shared)", "/mnt/farm/input"],
+               ["output", "Output directory (shared)", "/mnt/farm/output"],
+               ["user", "User directory (shared)", "/mnt/farm/user"],
+               ["temp", "Temp directory (this host)", "/var/lib/comfyfarm/temp/{instance}"]];   // [key, English label, default]
+
+function checkTable(rows) {
+  return h("table", {}, h("tbody", {}, ...rows.map((r) => h("tr", {}, h("td", {}, pill(r.level, t(r.level))),
+    h("td", { class: "nowrap" }, r.name), h("td", { class: "muted small" }, r.detail)))));
+}
+
+// Step 1: what the host should become. Defaults: the last setup's answers (a farm's hosts look alike).
+export async function setupWorker(refresh) {
+  const [groups, profiles, recent] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
+                                                       api("GET", "/api/admin/setups")]);
+  const last = recent[0]?.spec;
+  const pathOf = (k, d) => (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
+  const v = await formDialog(t("Set up a worker"), [
+    { name: "name", label: t("Worker name (shown in the dashboard)") },
+    { name: "host", label: t("Host address"), placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
+    { name: "instance", label: t("Instance name"), value: "gpu-1", hint: t("one ComfyUI on this host; letters, digits, . _ -") },
+    { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu ?? "amd", options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })),
+      hint: t("ComfyFarm checks the driver; it never installs one") },
+    { name: "group", label: t("Group"), type: "select", value: groups[0]?.name ?? "",
+      options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] },
+    { name: "profile", label: t("Profile to run"), type: "select", value: "",
+      options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))] },
+    { name: "port", label: t("ComfyUI port"), type: "number", value: 8188 },
+    { name: "ssh_port", label: t("ssh port"), type: "number", value: 22 },
+    { name: "account", label: t("Service account"), value: last?.account ?? "comfyfarm",
+      hint: t("created by setup; runs ComfyUI; the router's key can only restart, query and check it") },
+    { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188" },
+    ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
+    { name: "mounts", label: t("NFS mounts (optional, one per line: server:/export /mountpoint [options])"), type: "textarea", rows: 2,
+      value: (last?.mounts || []).map((m) => `${m.source} ${m.target}${m.options ? " " + m.options : ""}`).join("\n"),
+      hint: t("written to /etc/fstab and mounted by setup; needs nfs-common on the host. Other storage: mount it yourself, the host check verifies it") },
+  ], t("Next"), { wide: true });
+  if (!v) return;
+  const inst = v.instance.trim();
+  const body = {
+    name: v.name.trim() || inst, host: v.host.trim(), instance: inst, gpu: v.gpu, group: v.group || null,
+    profile_id: v.profile ? Number(v.profile) : null, port: v.port || 8188, ssh_port: v.ssh_port || 22,
+    account: v.account.trim(), router_url: v.router_url.trim(),
+    paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),
+    mounts: v.mounts.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+      const [source, target, options] = l.split(/\s+/);
+      return options ? { source, target, options } : { source, target };
+    }),
+  };
+  const made = await act(() => api("POST", "/api/admin/setups", body));
+  if (made) runSetup({ ...made, instance: inst }, refresh);
+}
+
+// Step 2: get root on the host — the operator picks the way; then watch the report come in.
+function runSetup(made, refresh) {
+  let mode = "command", timer = null, closed = false;
+  const status = h("div", { class: "section-head" });
+  const log = h("pre", { class: "code log", hidden: true });
+  const checks = h("div");
+  const finish = h("button", { type: "button", class: "primary", hidden: true, onclick: () => addWorker() }, t("Add the worker"));
+  const cmd = h("pre", { class: "code" }, made.command);
+  const copy = button(t("Copy"), () => navigator.clipboard?.writeText(made.command).then(() => toast(t("Copied")), () => {}));
+  const user = h("input", { autocomplete: "off", placeholder: "admin" });
+  const pw = h("input", { type: "password", autocomplete: "new-password" });
+  const runSsh = button(t("Log in and run"), async () => {
+    if (!user.value || !pw.value) return toast(t("account and password, please"), true);
+    const r = await act(() => api("POST", `/api/admin/setups/${made.id}/ssh`, { user: user.value.trim(), password: pw.value }));
+    pw.value = "";                                           // not kept in the page either
+    if (r) poll();
+  }, { cls: "primary" });
+  const paneCmd = h("div", { class: "stack" },
+    h("p", {}, t("On the new host, as a user who may use sudo, run:")), cmd, h("div", {}, copy),
+    h("p", { class: "muted small" }, t("It downloads the setup script from the router, checks it against this checksum and runs it with sudo. The router never holds root on the host. Valid for 2 hours.")));
+  const paneSsh = h("div", { class: "stack", hidden: true },
+    h("div", { class: "field" }, h("div", { class: "label" }, t("Account on the host (may use sudo)")), user),
+    h("div", { class: "field" }, h("div", { class: "label" }, t("Password")), pw),
+    h("p", { class: "muted small" }, t("The router logs in with this account and runs the same script with sudo. The password is used for this run only: it is not stored, logged or shown again. While setup runs, the router has root on this host.")),
+    h("div", {}, runSsh));
+  const choice = (key, title, text) => h("div", { class: `choice${key === mode ? " on" : ""}`, "data-k": key, onclick: () => pick(key) },
+    h("h4", {}, title), h("p", {}, text));
+  const choices = h("div", { class: "choices" },
+    choice("command", t("Run a command yourself (recommended)"), t("You paste one line on the host. Nothing on the router ever gets root on your workers.")),
+    choice("ssh", t("Let the router log in once"), t("Quicker for many hosts. You type an admin account and password; for those minutes the router has root on the host.")));
+  function pick(k) {
+    mode = k;
+    for (const el of choices.children) el.classList.toggle("on", el.dataset.k === k);
+    paneCmd.hidden = k !== "command"; paneSsh.hidden = k !== "ssh";
+  }
+  const dlg = h("dialog", { class: "form wide" });
+  const close = () => { closed = true; clearTimeout(timer); dlg.close(); dlg.remove(); refresh?.(); };
+  dlg.append(h("h3", {}, t("Set up {name}", { name: made.instance || "" })), choices, paneCmd, paneSsh, status, log, checks,
+    h("div", { class: "dialog-actions" }, button(t("Close"), close), finish));
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
+  document.body.append(dlg);
+  dlg.showModal();
+  let setup = null;
+
+  async function poll() {
+    clearTimeout(timer);
+    if (closed) return;
+    try { setup = await api("GET", `/api/admin/setups/${made.id}`); } catch { timer = setTimeout(poll, 3000); return; }
+    status.replaceChildren(pill(setup.status, t(setup.status)), " ",
+      h("span", { class: "muted" }, setup.expired ? t("this setup expired — make a new one") : {
+        waiting: t("waiting for the host to run the script…"), running: t("the router is running the script on the host…"),
+        reported: t("the host is ready"), failed: t("setup or the host check failed — fix the host and run the same command again"),
+        finished: t("the worker was added") }[setup.status] || ""));
+    log.hidden = !setup.log; setText(log, setup.log);
+    const r = setup.result;
+    checks.replaceChildren(...(r ? [r.error ? h("div", { class: "callout" }, h("strong", {}, t("Error: ")), r.error) : "",
+      r.check?.length ? checkTable(r.check) : ""] : []));
+    finish.hidden = setup.status !== "reported";
+    if (["waiting", "running", "failed"].includes(setup.status) && !setup.expired) timer = setTimeout(poll, 2000);
+  }
+
+  // Step 3: the usual endpoints, in order — the same checks as doing it by hand.
+  async function addWorker() {
+    finish.disabled = true;
+    try {
+      const w = await api("POST", "/api/admin/workers", setup.worker);
+      await api("PUT", `/api/admin/instances/${w.id}`, setup.instance_config);
+      const pid = setup.extra.profile_id;
+      if (pid) {
+        await api("POST", `/api/admin/instances/${w.id}/assign`, { profile_id: pid });
+        await api("POST", `/api/admin/instances/${w.id}/start`);
+      }
+      await api("POST", `/api/admin/setups/${made.id}/finished?worker_id=${w.id}`);
+      toast(pid ? t("Worker added and starting — watch its badge in System → Rollout") : t("Worker added — assign a profile in System → Rollout"));
+      close();
+    } catch (e) { toast(e.message, true); finish.disabled = false; poll(); }
+  }
+  poll();
+}
+
+// System → Rollout: the host check of a configured instance, through its agent.
+export async function checkHost(workerId, label) {
+  const r = await act(() => api("POST", `/api/admin/instances/${workerId}/check`));
+  if (!r) return;
+  const dlg = h("dialog", { class: "form wide" });
+  const close = () => { dlg.close(); dlg.remove(); };
+  dlg.append(h("h3", {}, t("Host check: {name}", { name: label })), checkTable(r.check),
+    h("div", { class: "dialog-actions" }, button(t("Close"), close)));
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
+  document.body.append(dlg);
+  dlg.showModal();
+}

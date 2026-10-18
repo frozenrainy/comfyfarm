@@ -225,4 +225,54 @@ export default {
   "unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway":
     "보호되지 않음: 어느 주소의 요청이든 받습니다 — COMFYFARM_ALLOW에 라우터와 게이트웨이 주소를 넣으세요",
   "differs from its group: ": "그룹과 다름: ",
+
+  // ---- worker setup (docs/design/14) ----
+  "Set up a worker": "워커 설치", "Set up {name}": "{name} 설치",
+  "Turn an empty Linux host into a worker: setup script, host check, then the worker is added":
+    "빈 리눅스 호스트를 워커로 만듭니다: 설치 스크립트 → 호스트 점검 → 워커 등록",
+  "Worker name (shown in the dashboard)": "워커 이름 (대시보드 표시용)", "Host address": "호스트 주소",
+  "the address the router and the gateway reach this host at": "라우터와 게이트웨이가 이 호스트에 닿는 주소",
+  "Instance name": "인스턴스 이름", "one ComfyUI on this host; letters, digits, . _ -": "이 호스트의 ComfyUI 하나. 영문·숫자·. _ -",
+  "AMD (ROCm)": "AMD (ROCm)", "NVIDIA (CUDA)": "NVIDIA (CUDA)", "Any / not sure": "상관없음 / 모름", "None (CPU only)": "없음 (CPU만)",
+  "ComfyFarm checks the driver; it never installs one": "ComfyFarm은 드라이버를 확인만 하고 설치하지 않습니다",
+  "Profile to run": "실행할 프로필", "(assign later)": "(나중에 할당)", "ComfyUI port": "ComfyUI 포트", "ssh port": "ssh 포트",
+  "Service account": "서비스 계정",
+  "created by setup; runs ComfyUI; the router's key can only restart, query and check it":
+    "설치가 만듭니다. ComfyUI를 실행하고, 라우터의 키로는 재시작·상태 조회·점검만 할 수 있습니다",
+  "Router address as the worker sees it": "워커가 보는 라우터 주소",
+  "Artifact store <ART> (same path on every host)": "아티팩트 저장소 <ART> (모든 호스트에서 같은 경로)",
+  "Local root <LOCAL> (this host's disk)": "로컬 루트 <LOCAL> (이 호스트의 디스크)",
+  "Input directory (shared)": "입력 디렉터리 (공유)", "Output directory (shared)": "출력 디렉터리 (공유)",
+  "User directory (shared)": "사용자 디렉터리 (공유)", "Temp directory (this host)": "임시 디렉터리 (이 호스트)",
+  "NFS mounts (optional, one per line: server:/export /mountpoint [options])": "NFS 마운트 (선택, 한 줄에 하나: 서버:/export /마운트지점 [옵션])",
+  "written to /etc/fstab and mounted by setup; needs nfs-common on the host. Other storage: mount it yourself, the host check verifies it":
+    "설치가 /etc/fstab에 적고 마운트합니다. 호스트에 nfs-common이 필요합니다. 다른 스토리지는 직접 마운트하면 호스트 점검이 확인합니다",
+  "Next": "다음",
+  "Run a command yourself (recommended)": "직접 명령 실행 (권장)",
+  "You paste one line on the host. Nothing on the router ever gets root on your workers.":
+    "호스트에 한 줄을 붙여 넣습니다. 라우터는 워커의 root 권한을 한 번도 갖지 않습니다.",
+  "Let the router log in once": "라우터가 한 번 로그인",
+  "Quicker for many hosts. You type an admin account and password; for those minutes the router has root on the host.":
+    "호스트가 많을 때 빠릅니다. 관리자 계정과 비밀번호를 입력하면, 설치하는 몇 분 동안 라우터가 그 호스트의 root 권한을 갖습니다.",
+  "On the new host, as a user who may use sudo, run:": "새 호스트에서 sudo를 쓸 수 있는 사용자로 실행하세요:",
+  "Copied": "복사했습니다",
+  "It downloads the setup script from the router, checks it against this checksum and runs it with sudo. The router never holds root on the host. Valid for 2 hours.":
+    "라우터에서 설치 스크립트를 받아 이 체크섬과 맞는지 확인한 뒤 sudo로 실행합니다. 라우터는 호스트의 root 권한을 갖지 않습니다. 2시간 동안 유효합니다.",
+  "Account on the host (may use sudo)": "호스트 계정 (sudo 가능)", "Log in and run": "로그인해서 실행",
+  "account and password, please": "계정과 비밀번호를 입력하세요",
+  "The router logs in with this account and runs the same script with sudo. The password is used for this run only: it is not stored, logged or shown again. While setup runs, the router has root on this host.":
+    "라우터가 이 계정으로 로그인해 같은 스크립트를 sudo로 실행합니다. 비밀번호는 이번 실행에만 쓰고 저장·기록·재표시하지 않습니다. 설치가 도는 동안 라우터가 이 호스트의 root 권한을 갖습니다.",
+  "reported": "보고됨", "finished": "완료",
+  "waiting for the host to run the script…": "호스트에서 스크립트가 실행되기를 기다리는 중…",
+  "the router is running the script on the host…": "라우터가 호스트에서 스크립트를 실행하는 중…",
+  "the host is ready": "호스트 준비 완료",
+  "setup or the host check failed — fix the host and run the same command again": "설치 또는 호스트 점검 실패 — 호스트를 고치고 같은 명령을 다시 실행하세요",
+  "the worker was added": "워커를 등록했습니다", "this setup expired — make a new one": "이 설치는 만료되었습니다 — 새로 만드세요",
+  "Error: ": "오류: ", "Add the worker": "워커 등록",
+  "Worker added and starting — watch its badge in System → Rollout": "워커를 등록하고 시작하는 중 — 시스템 → 롤아웃에서 배지를 확인하세요",
+  "Worker added — assign a profile in System → Rollout": "워커를 등록했습니다 — 시스템 → 롤아웃에서 프로필을 할당하세요",
+  "Check host": "호스트 점검", "Host check: {name}": "호스트 점검: {name}",
+  "Read-only check of the host through its agent: driver, groups, directories, venvs, clock, router":
+    "에이전트를 통한 읽기 전용 점검: 드라이버, 그룹, 디렉터리, venv, 시계, 라우터",
+  "OK": "정상", "WARN": "주의", "FAIL": "실패",
 };

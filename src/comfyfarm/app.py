@@ -117,13 +117,13 @@ def create_app(settings: Settings) -> FastAPI:
         await router.stop()
 
     app = FastAPI(title="ComfyFarm", lifespan=lifespan)
-    from .api import account, admin as admin_api, dashboard, rollout as rollout_api, stock
+    from .api import account, admin as admin_api, dashboard, rollout as rollout_api, setup as setup_api, stock
     from .api.context import Ctx
     from .identity import TrustGatewayHeaders
     app.add_middleware(TrustGatewayHeaders, secret=settings.gateway_secret, dev=settings.dev_identity is not None)
     ctx = Ctx(router, settings)
     identity, is_admin = ctx.identity, ctx.is_admin
-    for module in (stock, dashboard, account, admin_api, rollout_api):
+    for module in (stock, dashboard, account, admin_api, rollout_api, setup_api):
         app.include_router(module.make_router(ctx))
 
     @app.exception_handler(Busy)

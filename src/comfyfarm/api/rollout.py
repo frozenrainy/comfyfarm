@@ -352,6 +352,44 @@ def make_router(ctx: Ctx) -> APIRouter:
                                                                      "profile": prof["name"], "restart": False})
         return {"assigned": True, "rev": render["rev"], "warnings": warnings}
 
+    @api.post("/api/admin/instances/{worker_id}/start")
+    async def start_instance(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
+        """First start after setup and assignment (or after a stop): the restart backend starts the unit. Changing what
+        a running worker runs still goes through a rollout."""
+        who = ctx.admin(x_comfyfarm_user)
+        async with db.conn() as c:
+            inst = await inst_row(c, worker_id)
+            if inst is None or inst["profile_id"] is None:
+                raise HTTPException(400, "configure the instance and assign a profile first")
+            if await in_active_rollout(c, worker_id):
+                raise HTTPException(409, "the worker is part of an active rollout")
+        try:
+            backend = be.make(inst["restart_backend"], inst["restart_config"], keys_dir=settings.keys_dir)
+        except be.BackendError as e:
+            raise HTTPException(400, str(e))
+        ok, detail = await backend.restart(inst["instance"])
+        async with db.conn() as c:
+            await audit(c, who, "instance started", inst["instance"], ok=ok, detail=detail[-200:])
+        if not ok:
+            raise HTTPException(502, f"the restart backend did not deliver: {detail[-300:]}")
+        return {"started": True, "detail": detail}
+
+    @api.post("/api/admin/instances/{worker_id}/check")
+    async def check_host(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
+        """The host check (docs/design/14), asked through the instance's agent: read-only."""
+        ctx.admin(x_comfyfarm_user)
+        async with db.conn() as c:
+            inst = await inst_row(c, worker_id)
+        if inst is None:
+            raise HTTPException(404, "no instance")
+        try:
+            out = await be.make(inst["restart_backend"], inst["restart_config"], keys_dir=settings.keys_dir).check(inst["instance"])
+        except be.BackendError as e:
+            raise HTTPException(502, str(e))
+        if out is None:
+            raise HTTPException(400, f"the {inst['restart_backend']} backend has no agent to run the host check")
+        return {"instance": inst["instance"], "check": out}
+
     @api.get("/api/admin/instances/{worker_id}/render")
     async def preview_render(worker_id: int, profile_id: int | None = None, x_comfyfarm_user: str | None = Header(default=None)):
         ctx.admin(x_comfyfarm_user)

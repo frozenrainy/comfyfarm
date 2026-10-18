@@ -77,6 +77,9 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
             out.append((WARN if r["status"] == "interrupted" else OK, f"rollout #{r['id']}",
                         f"{r['status']} for {age / 60:.0f} min" + (" — resume or abort it in System → Rollout" if r["status"] == "interrupted" else "")))
         # ---- workers --------------------------------------------------------------------------------------------
+        instances = [dict(r) for r in await conn.fetch(
+            "SELECT i.instance, i.restart_backend, i.restart_config FROM instances i JOIN workers w ON w.id = i.worker_id "
+            "WHERE w.deleted_at IS NULL AND w.enabled AND i.restart_backend IN ('ssh', 'http-agent') ORDER BY i.instance")]
         workers = [dict(r) for r in await conn.fetch(
             "SELECT w.id, w.name, w.base_url, w.group_id, w.enabled, w.maintenance, w.state, w.capabilities, g.name AS group_name "
             "FROM workers w LEFT JOIN worker_groups g ON g.id = w.group_id WHERE w.deleted_at IS NULL ORDER BY w.name")]
@@ -147,6 +150,24 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
             out.append((WARN, "shared storage", "not checked — pass --ui <UI worker URL> to verify that GPU workers see uploads"))
     finally:
         await adapter.close()
+    # ---- host checks through the agents (docs/design/14) -----------------------------------------------------------
+    from .rollout import backends as be
+    for inst in instances:
+        label = f"host {inst['instance']}"
+        try:
+            rows = await be.make(inst["restart_backend"], inst["restart_config"], keys_dir=s.keys_dir).check(inst["instance"])
+        except be.BackendError as e:
+            out.append((WARN, label, f"host check not run: {e}"))
+            continue
+        fails = [r for r in rows or [] if r.get("level") == FAIL]
+        warns = [r for r in rows or [] if r.get("level") == WARN]
+        if fails or warns:
+            worst = (fails or warns)[0]
+            out.append((FAIL if fails else WARN, label, f"{len(fails)} failed, {len(warns)} warning(s) — {worst['name']}: "
+                        f"{worst['detail']}"))
+        else:
+            out.append((OK, label, f"{len(rows or [])} checks OK"))
+
     # ---- disk, artifacts -----------------------------------------------------------------------------------------
     for label, path in (("disk (router)", os.getcwd()), ("disk (artifacts)", s.artifacts_dir)):
         if not path:

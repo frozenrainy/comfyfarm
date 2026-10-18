@@ -1,6 +1,7 @@
 // Rollout tab (docs/design/07): how each worker is launched (instance), what it should run (profile), and rolling a
 // profile out one worker at a time — drain, restart, wait for the badge, verify, revert that worker on failure.
 import { act, api, button, formDialog, h, namedRow, pill, setPill, setText, syncRows, t, table, when } from "../core.js";
+import { checkHost } from "./setup.js";
 
 const ACTIVE = ["running", "aborting", "interrupted"];
 const PATHS = [["art", "Artifact store <ART>"], ["local", "Local root <LOCAL>"], ["models", "Models directory"],
@@ -104,7 +105,9 @@ export function rollout(root, { refresh }) {
     tr.cfg = button(t("Configure"), () => configure(tr._item));
     tr.asg = button(t("Assign"), () => assign(tr._item));
     tr.ren = button(t("Render"), () => showRender(tr._item));
-    tr.c.actions.append(tr.cfg, tr.asg, tr.ren);
+    tr.chk = button(t("Check host"), () => checkHost(tr._item.worker_id, tr._item.worker),
+                    { title: t("Read-only check of the host through its agent: driver, groups, directories, venvs, clock, router") });
+    tr.c.actions.append(tr.cfg, tr.asg, tr.ren, tr.chk);
     return tr;
   }
   function updateInst(tr, i) {
@@ -117,6 +120,7 @@ export function rollout(root, { refresh }) {
     setText(tr.c.running, [i.comfyui ? `ComfyUI ${i.comfyui}` : null, i.backend].filter(Boolean).join(" · "));
     setText(tr.c.via, i.instance ? i.instance.restart_backend : "");
     tr.asg.hidden = tr.ren.hidden = !i.instance;
+    tr.chk.hidden = !i.instance || !["ssh", "http-agent"].includes(i.instance.restart_backend);
   }
 
   // ---- profiles ----------------------------------------------------------------------------------------------

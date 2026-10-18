@@ -41,7 +41,7 @@ services:
       - "${ROUTER_PORT:-8188}:8188"
     volumes:
       - logs:/var/log/comfyfarm
-      - ${COMFYFARM_KEYS_DIR:-./keys}:/keys:ro                       # ssh keys / agent token files (restart backends)
+      - ${COMFYFARM_KEYS_DIR:-./keys}:/keys                          # agent key, known_hosts, token files (owned by uid 10001)
       - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:/artifacts:ro   # optional: the artifact store, read-only
       - ${COMFYFARM_BACKUP_DIR:-./backups}:/backups                    # comfyfarm backup /backups (owned by uid 10001)
 

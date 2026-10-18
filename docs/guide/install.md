@@ -34,7 +34,7 @@ On the control-plane host inside the network:
 docker load < comfyfarm-images.tar.gz
 cd deploy/compose && cp env.example .env
 docker run --rm comfyfarm:latest comfyfarm secrets >> .env    # then set DB_PASSWORD and UI_WORKER_URL in .env
-mkdir -p backups && sudo chown 10001 backups                  # the router writes backups here as its own user
+mkdir -p backups keys && sudo chown 10001 backups keys        # the router writes backups and its agent key here
 docker compose up -d
 docker compose exec router sh -c 'echo "<password>" | comfyfarm add-user <you> --admin'
 ```
@@ -63,22 +63,43 @@ directories on the NAS. Copy `ui_ext/comfyfarm_ui` into its `custom_nodes`. It n
 
 ## 3. GPU workers
 
-1. Install ComfyUI's GPU stack (driver; on AMD the account needs the `render` and `video` groups for `/dev/kfd`).
-2. Copy `launcher.py` and `agent.py` from `src/comfyfarm/` to `~/comfyfarm/` (standard library only).
-3. Publish the artifacts once (ComfyUI release, venv, node set incl. `worker_ext/comfyfarm_worker`) — see
-   [rollouts.md](rollouts.md).
-4. `deploy/systemd/comfyfarm@.service` → `~/.config/systemd/user/`, `worker.env.example` →
-   `~/.config/comfyfarm/<instance>.env`, `loginctl enable-linger <account>`, then
-   `systemctl --user enable --now comfyfarm@<instance>`.
-5. Lock the worker down: put `COMFYFARM_ALLOW=<control-plane address>` in the profile's environment (with containers
-   the control plane talks from the host's address). Without it the dashboard shows the worker as **unsecured**.
-6. AMD with PyTorch ≥ 2.13 ROCm wheels: also put `HSA_TOOLS_DISABLE_REGISTER=1` into the profile's environment —
-   without it every worker burns one CPU core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)).
+What a GPU host needs before setup: Linux with systemd, Python ≥ 3.10, an ssh server, the GPU driver (ComfyFarm checks
+it, never installs it), and — for NFS mounts written by setup — `nfs-common`. Everything else comes from the router.
+
+**In the dashboard: System → Workers → Set up a worker** (docs/design/14). Describe the host — address, instance name,
+GPU, group, the profile to run, the paths (the artifact store at the **same path on every host**) and NFS mounts if
+setup should write them. Then choose how setup gets root on the host:
+
+- **Run a command yourself** (recommended): copy the one line the dashboard shows and run it on the host as a user who
+  may use `sudo`. It downloads the setup script, checks it against the checksum shown, and runs it. The router never
+  holds root on your workers.
+- **Let the router log in once**: type an admin account and password for the host. The router logs in over ssh and
+  runs the same script with `sudo`; the password is used for that run only. For those minutes the router has root on
+  the host.
+
+The script creates the service account (`render`/`video` groups), installs the worker tools root-owned (the router
+cannot replace them), writes the unit and instance configuration, mounts NFS, installs the router's agent key with a
+forced command, enables lingering — and runs the **host check**, which the dashboard shows line by line: driver and
+device access, directories, every published venv runs here, clock, the router answers, the port is free. Fix what it
+says and run the same command again (it is idempotent). When it is green, **Add the worker**: the dashboard adds it,
+configures its instance with the ssh restart backend and the pinned host keys, assigns the profile and starts it.
+
+Later: *Check host* on the instance (System → Rollout) and `comfyfarm doctor` run the same check through the agent.
+
+Worker access control: put `COMFYFARM_ALLOW=<control-plane address>` in the profile's environment (with containers
+the control plane talks from the host's address). Without it the dashboard shows the worker as **unsecured**. On AMD
+with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every worker burns one CPU
+core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)).
+
+Without the dashboard (or to see what setup does): [rollouts.md](rollouts.md) §2 lists the same pieces by hand.
+
+The router's keys directory (`COMFYFARM_KEYS_DIR`; with containers `deploy/compose/keys`, owned by uid 10001) holds
+its agent key (made on first use) and `known_hosts`.
 
 ## 4. In the dashboard
 
-System → Groups (one per set of identical workers) → Workers (add each GPU worker, pick its group) → Rollout
-(instance settings, assign the first profile) → Users (accounts, which groups each may use).
+System → Groups (one per set of identical workers) first, then *Set up a worker* for each GPU host (above) → Users
+(accounts, which groups each may use).
 
 ## 5. Check
 
