@@ -31,13 +31,14 @@ KEEP_LOCAL = 3
 # ComfyUI 0.41.0 options a render may use: arity (0 flag, 1 one value, "?" optional value, "*"/"+" list) and whether
 # the values are paths (then they must lie under the allowed prefixes). Left out on purpose: --base-directory (the
 # render sets every directory explicitly), --database-url (arbitrary target), --enable-manager* (installs code at
-# runtime), --windows-standalone-build, --quick-test-for-ci, --auto-launch.
+# runtime), --front-end-version (downloads a frontend at runtime; a frontend comes only as a published artifact via
+# --front-end-root), --windows-standalone-build, --quick-test-for-ci, --auto-launch.
 OPTIONS: dict[str, tuple[object, bool]] = {
     "--listen": ("?", False), "--port": (1, False), "--tls-keyfile": (1, True), "--tls-certfile": (1, True),
     "--enable-cors-header": ("?", False), "--max-upload-size": (1, False),
     "--extra-model-paths-config": ("+", True), "--output-directory": (1, True), "--temp-directory": (1, True),
     "--input-directory": (1, True), "--previews-directory": (1, True), "--user-directory": (1, True),
-    "--models-directory": (1, True), "--front-end-root": (1, True), "--front-end-version": (1, False),
+    "--models-directory": (1, True), "--front-end-root": (1, True),
     "--disable-auto-launch": (0, False), "--cuda-device": (1, False), "--default-device": (1, False),
     "--cuda-malloc": (0, False), "--disable-cuda-malloc": (0, False), "--force-fp32": (0, False), "--force-fp16": (0, False),
     "--fp32-unet": (0, False), "--fp64-unet": (0, False), "--bf16-unet": (0, False), "--fp16-unet": (0, False),

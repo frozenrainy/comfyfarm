@@ -64,6 +64,8 @@ def test_router_refuses_profiles_the_launcher_would_refuse(tmp_path):
         rd.check(dict(profile, flags=["--output-directory", "/tmp"]), inst)
     with pytest.raises(rd.BadProfile, match="not allowed"):
         rd.check(dict(profile, flags=["--enable-manager"]), inst)
+    with pytest.raises(rd.BadProfile, match="not allowed"):                # QA-6: not a published artifact (D-37)
+        rd.check(dict(profile, flags=["--front-end-version", "Comfy-Org/ComfyUI_frontend@latest"]), inst)
     with pytest.raises(rd.BadProfile, match="environment"):
         rd.check(dict(profile, env={"LD_PRELOAD": "/tmp/x.so"}), inst)
 
@@ -99,6 +101,7 @@ def bad_cases(r, p):
         ("yaml loads nodes from the input dir", lambda x: x["files"].__setitem__(yaml_path(x), launcher.nodes_yaml([p["input"]]))),
         ("yaml outside the run dir", lambda x: x.update(files={f"{local}/evil.yaml": "comfyfarm: {}\n"})),
         ("frontend from anywhere", argv_add("--front-end-root", "/tmp/fe")),
+        ("frontend downloaded at runtime", argv_add("--front-end-version", "Comfy-Org/ComfyUI_frontend@latest")),
         ("LD_PRELOAD", lambda x: x["env"].update(LD_PRELOAD="/tmp/x.so")),
         ("PYTHONPATH", lambda x: x["env"].update(PYTHONPATH="/tmp")),
         ("sync from outside the store", lambda x: x["sync"][0].update(src="/tmp/core")),
