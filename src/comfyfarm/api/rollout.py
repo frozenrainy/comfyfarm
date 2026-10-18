@@ -95,7 +95,7 @@ def check_profile(p: dict) -> dict:
     return p
 
 
-def check_instance(body: InstanceIn) -> dict:
+def check_instance(body: InstanceIn, keys_dir: str | None = None) -> dict:
     if not launcher.INSTANCE.match(body.instance):
         raise HTTPException(400, "instance: letters, digits and . _ - (max 63)")
     if body.role not in ("gpu", "ui") or body.platform not in ("posix", "windows"):
@@ -113,7 +113,7 @@ def check_instance(body: InstanceIn) -> dict:
     if not 1 <= body.port <= 65535:
         raise HTTPException(400, "port out of range")
     try:
-        be.make(body.restart_backend, body.restart_config)
+        be.make(body.restart_backend, body.restart_config, keys_dir=keys_dir)
     except be.BackendError as e:
         raise HTTPException(400, str(e))
     return body.model_dump()
@@ -280,7 +280,7 @@ def make_router(ctx: Ctx) -> APIRouter:
     @api.put("/api/admin/instances/{worker_id}")
     async def put_instance(worker_id: int, body: InstanceIn, x_comfyfarm_user: str | None = Header(default=None)):
         who = ctx.admin(x_comfyfarm_user)
-        v = check_instance(body)
+        v = check_instance(body, settings.keys_dir)
         async with db.conn() as c:
             async with c.transaction():
                 if not await c.fetchval("SELECT 1 FROM workers WHERE id = $1 AND deleted_at IS NULL", worker_id):

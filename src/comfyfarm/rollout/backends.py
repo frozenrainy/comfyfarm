@@ -5,23 +5,45 @@ fails the step — an in-app soft restart re-executes the same argv and cannot c
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
+import os
+import re
 import shlex
+from urllib.parse import urlparse
 
 import httpx
 
 NAMES = ("manual", "ssh", "http-agent", "systemd-local")
+DEFAULT_KEYS_DIR = "/etc/comfyfarm/keys"
+TOKEN_ENV_PREFIX = "COMFYFARM_AGENT_TOKEN"        # the only environment variables a token may be read from
+SSH_USER = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,31}$")
+HOST_NAME = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
+UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._:\\-]{0,255}$")
 
 
 class BackendError(ValueError):
     pass
 
 
+def in_keys_dir(path, keys_dir: str, what: str) -> str:
+    """A secret reference (ssh key, known_hosts, agent token file) must resolve inside the keys directory: otherwise an
+    admin could make the router read any file it can read and send it somewhere (a token goes out as a Bearer)."""
+    if not isinstance(path, str) or not path or "\0" in path:
+        raise BackendError(f"{what} must be a file name in the keys directory {keys_dir}")
+    base = os.path.realpath(keys_dir)
+    real = os.path.realpath(os.path.join(keys_dir, path))         # relative = relative to the keys directory
+    if not real.startswith(base + os.sep):
+        raise BackendError(f"{what} must lie in the keys directory {keys_dir}")
+    return real
+
+
 class Backend:
     observe_timeout = 60.0          # the worker must be seen down this soon after `restart`
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, keys_dir: str = DEFAULT_KEYS_DIR):
         self.c = config
+        self.keys_dir = keys_dir
 
     async def restart(self, instance: str) -> tuple[bool, str]:
         raise NotImplementedError
@@ -34,8 +56,8 @@ class Backend:
 class Manual(Backend):
     """The dashboard asks an operator to restart the instance and waits (default 30 minutes) to see it happen."""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, keys_dir=DEFAULT_KEYS_DIR):
+        super().__init__(config, keys_dir)
         self.observe_timeout = float(config.get("timeout", 1800))
 
     async def restart(self, instance):
@@ -66,19 +88,32 @@ def _parse_status(text: str) -> dict | None:
 
 class Ssh(Backend):
     """Per-host key restricted to a forced command (`comfyfarm.agent ssh`): the key can only say
-    `restart <instance>` / `status <instance>`. config: host, user, key (a path on the router — the key material
-    stays in the file, never in the ledger), port, known_hosts."""
+    `restart <instance>` / `status <instance>`. config: host, user, key (a file in the keys directory — the key
+    material stays in the file, never in the ledger), port, known_hosts (also in the keys directory). User and host are
+    checked and passed so that ssh can never read them as options (`-l user`, `--` before the host)."""
 
-    def argv(self, *cmd: str) -> list[str]:
+    def __init__(self, config, keys_dir=DEFAULT_KEYS_DIR):
+        super().__init__(config, keys_dir)
         for k in ("host", "user", "key"):
             if not self.c.get(k):
                 raise BackendError(f"ssh backend needs {k}")
-        a = ["ssh", "-i", self.c["key"], "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes"]
-        if self.c.get("known_hosts"):
-            a += ["-o", f"UserKnownHostsFile={self.c['known_hosts']}"]
+        host, user, port = self.c["host"], self.c["user"], self.c.get("port")
+        if not isinstance(user, str) or not SSH_USER.match(user):
+            raise BackendError("ssh: user must be a plain account name (letters, digits, . _ -; not starting with -)")
+        if not isinstance(host, str) or not (HOST_NAME.match(host) or _is_ip(host)):
+            raise BackendError("ssh: host must be a host name or an IP address")
+        if port is not None and (isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535):
+            raise BackendError("ssh: port must be a number 1..65535")
+        self.key = in_keys_dir(self.c["key"], keys_dir, "ssh: key")
+        self.known_hosts = in_keys_dir(self.c["known_hosts"], keys_dir, "ssh: known_hosts") if self.c.get("known_hosts") else None
+
+    def argv(self, *cmd: str) -> list[str]:
+        a = ["ssh", "-i", self.key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes"]
+        if self.known_hosts:
+            a += ["-o", f"UserKnownHostsFile={self.known_hosts}"]
         if self.c.get("port"):
             a += ["-p", str(self.c["port"])]
-        return a + [f"{self.c['user']}@{self.c['host']}", " ".join(shlex.quote(x) for x in cmd)]
+        return a + ["-l", self.c["user"], "--", self.c["host"], " ".join(shlex.quote(x) for x in cmd)]
 
     async def restart(self, instance):
         rc, out = await _run(self.argv("restart", instance))
@@ -89,26 +124,41 @@ class Ssh(Backend):
         return _parse_status(out) if rc == 0 else None
 
 
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
 class HttpAgent(Backend):
     """Per-host agent (`comfyfarm.agent serve`) with a bearer token. config: url, and the token as a **reference** —
-    `token_file` (path readable by the router) or `token_env` (environment variable name). The token value itself is
-    never accepted into the ledger: backups and replicas must not carry it (same reasoning as D-29)."""
+    `token_file` (a file in the keys directory) or `token_env` (an environment variable named COMFYFARM_AGENT_TOKEN…).
+    The token value itself is never accepted into the ledger: backups and replicas must not carry it (same reasoning
+    as D-29). Only such references are accepted: the token is sent to `url`, so any other file or variable would be."""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, keys_dir=DEFAULT_KEYS_DIR):
+        super().__init__(config, keys_dir)
         if "token" in self.c:
             raise BackendError("http-agent: give token_file or token_env, never the token value (it would be stored)")
         if not self.c.get("url") or not (self.c.get("token_file") or self.c.get("token_env")):
             raise BackendError("http-agent backend needs url and token_file or token_env")
+        u = urlparse(str(self.c["url"]))
+        if u.scheme not in ("http", "https") or not u.hostname:
+            raise BackendError("http-agent: url must be http(s)://host[:port]")
+        self.token_file = in_keys_dir(self.c["token_file"], keys_dir, "http-agent: token_file") if self.c.get("token_file") else None
+        env = self.c.get("token_env")
+        if not self.token_file and not (isinstance(env, str) and env.startswith(TOKEN_ENV_PREFIX) and re.fullmatch(r"[A-Z0-9_]+", env)):
+            raise BackendError(f"http-agent: token_env must be a variable named {TOKEN_ENV_PREFIX}…")
 
     def token(self) -> str:
-        if self.c.get("token_file"):
+        if self.token_file:
             try:
-                with open(self.c["token_file"]) as f:
+                with open(self.token_file) as f:
                     return f.read().strip()
             except OSError as e:
                 raise BackendError(f"http-agent: cannot read token_file: {type(e).__name__}")
-        import os
         value = os.environ.get(self.c["token_env"], "")
         if not value:
             raise BackendError(f"http-agent: environment variable {self.c['token_env']} is empty on the router")
@@ -138,23 +188,31 @@ class HttpAgent(Backend):
 class SystemdLocal(Backend):
     """Router and worker on the same host. config: unit (default comfyfarm@{instance}), user (bool)."""
 
-    def _cmd(self, verb: str, instance: str) -> list[str]:
-        unit = self.c.get("unit", "comfyfarm@{instance}").format(instance=instance)
-        return ["systemctl"] + (["--user"] if self.c.get("user") else []) + [verb, unit]
+    def __init__(self, config, keys_dir=DEFAULT_KEYS_DIR):
+        super().__init__(config, keys_dir)
+        if not UNIT.match(str(self.c.get("unit", "comfyfarm@{instance}")).replace("{instance}", "x")):
+            raise BackendError("systemd-local: unit must be a unit name (may contain {instance})")
+
+    def _cmd(self, verb: str, instance: str, *opts: str) -> list[str]:
+        unit = self.c.get("unit", "comfyfarm@{instance}").replace("{instance}", instance)
+        return ["systemctl"] + (["--user"] if self.c.get("user") else []) + [verb, *opts, "--", unit]
 
     async def restart(self, instance):
         rc, out = await _run(self._cmd("restart", instance))
         return rc == 0, out[-500:]
 
     async def status(self, instance):
-        rc, out = await _run(self._cmd("show", instance) + ["-p", "ActiveState,ExecMainStatus,NRestarts"])
+        rc, out = await _run(self._cmd("show", instance, "-p", "ActiveState,ExecMainStatus,NRestarts"))
         return _parse_status(out) if rc == 0 else None
 
 
 REGISTRY: dict[str, type[Backend]] = {"manual": Manual, "ssh": Ssh, "http-agent": HttpAgent, "systemd-local": SystemdLocal}
 
 
-def make(name: str, config: dict) -> Backend:
+def make(name: str, config: dict, keys_dir: str | None = None) -> Backend:
+    """Validates the configuration (the API calls this before storing it, the engine before every step)."""
     if name not in REGISTRY:
         raise BackendError(f"unknown restart backend {name!r} (known: {', '.join(REGISTRY)})")
-    return REGISTRY[name](config or {})
+    if not isinstance(config or {}, dict):
+        raise BackendError("restart_config must be an object")
+    return REGISTRY[name](config or {}, keys_dir=keys_dir or DEFAULT_KEYS_DIR)

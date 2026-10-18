@@ -15,6 +15,7 @@ while reverting finishes its revert (never forward), and a failure already recor
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 
@@ -60,7 +61,7 @@ class Engine:
     def __init__(self, router):
         self.r = router
         self.db, self.s = router.db, router.s
-        self.make_backend = be.make                      # tests replace it
+        self.make_backend = functools.partial(be.make, keys_dir=self.s.keys_dir)     # tests replace it
         self.poll = 1.0                                  # probe interval while watching a restart
         self.start_lock = asyncio.Lock()                 # startups are serialised (shared storage, D: docs/design/07)
         self.current: int | None = None

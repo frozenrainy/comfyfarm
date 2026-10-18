@@ -65,7 +65,10 @@ HTTP flavour (no ssh, e.g. Windows hosts later): `python3 agent.py serve --port 
 ## 3. In the dashboard (System → Rollout)
 
 1. **Instance** of each worker: instance name, the host address(es) allowed to fetch its render, port, the seven
-   paths, restart backend and its configuration (`ssh`: `{"host", "user", "key"}`, the key file readable by the router).
+   paths, restart backend and its configuration (`ssh`: `{"host", "user", "key"}` plus optional `port` and
+   `known_hosts`). Key, `known_hosts` and agent token files must lie in the router's keys directory (`keys_dir`,
+   environment `COMFYFARM_KEYS_DIR`, default `/etc/comfyfarm/keys`; `/keys` in the compose deployment) — give them
+   as a file name there or as a path inside it; anything else is refused.
 2. **Profiles**: core, venv, node artifacts, extra flags, environment. A profile in use cannot be changed; copy it.
 3. First start: *Assign* the current profile (no restart), start the unit on the host, wait for the badge `match`.
 4. Upgrades: *Start rollout* — the worker is drained (its running job finishes), restarted through the backend, must be

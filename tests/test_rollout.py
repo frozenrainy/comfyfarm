@@ -305,6 +305,7 @@ async def test_artifact_checks_when_the_router_sees_the_store(dsn, tmp_path):
 async def test_secrets_are_not_accepted_into_the_ledger(farm, tmp_path):
     """F8: restart backends store references (key path, token_file, token_env), never a token value."""
     api, w = farm["api"], farm["hosts"]["w1"]
+    farm["router"].s.keys_dir = str(tmp_path)                   # token files must lie in the keys directory (QA-7)
     cfg = (await instances(api))["w1"]["instance"]
     base = {**cfg, "restart_backend": "http-agent"}
     bad = await api.put(f"/api/admin/instances/{w.wid}", headers=H, json={**base, "restart_config": {"url": "http://h:8399", "token": "s3cret"}})
@@ -318,9 +319,62 @@ async def test_secrets_are_not_accepted_into_the_ledger(farm, tmp_path):
         audit = await c.fetchval("SELECT string_agg(detail::text, '') FROM audit_log")
     assert "s3cret" not in dump and "t" * 32 not in dump and "t" * 32 not in (audit or "")
     from comfyfarm.rollout import backends as be
-    assert be.make("http-agent", {"url": "http://h:8399", "token_file": str(tok)}).token() == "t" * 32
+    assert be.make("http-agent", {"url": "http://h:8399", "token_file": str(tok)}, keys_dir=str(tmp_path)).token() == "t" * 32
     with pytest.raises(be.BackendError, match="empty"):
-        be.make("http-agent", {"url": "http://h", "token_env": "COMFYFARM_TEST_NO_SUCH_VAR"}).token()
+        be.make("http-agent", {"url": "http://h", "token_env": "COMFYFARM_AGENT_TOKEN_TEST_NONE"}).token()
+
+
+async def test_backend_config_cannot_reach_beyond_its_references(farm, tmp_path):
+    """QA-7: an ssh user/host must never become an ssh option (command execution on the router host), and secret
+    references must stay in the keys directory / COMFYFARM_AGENT_TOKEN… variables — the token is sent to `url`."""
+    from comfyfarm.rollout import backends as be
+    api, w = farm["api"], farm["hosts"]["w1"]
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    (keys / "gpu1.key").write_text("k")
+    (keys / "agent.token").write_text("t" * 32)
+    (tmp_path / "elsewhere.txt").write_text("not a key")
+    (keys / "sneaky").symlink_to(tmp_path / "elsewhere.txt")
+    farm["router"].s.keys_dir = str(keys)
+    cfg = (await instances(api))["w1"]["instance"]
+
+    async def put(backend, config):
+        return await api.put(f"/api/admin/instances/{w.wid}", headers=H, json={**cfg, "restart_backend": backend,
+                                                                               "restart_config": config})
+    ssh_ok = {"host": "gpu-1.farm.lan", "user": "comfy", "key": "gpu1.key", "port": 22}
+    for good in (ssh_ok, {**ssh_ok, "host": "10.0.0.5", "key": str(keys / "gpu1.key")}, {**ssh_ok, "host": "fe80::1"}):
+        assert (await put("ssh", good)).status_code == 200, good                       # positive controls
+    for bad in ({**ssh_ok, "user": "-oProxyCommand=touch /tmp/pwned"}, {**ssh_ok, "host": "-oProxyCommand=id"},
+                {**ssh_ok, "user": "a b"}, {**ssh_ok, "host": "h;id"}, {**ssh_ok, "port": "22 -oX=y"},
+                {**ssh_ok, "key": "/etc/ssh/ssh_host_ed25519_key"}, {**ssh_ok, "key": "../elsewhere.txt"},
+                {**ssh_ok, "key": "sneaky"}, {**ssh_ok, "known_hosts": "/etc/passwd"}):
+        res = await put("ssh", bad)
+        assert res.status_code == 400, bad
+        with pytest.raises(be.BackendError):
+            be.make("ssh", bad, keys_dir=str(keys))
+    argv = be.make("ssh", ssh_ok, keys_dir=str(keys)).argv("restart", "w1")
+    assert argv[-5:] == ["-l", "comfy", "--", "gpu-1.farm.lan", "restart w1"] and argv[2] == str((keys / "gpu1.key").resolve())
+    agent_ok = {"url": "http://gpu-1:8399", "token_file": "agent.token"}
+    assert (await put("http-agent", agent_ok)).status_code == 200
+    assert (await put("http-agent", {"url": "http://gpu-1:8399", "token_env": "COMFYFARM_AGENT_TOKEN_GPU1"})).status_code == 200
+    for bad in ({**agent_ok, "token_file": str(tmp_path / "elsewhere.txt")}, {**agent_ok, "token_file": "/proc/self/environ"},
+                {**agent_ok, "token_file": "sneaky"}, {"url": "http://gpu-1:8399", "token_env": "COMFYFARM_DSN"},
+                {"url": "http://gpu-1:8399", "token_env": "AWS_SECRET_ACCESS_KEY"}, {**agent_ok, "url": "file:///etc/passwd"}):
+        res = await put("http-agent", bad)
+        assert res.status_code == 400, bad
+        with pytest.raises(be.BackendError):
+            be.make("http-agent", bad, keys_dir=str(keys))
+    # the engine builds backends with the configured keys directory too (a ledger written before this check)
+    from comfyfarm.rollout.engine import Engine
+    eng = Engine(farm["router"])                                  # the fixture replaced the running engine's factory
+    try:
+        with pytest.raises(be.BackendError, match="keys directory"):
+            eng.make_backend("http-agent", {"url": "http://x", "token_file": str(tmp_path / "elsewhere.txt")})
+        assert eng.make_backend("http-agent", agent_ok).token() == "t" * 32
+    finally:
+        await eng.stop()
+    with pytest.raises(be.BackendError):
+        be.make("systemd-local", {"unit": "--host=evil@{instance}"})
 
 
 async def step_status(r, rid, wid):
