@@ -36,6 +36,10 @@ class Conflict(Exception):
     """The idempotency key / prompt_id belongs to another owner's job (D-23) → 409, nothing else revealed."""
 
 
+class NotPermitted(Exception):
+    """The owner may not use the job's group, or no group at all (D-34) → 403. The message says which."""
+
+
 async def transition(conn, job_id: int, to: str, frm: tuple[str, ...], reason: str = "", **fields) -> bool:
     """Idempotent conditional transition: only from the given states. Returns True if this call changed the row.
     WS events and reconciliation may race; whoever comes second simply changes nothing."""
@@ -65,8 +69,10 @@ async def transition(conn, job_id: int, to: str, frm: tuple[str, ...], reason: s
 async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | None = None, group_id: int | None = None,
                  idempotency_key: str | None = None, browser_client_id: str | None = None, front: bool = False,
                  output_hint: str | None = None, requirements: dict | None = None,
-                 allowed_groups: list[int] | None = None) -> tuple[dict, bool]:
-    """Insert a pending job. Returns (job, created). Unknown group ids degrade to 'no group' (D-22)."""
+                 allowed_groups: list[int] | None = None, permissions=None) -> tuple[dict, bool]:
+    """Insert a pending job. Returns (job, created). Unknown group ids degrade to 'no group' (D-22).
+    `permissions(conn)` → the owner's groups, read inside the inserting transaction (supersedes `allowed_groups`):
+    a submit spends seconds validating, and a revocation in that time must not be missed (D-34)."""
     key = str(uuid.UUID(idempotency_key)) if idempotency_key else None          # canonical lowercase (P2)
     requirements = validate_requirements(requirements)
     prompt_id = key or str(uuid.uuid4())
@@ -80,6 +86,11 @@ async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | N
                     return dict(existing), False
             if group_id is not None and not await c.fetchval("SELECT 1 FROM worker_groups WHERE id = $1", group_id):
                 group_id = None
+            if permissions is not None:
+                await access.lock_owner(c, owner)
+                allowed_groups = await permissions(c)
+                if why := access.refusal(allowed_groups, group_id):
+                    raise NotPermitted(why)
             prio = await queue_end(c, front)
             row = await c.fetchrow(
                 "INSERT INTO jobs(prompt_id, priority, group_id, owner, idempotency_key, browser_client_id, output_hint, requirements, "
@@ -122,7 +133,9 @@ async def request_cancel(db: Database, adapter, job_id: int) -> str:
 
 # ---- queue operations (docs/design/03 'Pause / reorder'): pure ledger operations ---------------------------------
 QUEUED = ("pending", "paused")
-_PRIORITY_LOCK = 0x636F6D6679   # advisory lock serialising every priority assignment (submit, retry, move)
+# advisory lock serialising every priority assignment (submit, retry, move). Its own key: it once shared db.MIGRATION_LOCK's,
+# and every Database.start (each router and each CLI command) migrates under that lock — live submits waited behind it.
+_PRIORITY_LOCK = 0x636F6D6670   # "comfp"
 
 
 async def queue_end(c, front: bool) -> int:
@@ -186,7 +199,7 @@ async def move(db: Database, job_id: int, *, to: str | None = None, before: int 
 
 async def retry(db: Database, job_id: int) -> dict | None:
     """A user retry is a **new job** (new prompt_id) copied from a finished one and appended to the queue
-    (docs/design/03). Same owner, group and requirements. Comfy.org credentials were never stored (D-29), so API nodes
+    (docs/design/03). Same owner, group and requirements; NotPermitted if the owner may no longer use them. Comfy.org credentials were never stored (D-29), so API nodes
     in a retried workflow fail visibly instead of running with someone else's key."""
     async with db.conn() as c:
         async with c.transaction():
@@ -194,8 +207,11 @@ async def retry(db: Database, job_id: int) -> dict | None:
                                    "WHERE j.id = $1 AND j.status = ANY($2::job_status[])", job_id, list(TERMINAL))
             if old is None:
                 return None
-            prio = await queue_end(c, False)
+            await access.lock_owner(c, old["owner"])
             allowed = await access.owner_allowed(c, old["owner"], old["allowed_groups"])   # today's permissions
+            if why := access.refusal(allowed, old["group_id"], who="the job's owner"):
+                raise NotPermitted(why)                      # as /prompt would: nobody could ever take the copy
+            prio = await queue_end(c, False)
             row = await c.fetchrow(
                 "INSERT INTO jobs(prompt_id, priority, group_id, owner, output_hint, requirements, retry_of, allowed_groups) "
                 "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",

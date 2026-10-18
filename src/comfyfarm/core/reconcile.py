@@ -3,17 +3,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
-from ..adapter.comfy import ComfyAdapter, JobState, NoAnswer
+from ..adapter.comfy import DISPATCH_DEADLINE, ComfyAdapter, JobState, NoAnswer
 from ..db import Busy, Database
 from .jobs import error_doc, transition
 from .settings import Settings
 
 log = logging.getLogger(__name__)
 
+# A POST by another router process (or by this one before a restart) has ended at the latest this long after the claim:
+# the adapter bounds it with DISPATCH_DEADLINE; the margin covers the time between the claim commit and the POST.
+POST_WINDOW = DISPATCH_DEADLINE + 5.0
+
 ACTIVE = """
 SELECT j.id, j.prompt_id, j.status, j.dispatched_at, j.dispatch_ended_at, j.absent_seen_at, j.started_at,
+       j.dispatch_ended_at IS NULL AND j.dispatched_at > now() - make_interval(secs => $1) AS maybe_posting,
        w.id AS wid, w.base_url, w.state, w.enabled, w.deleted_at, w.offline_since,
        coalesce((w.capabilities->>'jobs_api')::boolean, true) AS jobs_api
   FROM jobs j LEFT JOIN workers w ON w.id = j.worker_id
@@ -21,8 +27,11 @@ SELECT j.id, j.prompt_id, j.status, j.dispatched_at, j.dispatch_ended_at, j.abse
 
 
 class Reconciler:
-    def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None):
+    def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None,
+                 posting: dict[int, int] | None = None):
         self.db, self.adapter, self.s, self.wake = db, adapter, settings, wake
+        self.posting = posting if posting is not None else {}    # the dispatcher's: jobs this process is POSTing now
+        self.collected: dict[int, float] = {}                    # job id → when its outputs were read from /history
 
     async def run(self):
         while True:
@@ -36,40 +45,54 @@ class Reconciler:
 
     async def tick(self):
         async with self.db.conn() as c:
-            rows = [dict(r) for r in await c.fetch(ACTIVE)]
+            rows = [dict(r) for r in await c.fetch(ACTIVE, POST_WINDOW)]
             await c.execute("UPDATE workers SET current_job_id = NULL WHERE current_job_id IN "
                             "(SELECT id FROM jobs WHERE status IN ('completed','failed','cancelled','pending','paused'))")
         now = datetime.now(timezone.utc)
-        answers = await asyncio.gather(*(self._ask(r, now) for r in rows))
+        # one worker answering nonsense (or a bug in one branch) must not stop the tick for every other worker
+        answers = await asyncio.gather(*(self._ask(r, now) for r in rows), return_exceptions=True)
         changed = False
         async with self.db.conn() as c:
             for r, ans in zip(rows, answers):
-                async with c.transaction():
-                    changed |= await self._apply(c, r, ans, now)
+                if isinstance(ans, Exception):
+                    log.warning("reconcile: asking about job %s failed: %s", r["id"], type(ans).__name__)
+                    continue
+                try:
+                    async with c.transaction():
+                        changed |= await self._apply(c, r, ans, now)
+                except Exception:
+                    log.exception("reconcile of job %s failed", r["id"])
         if changed and self.wake:
             self.wake.set()
         await self.collect_outputs()
 
     async def collect_outputs(self):
-        """Real outputs for recently completed jobs (history synthesis, display paths D-10, /api/view routing)."""
+        """Real outputs of recently completed jobs (history synthesis, display paths D-10, /api/view routing). The
+        `executed` events record them as they come (D-31), but events sent during a WebSocket gap are lost, so every
+        completed job is read from /history once and merged — the worker's record wins per node."""
+        cutoff = time.monotonic() - 3600
+        self.collected = {k: t for k, t in self.collected.items() if t > cutoff}
         async with self.db.conn() as c:
             rows = await c.fetch("SELECT j.id, j.prompt_id, w.base_url FROM jobs j JOIN workers w ON w.id = j.worker_id "
-                                 "WHERE j.status = 'completed' AND j.outputs IS NULL AND j.finished_at > now() - interval '1 hour' "
-                                 "ORDER BY j.finished_at DESC LIMIT 20")
+                                 "WHERE j.status = 'completed' AND j.finished_at > now() - interval '1 hour' "
+                                 "AND NOT (j.id = ANY($1)) ORDER BY j.finished_at DESC LIMIT 20", list(self.collected))
         for r in rows:
             h = await self.adapter.history(r["base_url"], str(r["prompt_id"]))
             outputs = (h or {}).get("outputs")
-            async with self.db.conn() as c:     # {} marks "asked, nothing there" so the job is not asked again
-                await c.execute("UPDATE jobs SET outputs = $2 WHERE id = $1 AND outputs IS NULL", r["id"], outputs or {})
+            async with self.db.conn() as c:     # {} marks "asked, nothing there" for jobs without any event either
+                await c.execute("UPDATE jobs SET outputs = coalesce(outputs, '{}'::jsonb) || $2::jsonb WHERE id = $1",
+                                r["id"], outputs if isinstance(outputs, dict) else {})
+            self.collected[r["id"]] = time.monotonic()                  # asked once per process, answer or not
 
     async def _ask(self, r: dict, now: datetime):
         if r["wid"] is None or r["deleted_at"] is not None or not r["enabled"]:
             return "gone"
         if r["state"] == "offline" and r["offline_since"] and now - r["offline_since"] >= timedelta(seconds=self.s.worker_lost_after):
             return "gone"
-        if r["status"] == "dispatching" and r["dispatch_ended_at"] is None and \
-                now - r["dispatched_at"] < timedelta(seconds=15):
-            return None                                          # POST still in flight in this process
+        if r["id"] in self.posting:
+            return None          # this process is still POSTing it: "absent" now would re-queue a job about to arrive
+        if r["status"] == "dispatching" and r["maybe_posting"]:
+            return None          # another router process may still be POSTing it (bounded by the deadline)
         return await self.adapter.job_state(r["base_url"], str(r["prompt_id"]), r["jobs_api"])
 
     async def _apply(self, c, r: dict, ans, now: datetime) -> bool:
@@ -80,7 +103,7 @@ class Reconciler:
             return await transition(c, jid, "failed", ("dispatching", "running", "cancelling"), "worker lost",
                                     error=error_doc("worker_lost", "the worker running this job is gone — rerun if needed"))
         assert isinstance(ans, JobState)
-        ended = r["dispatch_ended_at"] or (r["dispatched_at"] + timedelta(seconds=15))
+        ended = r["dispatch_ended_at"] or (r["dispatched_at"] + timedelta(seconds=POST_WINDOW))
         match ans.status:
             case "pending" | "in_progress":
                 fields = {"absent_seen_at": None}

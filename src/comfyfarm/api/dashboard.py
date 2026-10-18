@@ -242,7 +242,10 @@ def make_router(ctx: Ctx) -> APIRouter:
     @api.post("/api/farm/jobs/{prompt_id}/retry")
     async def retry(prompt_id: str, x_comfyfarm_user: str | None = Header(default=None)):
         _, _, r = await acting(prompt_id, x_comfyfarm_user)
-        new = await jobsvc.retry(db, r["id"])
+        try:
+            new = await jobsvc.retry(db, r["id"])
+        except jobsvc.NotPermitted as e:
+            raise HTTPException(403, str(e))
         if new is None:
             raise HTTPException(409, f"only finished jobs can be retried (job is {r['status']})")
         await changed(r["owner"])

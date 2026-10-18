@@ -15,6 +15,9 @@ log = logging.getLogger(__name__)
 class HealthMonitor:
     def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None):
         self.db, self.adapter, self.s, self.wake = db, adapter, settings, wake
+        # worker id → last inventory attempt, answered or not: a worker whose /object_info fails (multi-MB, up to 90 s,
+        # read serially) must not be asked again every tick
+        self.inventory_tried: dict[int, float] = {}
 
     async def run(self):
         while True:
@@ -27,8 +30,13 @@ class HealthMonitor:
             await asyncio.sleep(self.s.health_period)
 
     def _inventory_due(self, w: dict) -> bool:
-        inv = (w["capabilities"] or {}).get("inventory")
-        return inv is None or time.time() - float(inv.get("at", 0)) > self.s.inventory_period
+        inv = (w["capabilities"] or {}).get("inventory") or {}
+        last = max(float(inv.get("at", 0)), self.inventory_tried.get(w["id"], 0.0))
+        return time.time() - last > self.s.inventory_period
+
+    async def _inventory(self, w: dict) -> dict | None:
+        self.inventory_tried[w["id"]] = time.time()
+        return await self.adapter.inventory(w["base_url"])
 
     async def tick(self):
         async with self.db.conn() as c:
@@ -46,11 +54,11 @@ class HealthMonitor:
                     if caps is not None:
                         caps["jobs_api"] = await self.adapter.supports_jobs_api(w["base_url"])
                         caps["extension"] = await self.adapter.worker_info(w["base_url"])   # docs/design/09
-                        caps["inventory"] = await self.adapter.inventory(w["base_url"])     # group consistency
+                        caps["inventory"] = await self._inventory(w)                       # group consistency
                 elif self._inventory_due(w) and not refreshed_one:
                     # models change on disk without a restart: re-read one stale inventory per tick
                     refreshed_one = True
-                    inv = await self.adapter.inventory(w["base_url"])
+                    inv = await self._inventory(w)
                     if inv is not None:
                         async with self.db.conn() as c:
                             await c.execute("UPDATE workers SET capabilities = capabilities || jsonb_build_object('inventory', $2::jsonb) "

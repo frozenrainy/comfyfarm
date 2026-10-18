@@ -144,3 +144,64 @@ async def test_catch_up_after_reconnect(served, fakes):
     done = [m for m in got if isinstance(m, dict) and m["type"] == "execution_success"]
     assert done and done[0]["data"]["prompt_id"] == pid and done[0]["data"]["catch_up"] is True
     await a.close()
+
+
+class StubSocket:
+    """A browser socket that records what the router sends it."""
+    def __init__(self):
+        self.got = []
+
+    async def send_bytes(self, b):
+        self.got.append(b)
+
+    async def send_text(self, t):
+        self.got.append(json.loads(t))
+
+
+async def test_frames_without_prompt_id_never_follow_a_job_across_a_reconnect(dsn, fakes):
+    """D-28: a type-1 preview (no metadata) or an event without prompt_id belongs to the job the worker is executing.
+    After the worker WebSocket reconnects (the worker may have restarted and now runs another user's job) that is not
+    known until the worker says so — such frames are dropped, never sent to the previous job's owner."""
+    from comfyfarm.app import Router
+    from comfyfarm.core import jobs as jobsvc
+    from comfyfarm.events.hub import WorkerStream
+    r = Router(fast_settings(dsn))
+    await r.start(loops=False)
+    w = await fakes(ws_fix=True)
+    _, wid = await add_worker(r, w.url)
+    alice, bob = StubSocket(), StubSocket()
+    r.events.browsers.bind("bA", "alice", alice)
+    r.events.browsers.bind("bB", "bob", bob)
+    ja, _ = await jobsvc.submit(r.db, owner="alice", prompt=tiny(1), browser_client_id="bA")
+    jb, _ = await jobsvc.submit(r.db, owner="bob", prompt=tiny(2), browser_client_id="bB")
+    st = WorkerStream(r.events, wid, w.url)
+    task = asyncio.create_task(st.run())
+    preview = struct.pack(">I", 1) + struct.pack(">I", 1) + b"\xff\xd8jpeg\xff\xd9"
+
+    async def wait_for(cond):
+        for _ in range(100):
+            if cond():
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError("condition not reached")
+    try:
+        await wait_for(lambda: st.connected and st.client_id in w.fake.sockets)
+        await st.on_message(json.dumps({"type": "execution_start", "data": {"prompt_id": str(ja["prompt_id"])}}))
+        await st.on_message(preview)
+        await wait_for(lambda: preview in alice.got)                  # negative control: before the gap it is alice's
+        old = w.fake.sockets[st.client_id]
+        await old.close()                                             # the worker restarts; the router reconnects
+        await wait_for(lambda: st.connected and w.fake.sockets.get(st.client_id) not in (None, old))
+        alice.got.clear()
+        await st.on_message(preview)                                  # bob's job is running now, unannounced
+        await st.on_message(json.dumps({"type": "executing", "data": {"node": "3"}}))
+        await asyncio.sleep(0.2)
+        assert alice.got == [] and bob.got == []
+        # the worker names the prompt again: frames follow it
+        await st.on_message(json.dumps({"type": "executing", "data": {"node": "2", "prompt_id": str(jb["prompt_id"])}}))
+        await st.on_message(preview)
+        await wait_for(lambda: preview in bob.got)
+        assert alice.got == []
+    finally:
+        task.cancel()
+        await r.stop()

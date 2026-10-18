@@ -116,7 +116,9 @@ class WorkerStream:
     def __init__(self, hub: "EventHub", worker_id: int, base_url: str):
         self.hub, self.worker_id, self.base_url = hub, worker_id, base_url
         self.client_id = worker_client_id(hub.s.instance, worker_id)
-        self.current: JobRef | None = None                     # job the worker is executing (previews w/o metadata)
+        # The job the worker is executing, as this connection saw it start: the only owner of frames that carry no
+        # prompt_id (type-1 previews, older events). None = not positively known → such frames are dropped (D-28).
+        self.current: JobRef | None = None
         self.last_progress_write = 0.0
         self.last_written = None
         self.connected = False
@@ -129,6 +131,8 @@ class WorkerStream:
         while True:
             try:
                 async with websockets.connect(url, max_size=None, ping_interval=PING_INTERVAL, ping_timeout=PING_TIMEOUT) as ws:
+                    # whatever ran before the gap may have ended, or the worker restarted and runs another user's job
+                    self.current = None
                     self.connected, attempt = True, 0
                     await ws.send(json.dumps({"type": "feature_flags", "data": {"supports_preview_metadata": True}}))
                     async for msg in ws:
@@ -139,7 +143,7 @@ class WorkerStream:
                 log.info("worker %s ws: %s", self.worker_id, type(e).__name__)
             if self.connected:
                 self.down_since = time.monotonic()
-            self.connected = False
+            self.connected, self.current = False, None
             await asyncio.sleep(backoff[min(attempt, len(backoff) - 1)])
             attempt += 1
 
@@ -160,6 +164,11 @@ class WorkerStream:
         if etype == "execution_start" and ref is not None:
             self.current = ref
             await self.hub.started(ref)
+        elif etype == "executing" and pid and ref is not None:
+            if data.get("node") is not None:
+                self.current = ref          # a node of this prompt runs now (re-learns the job after a reconnect)
+            elif self.current is not None and self.current.prompt_id == ref.prompt_id:
+                self.current = None         # node None: this prompt is done
         if etype == "executed" and ref is not None and data.get("node") is not None:
             # record before relaying: the browser asks /api/view for these files as soon as it sees the event, and
             # the gateway finds the worker holding them through the ledger

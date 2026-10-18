@@ -195,3 +195,302 @@ async def test_cancel_pending_and_running(router_factory, fakes):
     assert queued not in w.fake.post_log
     async with r.db.conn() as c:
         assert await c.fetchval("SELECT current_job_id FROM workers WHERE id = $1", wid) is None   # worker freed
+
+
+# ---- dispatch / reconcile edges found in review --------------------------------------------------------------------
+async def quiet(router_factory, **kw):
+    """A router whose loops are stopped: the test drives the ticks itself, so nothing moves on its own."""
+    r = await router_factory(**kw)
+    for t in r.tasks:
+        t.cancel()
+    r.dispatcher.ready = lambda wid: True
+    return r
+
+
+async def set_worker(r, wid, **kw):
+    async with r.db.conn() as c:
+        for k, v in kw.items():
+            await c.execute(f"UPDATE workers SET {k} = $2 WHERE id = $1", wid, v)
+
+
+async def job_row(r, jid):
+    async with r.db.conn() as c:
+        return dict(await c.fetchrow("SELECT status, worker_id, error, outputs FROM jobs WHERE id = $1", jid))
+
+
+async def drain(r):
+    while r.dispatcher.inflight:
+        await asyncio.gather(*list(r.dispatcher.inflight), return_exceptions=True)
+
+
+@pytest.fixture
+async def foreign():
+    """Something that is not ComfyUI answering 200 on a worker's address (a login page in front of it, `null`)."""
+    from aiohttp import web
+    from conftest import free_port
+    runners = []
+
+    async def start(body: str, content_type: str):
+        app = web.Application()
+
+        async def any_path(_req):
+            return web.Response(text=body, content_type=content_type)
+        app.router.add_route("*", "/{tail:.*}", any_path)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = free_port()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        runners.append(runner)
+        return f"http://127.0.0.1:{port}"
+
+    yield start
+    for runner in runners:
+        await runner.cleanup()
+
+
+@pytest.mark.parametrize("body,ctype", [("<html>login</html>", "text/html"), ("null", "application/json")])
+async def test_foreign_answer_from_one_worker_does_not_stop_reconcile(router_factory, fakes, foreign, body, ctype):
+    """A worker answering 200 with something that is not a JSON object is 'no answer' for that worker only; the other
+    worker's restarted-and-forgotten job is still judged lost in the same tick."""
+    r = await quiet(router_factory)
+    good = await fakes()
+    _, wbad = await add_worker(r, await foreign(body, ctype), name="bad")
+    _, wgood = await add_worker(r, good.url, name="good")
+    ids = []
+    async with r.db.conn() as c:
+        for wid in (wbad, wgood):
+            j, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+            await c.execute("UPDATE jobs SET status = 'running', worker_id = $2, dispatched_at = now() - interval '1 hour', "
+                            "dispatch_ended_at = now() - interval '1 hour' WHERE id = $1", j["id"], wid)
+            ids.append(j["id"])
+    await r.reconciler.tick()                                     # must not raise
+    assert (await job_row(r, ids[1]))["error"]["kind"] == "lost"
+    assert (await job_row(r, ids[0]))["status"] == "running"      # no answer is not evidence of anything
+
+
+async def test_html_200_to_post_prompt_is_not_an_acceptance(router_factory, foreign):
+    from comfyfarm.adapter.comfy import Accepted, Ambiguous
+    r = await quiet(router_factory)
+    out = await r.adapter.submit(await foreign("<html>login</html>", "text/html"), str(uuid.uuid4()), tiny(), {}, "c")
+    assert not isinstance(out, Accepted) and isinstance(out, Ambiguous), out
+
+
+async def test_unexpected_error_asking_one_worker_does_not_stop_reconcile(router_factory, fakes):
+    """Defence in depth behind the adapter: whatever goes wrong asking one worker stays with that worker."""
+    r = await quiet(router_factory)
+    good = await fakes()
+    _, wbad = await add_worker(r, "http://127.0.0.1:9", name="bad")
+    _, wgood = await add_worker(r, good.url, name="good")
+    ids = []
+    async with r.db.conn() as c:
+        for wid in (wbad, wgood):
+            j, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+            await c.execute("UPDATE jobs SET status = 'running', worker_id = $2, dispatched_at = now() - interval '1 hour', "
+                            "dispatch_ended_at = now() - interval '1 hour' WHERE id = $1", j["id"], wid)
+            ids.append(j["id"])
+    real = r.adapter.job_state
+
+    async def job_state(base_url, *a):
+        if base_url.endswith(":9"):
+            raise RuntimeError("adapter bug")
+        return await real(base_url, *a)
+    r.adapter.job_state = job_state
+    await r.reconciler.tick()
+    assert (await job_row(r, ids[1]))["error"]["kind"] == "lost"
+
+
+def gated_submit(r, gates: dict):
+    """POSTs to the gated workers hang until their gate opens (a body still uploading: the worker does not know the job
+    yet); the rest go through."""
+    real = r.adapter.submit
+
+    async def submit(base_url, *a):
+        if base_url in gates:
+            await gates[base_url].wait()
+        return await real(base_url, *a)
+    r.adapter.submit = submit
+
+
+async def test_slow_post_is_not_requeued_while_still_in_flight(router_factory, fakes):
+    """A POST that takes longer than any fixed guess must not be judged 'absent' by reconcile and re-queued: the job
+    would run twice (P3). Reconcile asks the dispatcher what it is still POSTing instead of guessing from time."""
+    r = await quiet(router_factory)
+    a, b = await fakes(), await fakes()
+    _, wa = await add_worker(r, a.url, name="a")
+    _, wb = await add_worker(r, b.url, name="b")
+    await set_worker(r, wa, state="online")
+    await set_worker(r, wb, state="online", maintenance=True)
+    gate = asyncio.Event()
+    gated_submit(r, {a.url: gate})
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    assert await r.dispatcher.tick() == 1
+    async with r.db.conn() as c:                    # the POST has been going on for a minute
+        await c.execute("UPDATE jobs SET dispatched_at = now() - interval '1 minute' WHERE id = $1", job["id"])
+    await r.reconciler.tick(); await asyncio.sleep(1.2); await r.reconciler.tick()   # "absent" twice, settled
+    assert (await job_row(r, job["id"]))["status"] == "dispatching"
+    await set_worker(r, wb, maintenance=False)
+    await set_worker(r, wa, maintenance=True)
+    assert await r.dispatcher.tick() == 0           # nothing to take: the job is still on its way to A
+    gate.set()
+    await drain(r)
+    pid = str(job["prompt_id"])
+    assert a.fake.post_log == [pid] and b.fake.post_log == []
+    row = await job_row(r, job["id"])
+    assert row["status"] in ("running", "completed") and row["worker_id"] == wa
+
+
+async def test_late_acceptance_does_not_take_a_job_handed_to_another_worker(router_factory, fakes):
+    """If the job was re-queued and claimed by B while A's POST was in flight (another router's reconcile did it), A's
+    late 200 must not move B's dispatch to running, and the copy A accepted is cancelled — nobody tracks it."""
+    r = await quiet(router_factory)
+    a, b = await fakes(), await fakes()
+    _, wa = await add_worker(r, a.url, name="a")
+    _, wb = await add_worker(r, b.url, name="b")
+    await set_worker(r, wa, state="online")
+    await set_worker(r, wb, state="online", maintenance=True)
+    gates = {a.url: asyncio.Event(), b.url: asyncio.Event()}
+    gated_submit(r, gates)
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny(blur=25, size=2048))    # one 4 s step on the fake
+    jid, pid = job["id"], str(job["prompt_id"])
+    assert await r.dispatcher.tick() == 1
+    to_a = set(r.dispatcher.inflight)
+    async with r.db.conn() as c:
+        async with c.transaction():
+            await jobsvc.transition(c, jid, "pending", ("dispatching",), "worker never received it (other router)",
+                                    worker_id=None, dispatched_at=None)
+    await set_worker(r, wb, maintenance=False)
+    await set_worker(r, wa, maintenance=True)
+    assert await r.dispatcher.tick() == 1
+    to_b = set(r.dispatcher.inflight) - to_a
+    gates[a.url].set()
+    await asyncio.gather(*to_a)
+    row = await job_row(r, jid)
+    assert row["status"] == "dispatching" and row["worker_id"] == wb, row
+    assert a.fake.jobs[pid].interrupt or a.fake.jobs[pid].status == "cancelled"      # the orphan copy is stopped
+    gates[b.url].set()
+    await asyncio.gather(*to_b)
+    row = await job_row(r, jid)
+    assert row["status"] == "running" and row["worker_id"] == wb
+    async with r.db.conn() as c:
+        cur = {x["id"]: x["current_job_id"] for x in await c.fetch("SELECT id, current_job_id FROM workers")}
+    assert cur == {wa: None, wb: jid}
+
+
+async def test_post_has_an_overall_deadline(router_factory, monkeypatch):
+    """httpx timeouts are per phase: an answer trickling in a byte at a time never times out. The adapter bounds the
+    whole POST, and the outcome is Ambiguous (the worker may have queued it), never a hang."""
+    from aiohttp import web
+    from comfyfarm.adapter import comfy
+    from conftest import free_port
+    r = await quiet(router_factory)
+
+    async def trickle(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        for _ in range(100):
+            await resp.write(b" ")
+            await asyncio.sleep(0.2)
+        return resp
+    app = web.Application()
+    app.router.add_post("/prompt", trickle)
+    runner = web.AppRunner(app, shutdown_timeout=0.5)
+    await runner.setup()
+    port = free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    monkeypatch.setattr(comfy, "DISPATCH_DEADLINE", 1.0, raising=False)
+    try:
+        out = await asyncio.wait_for(r.adapter.submit(f"http://127.0.0.1:{port}", str(uuid.uuid4()), tiny(), {}, "c"), 5)
+        assert isinstance(out, comfy.Ambiguous), out
+    finally:
+        await runner.cleanup()
+
+
+async def test_credentials_survive_a_requeue(router_factory, fakes):
+    """D-29 credentials are forwarded in the POST that the worker accepts — not lost when the first attempt never
+    reached its worker and the job went back to pending — and forgotten once a worker has the job."""
+    r = await quiet(router_factory)
+    b = await fakes()
+    _, wa = await add_worker(r, "http://127.0.0.1:9", name="dead")
+    _, wb = await add_worker(r, b.url, name="b")
+    await set_worker(r, wa, state="online")
+    await set_worker(r, wb, state="online", maintenance=True)
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    r.dispatcher.secrets[job["id"]] = {"auth_token_comfy_org": "SECRET"}
+    assert await r.dispatcher.tick() == 1
+    await drain(r)
+    assert (await job_row(r, job["id"]))["status"] == "pending"           # Unreachable: back to the queue
+    await set_worker(r, wb, maintenance=False)
+    await set_worker(r, wa, maintenance=True)
+    assert await r.dispatcher.tick() == 1
+    await drain(r)
+    assert b.fake.post_extra[-1].get("auth_token_comfy_org") == "SECRET"
+    assert job["id"] not in r.dispatcher.secrets
+
+
+async def test_credentials_of_a_job_cancelled_before_dispatch_are_dropped(router_factory):
+    r = await quiet(router_factory)
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    r.dispatcher.secrets[job["id"]] = {"api_key_comfy_org": "SECRET"}
+    assert await jobsvc.request_cancel(r.db, r.adapter, job["id"]) == "cancelled"
+    await r.dispatcher.tick()
+    assert r.dispatcher.secrets == {}
+
+
+async def test_cancel_during_a_dispatch_that_cannot_connect_ends_cancelled(router_factory):
+    """Cancelled while its POST was failing to connect: the worker never saw the job, so it is cancelled right away
+    and the worker is freed — not left `cancelling` until it fails as worker_lost minutes later."""
+    r = await quiet(router_factory)
+    dead = "http://127.0.0.1:9"
+    _, wid = await add_worker(r, dead, name="dead")
+    await set_worker(r, wid, state="online")
+    gate = asyncio.Event()
+    gated_submit(r, {dead: gate})
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    assert await r.dispatcher.tick() == 1
+    assert await jobsvc.request_cancel(r.db, r.adapter, job["id"]) == "cancelling"
+    gate.set()
+    await drain(r)
+    assert (await job_row(r, job["id"]))["status"] == "cancelled"
+    async with r.db.conn() as c:
+        assert await c.fetchval("SELECT current_job_id FROM workers WHERE id = $1", wid) is None
+
+
+async def test_outputs_missed_in_a_websocket_gap_are_completed_from_history(router_factory, fakes):
+    """Outputs are recorded per `executed` event (D-31); one lost in a WebSocket gap must not leave the job's outputs
+    partial for good: completion merges the worker's /history."""
+    r = await quiet(router_factory)
+    w = await fakes()
+    _, wid = await add_worker(r, w.url)
+    await set_worker(r, wid, state="online")
+    prompt = {"1": {"class_type": "EmptyImage", "inputs": {"width": 8, "height": 8, "batch_size": 1, "color": 0}},
+              "2": {"class_type": "PreviewImage", "inputs": {"images": ["1", 0]}},
+              "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}}}
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=prompt)
+    pid = str(job["prompt_id"])
+    assert await r.dispatcher.tick() == 1
+    await drain(r)
+    for _ in range(100):
+        if pid in w.fake.jobs and w.fake.jobs[pid].status == "completed":
+            break
+        await asyncio.sleep(0.05)
+    seen = {"images": [{"filename": f"fake_{pid[:8]}.png", "subfolder": "", "type": "temp"}]}
+    async with r.db.conn() as c:                         # the hub saw node 2's `executed`, the gap swallowed node 3's
+        await c.execute("UPDATE jobs SET outputs = $2 WHERE id = $1", job["id"], {"2": seen})
+    await r.reconciler.tick()
+    row = await job_row(r, job["id"])
+    assert row["status"] == "completed" and set(row["outputs"]) == {"2", "3"}, row
+    assert row["outputs"]["3"]["images"][0]["type"] == "output"
+
+
+async def test_migrations_do_not_block_submits(router_factory):
+    """Every Database.start (a second router, any CLI command) takes the migration lock; submits must not wait on it."""
+    import asyncpg
+    from comfyfarm.db import MIGRATION_LOCK
+    r = await quiet(router_factory)
+    other = await asyncpg.connect(r.s.dsn)
+    try:
+        await other.execute("SELECT pg_advisory_lock($1)", MIGRATION_LOCK)          # a migration in progress
+        job, created = await asyncio.wait_for(jobsvc.submit(r.db, owner="tester", prompt=tiny()), 3)
+        assert created
+    finally:
+        await other.close()
