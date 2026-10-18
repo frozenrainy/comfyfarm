@@ -46,6 +46,12 @@ a server of the same major version (`comfyfarm doctor` checks this).
 Users open `http://<control-plane>:8080`. Port 8188 (router) is for the workers' launchers and for monitoring
 (`/metrics`); do not publish it to users.
 
+Two Docker habits to know on a site network. Ports Docker publishes bypass host firewalls such as ufw — restrict
+8188 at the network or with `ROUTER_PORT=<host-ip>:8188`; Postgres is deliberately not published at all. And Docker
+takes its networks from `172.17–31.0.0/16`, then `192.168.0.0/20`: if those ranges are routed on your site (VPNs,
+other subnets), traffic to them silently stops on this host — set `"default-address-pools"` in
+`/etc/docker/daemon.json` to a free range before the first `docker compose up`.
+
 Without containers: `pip install` the package into `/opt/comfyfarm/venv`, put the settings into
 `/etc/comfyfarm/{router,gateway}.env` and use `deploy/systemd/comfyfarm-{router,gateway}.service` — see
 [running.md](running.md).
