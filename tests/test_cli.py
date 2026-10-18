@@ -17,6 +17,7 @@ PG_BIN = str(pathlib.Path(pytest.importorskip("pgserver").__file__).parent / "pg
 def test_settings_from_env():
     s = cli.settings_from_env({"COMFYFARM_DSN": "postgresql://x", "COMFYFARM_INSTANCE": "r1", "COMFYFARM_DEV_ADMINS": "a, b"})
     assert (s.dsn, s.instance, s.dev_admins, s.gateway_secret) == ("postgresql://x", "r1", ("a", "b"), None)
+    assert cli.settings_from_env({"COMFYFARM_DSN": "postgresql://x", "COMFYFARM_KEYS_DIR": "/keys"}).keys_dir == "/keys"
     with pytest.raises(SystemExit):
         cli.settings_from_env({})
 

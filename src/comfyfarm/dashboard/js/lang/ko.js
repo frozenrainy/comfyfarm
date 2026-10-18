@@ -147,4 +147,73 @@ export default {
   "Pick the user name from a list on the login page": "로그인 화면에서 사용자 이름을 목록에서 고르기",
   "Login page offers the user names as a drop-down (anyone who can open the login page sees them; passwords are still required)":
     "로그인 화면에 사용자 이름을 드롭다운으로 보여 줍니다 (로그인 화면을 열 수 있는 누구나 이름을 봅니다. 비밀번호는 여전히 필요합니다)",
+
+  // ---- system: rollout ----
+  "succeeded": "성공", "aborting": "중단 중", "aborted": "중단됨", "interrupted": "멈춤(확인 필요)", "draining": "비우는 중",
+  "restarting": "재시작 중", "starting": "시작 중", "verifying": "검증 중", "done": "완료", "reverting": "되돌리는 중",
+  "reverted": "되돌림", "revert failed": "되돌리기 실패", "skipped": "건너뜀", "match": "일치", "differs": "다름",
+  "unassigned": "미할당",
+  "Start rollout": "롤아웃 시작", "Start a rollout": "롤아웃 시작하기", "Start": "시작",
+  "needs a profile and at least one configured instance": "프로필 하나와 설정된 인스턴스가 하나 이상 필요합니다",
+  "Roll out profile": "배포할 프로필",
+  "Workers (one at a time unless the window is larger)": "워커 (창 크기를 늘리지 않으면 한 대씩)",
+  "{worker} — now {profile} ({badge})": "{worker} — 현재 {profile} ({badge})",
+  "Window (workers out of service at the same time)": "창 크기 (동시에 서비스에서 빠지는 워커 수)",
+  "Give up draining after (minutes, 0 = wait for the running job however long)": "비우기 포기까지 (분, 0 = 실행 중인 작업을 끝까지 기다림)",
+  "Wait for the new version at most (minutes)": "새 버전을 기다리는 최대 시간 (분)",
+  "Verify": "검증", "also run a tiny smoke workflow on each worker": "워커마다 작은 스모크 워크플로도 실행",
+  "Rollout started": "롤아웃을 시작했습니다", "Started, with warnings:": "시작했지만 경고가 있습니다:",
+  "Instances": "인스턴스", "Profiles": "프로필", "New profile": "새 프로필", "Audit log": "감사 기록",
+  "How the launcher on each host starts the worker. Badge: match = the worker runs exactly its assigned render; differs = it runs something else (not restarted yet, or a failed start).":
+    "각 호스트의 런처가 워커를 띄우는 방법입니다. 배지: 일치 = 워커가 할당된 렌더를 그대로 실행 중, 다름 = 다른 것을 실행 중 (아직 재시작 전이거나 시작 실패).",
+  "A profile in use cannot be changed — copy it and roll the copy out.": "사용 중인 프로필은 바꿀 수 없습니다 — 복사해서 그 사본을 배포하세요.",
+  "Instance": "인스턴스", "Profile": "프로필", "Badge": "배지", "Rev": "리비전", "Restart via": "재시작 방식",
+  "Core": "코어", "Venv": "Venv", "Nodes": "노드", "Flags": "플래그", "Assigned": "할당", "When": "시각", "Who": "누가",
+  "What": "무엇을", "Target": "대상", "Detail": "내용",
+  "Instance of {worker}": "{worker}의 인스턴스",
+  "Instance name (the launcher's COMFY_LAUNCH_INSTANCE)": "인스턴스 이름 (런처의 COMFY_LAUNCH_INSTANCE)",
+  "Hosts allowed to fetch the render (addresses, comma-separated)": "렌더를 받아 갈 수 있는 호스트 (주소, 쉼표로 구분)",
+  "Platform": "플랫폼", "GPU worker": "GPU 워커", "UI worker": "UI 워커",
+  "Artifact store <ART>": "아티팩트 저장소 <ART>", "Local root <LOCAL>": "로컬 루트 <LOCAL>", "Models directory": "모델 디렉터리",
+  "Input directory": "입력 디렉터리", "Output directory": "출력 디렉터리", "User directory": "사용자 디렉터리", "Temp directory": "임시 디렉터리",
+  "{name} (advanced)": "{name} (고급)",
+  "Restart configuration (JSON)": "재시작 설정 (JSON)",
+  "an operator restarts the worker; the farm waits and watches": "운영자가 워커를 재시작하고, 팜은 기다리며 지켜봅니다",
+  "the key file lies in the router's COMFYFARM_KEYS_DIR and is limited to the agent's forced command":
+    "키 파일은 라우터의 COMFYFARM_KEYS_DIR 안에 두고, 에이전트의 강제 명령으로만 쓰이게 제한합니다",
+  "or \"token_env\": \"COMFYFARM_AGENT_TOKEN_…\"; the token value itself is never stored":
+    "또는 \"token_env\": \"COMFYFARM_AGENT_TOKEN_…\". 토큰 값 자체는 저장하지 않습니다",
+  "router and worker on the same host": "라우터와 워커가 같은 호스트에 있을 때",
+  "restart configuration is not JSON": "재시작 설정이 JSON이 아닙니다", "Instance saved": "인스턴스를 저장했습니다",
+  "Assign": "할당", "Assign a profile to {worker}": "{worker}에 프로필 할당",
+  "Without a restart: the badge shows 'differs' until the worker restarts. To change a running worker, start a rollout.":
+    "재시작하지 않습니다: 워커가 재시작할 때까지 배지는 '다름'으로 보입니다. 실행 중인 워커를 바꾸려면 롤아웃을 시작하세요.",
+  "Render of {instance} (rev {rev})": "{instance}의 렌더 (리비전 {rev})",
+  "Configure": "설정", "Render": "렌더", "not configured": "설정 안 됨",
+  "published: {names}": "게시됨: {names}", "none": "없음",
+  "Copy of {name}": "{name} 복사본",
+  "Core artifact (ComfyUI release)": "코어 아티팩트 (ComfyUI 릴리스)", "Venv artifact": "Venv 아티팩트",
+  "Node artifacts (comma-separated, load order)": "노드 아티팩트 (쉼표로 구분, 로딩 순서)",
+  "Frontend artifact (optional)": "프론트엔드 아티팩트 (선택)", "Extra ComfyUI flags": "추가 ComfyUI 플래그",
+  "e.g. --preview-method auto --reserve-vram 1 (directories and ports come from the instance)":
+    "예: --preview-method auto --reserve-vram 1 (디렉터리와 포트는 인스턴스에서 옵니다)",
+  "Environment (KEY=VALUE per line)": "환경 변수 (한 줄에 KEY=VALUE)",
+  "only PYTORCH_*, HIP_*, CUDA_*, … keys the launcher allows; values must not be paths":
+    "런처가 허용하는 PYTORCH_*, HIP_*, CUDA_* … 키만, 값에는 경로를 쓸 수 없습니다",
+  "Profile saved": "프로필을 저장했습니다", "Profile created": "프로필을 만들었습니다", "Copy": "복사",
+  "Delete profile {name}?": "{name} 프로필을 삭제할까요?", "in use: only the note can change": "사용 중: 메모만 바꿀 수 있습니다",
+  "From → to": "이전 → 이후", "Step": "단계", "Started": "시작", "Took": "소요",
+  "Your turn: ": "직접 할 차례: ",
+  "restart {instance} on its host now (e.g. systemctl restart comfyfarm@{instance}). The farm watches it go down and come back.":
+    "지금 호스트에서 {instance}을(를) 재시작하세요 (예: systemctl restart comfyfarm@{instance}). 팜이 내려갔다 올라오는 것을 지켜봅니다.",
+  "No rollout running.": "진행 중인 롤아웃이 없습니다.",
+  "Abort": "중단", "Abort? Workers still draining go back to work; restarts already under way finish.":
+    "중단할까요? 비우는 중인 워커는 작업으로 돌아가고, 이미 시작된 재시작은 끝까지 진행됩니다.",
+  "Aborting": "중단하는 중", "Aborted": "중단했습니다", "Resumed": "재개했습니다",
+  "by {who}, {when} · window {window}": "{who}, {when} · 창 {window}",
+  "Interrupted: ": "멈춤: ",
+  "the router restarted during this rollout. Its workers stay in maintenance until you resume or abort.":
+    "롤아웃 도중 라우터가 재시작되었습니다. 재개하거나 중단할 때까지 해당 워커는 점검 상태로 남습니다.",
+  "Recent rollouts": "최근 롤아웃",
+  "#{id} → {profile} · {done}/{steps} done · {when} · {who}": "#{id} → {profile} · {done}/{steps} 완료 · {when} · {who}",
 };

@@ -14,7 +14,8 @@ the service manager; with `--log-dir` also to `router.log` (rotated at 20 MB, 5 
 only real failures — point your alerting at that file.
 
 Environment: `COMFYFARM_DSN` (required; the password may instead be in `PGPASSWORD`), `COMFYFARM_INSTANCE` (name of this router; part of the worker event
-identity), `COMFYFARM_GATEWAY_SECRET`, `COMFYFARM_DEFAULT_GROUP`, `COMFYFARM_ARTIFACTS_DIR`,
+identity), `COMFYFARM_GATEWAY_SECRET`, `COMFYFARM_DEFAULT_GROUP`, `COMFYFARM_ARTIFACTS_DIR`, `COMFYFARM_KEYS_DIR` (restart backends may only reference ssh
+keys and agent token files inside it; default `/etc/comfyfarm/keys`),
 `COMFYFARM_DEV_IDENTITY` (development only, loopback: every request is this user).
 
 First admin: `echo 'the-password' | comfyfarm add-user alice --admin`. Everything else is done in the dashboard.

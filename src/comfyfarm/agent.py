@@ -75,7 +75,9 @@ def ssh_main() -> int:
 def serve(port: int, token: str, host: str = "0.0.0.0"):
     class H(BaseHTTPRequestHandler):
         def _go(self, verb: str):
-            if not hmac.compare_digest(self.headers.get("Authorization", ""), f"Bearer {token}"):
+            # bytes: compare_digest raises on non-ASCII str, and the header is whatever the client sent
+            if not hmac.compare_digest(self.headers.get("Authorization", "").encode("utf-8", "surrogateescape"),
+                                       f"Bearer {token}".encode()):
                 return self._send(401, "unauthorized")
             q = parse_qs(urlparse(self.path).query)
             try:

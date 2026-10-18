@@ -32,6 +32,7 @@ async def main():
     dsn = uri.replace("/postgres?", "/e2e?")
     art = pathlib.Path("lab/e2e-art").resolve()
     app = create_app(Settings(dsn=dsn, gateway_secret=SECRET, default_group="lab", instance="e2e",
+                              keys_dir=str(pathlib.Path(__file__).resolve().parent.parent / "lab" / "keys"),
                               artifacts_dir=str(art) if a.rollout_demo else None))
     gw = create_gateway(GatewaySettings(f"http://127.0.0.1:{a.router_port}", a.ui.rstrip("/"), SECRET, KEY))
     rs = uvicorn.Server(uvicorn.Config(app, host=a.router_host, port=a.router_port, log_level="warning"))

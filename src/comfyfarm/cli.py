@@ -9,7 +9,8 @@
   comfyfarm secrets                                                    print fresh gateway secret and session key
 
 Configuration comes from the environment: COMFYFARM_DSN (required), COMFYFARM_INSTANCE, COMFYFARM_GATEWAY_SECRET,
-COMFYFARM_DEFAULT_GROUP, COMFYFARM_ARTIFACTS_DIR, COMFYFARM_DEV_IDENTITY (loopback development only).
+COMFYFARM_DEFAULT_GROUP, COMFYFARM_ARTIFACTS_DIR, COMFYFARM_KEYS_DIR (ssh keys and agent token files the restart
+backends may reference; default /etc/comfyfarm/keys), COMFYFARM_DEV_IDENTITY (loopback development only).
 """
 from __future__ import annotations
 
@@ -39,7 +40,7 @@ def settings_from_env(env=None) -> Settings:
     dsn = env.get("COMFYFARM_DSN") or sys.exit("COMFYFARM_DSN is not set (postgresql://user:pass@host/db)")
     kw = {"dsn": dsn}
     for key, attr in (("INSTANCE", "instance"), ("GATEWAY_SECRET", "gateway_secret"), ("DEFAULT_GROUP", "default_group"),
-                      ("ARTIFACTS_DIR", "artifacts_dir"), ("DEV_IDENTITY", "dev_identity")):
+                      ("ARTIFACTS_DIR", "artifacts_dir"), ("DEV_IDENTITY", "dev_identity"), ("KEYS_DIR", "keys_dir")):
         if env.get(ENV_PREFIX + key):
             kw[attr] = env[ENV_PREFIX + key]
     if env.get("COMFYFARM_DEV_ADMINS"):
