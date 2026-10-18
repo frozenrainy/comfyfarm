@@ -297,34 +297,68 @@ def manifest_hash(path: str) -> str | None:
 
 
 def sync(entry: dict) -> None:
-    """Copy src → dst unless dst carries the same tree_sha256; via a temp dir and rename, never in place."""
+    """Copy src → dst unless dst carries the same tree_sha256; via a temp dir and rename, never in place. Either way
+    the copy's mtime is set to now: that is its last use for prune() (copytree would carry the publish time over)."""
     src, dst = entry["src"], entry["dst"]
     want = manifest_hash(src)
-    if want and manifest_hash(dst) == want:
-        return
-    tmp = f"{dst}.tmp-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copytree(src, tmp, symlinks=True)
-    if os.path.exists(dst):
-        old = f"{dst}.old-{os.getpid()}"
-        os.rename(dst, old)
-        os.rename(tmp, dst)
-        shutil.rmtree(old, ignore_errors=True)
-    else:
-        os.rename(tmp, dst)
+    if not (want and manifest_hash(dst) == want):
+        tmp = f"{dst}.tmp-{os.getpid()}"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copytree(src, tmp, symlinks=True)
+        if os.path.exists(dst):
+            old = f"{dst}.old-{os.getpid()}"
+            os.rename(dst, old)
+            os.rename(tmp, dst)
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            os.rename(tmp, dst)
+    os.utime(dst)
+
+
+IN_FLIGHT = re.compile(r"\.(tmp|old)-\d+$")         # sync()'s work directories (maybe another launcher's, mid-copy)
+
+
+def referenced(local: str) -> dict[str, set[str]] | None:
+    """Artifact names in the current render of every instance under <LOCAL> (`run/<inst>/render.json`, saved by
+    fetch() before anything is synced): several instances may share one <LOCAL>. None if one cannot be read."""
+    out: dict[str, set[str]] = {k: set() for k in KINDS}
+    run = os.path.join(local, "run")
+    try:
+        names = os.listdir(run)
+    except FileNotFoundError:
+        return out
+    except OSError:
+        return None
+    for inst in names:
+        path = os.path.join(run, inst, "render.json")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                for e in json.load(f).get("sync") or []:
+                    out[e["kind"]].add(e["name"])
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            return None
+    return out
 
 
 def prune(local: str, kind: str, keep_names: set[str]) -> None:
-    """Keep the KEEP_LOCAL most recently used copies per kind (plus the ones in use)."""
+    """Keep the KEEP_LOCAL most recently used copies per kind (sync() stamps the use), plus every copy that any
+    instance under <LOCAL> currently runs. If an instance's run state cannot be read, nothing is removed."""
+    refs = referenced(local)
+    if refs is None:
+        return
+    keep = set(keep_names) | refs.get(kind, set())
     base = os.path.join(local, kind)
     try:
-        entries = [e for e in os.scandir(base) if e.is_dir() and NAME.match(e.name)]
+        entries = [e for e in os.scandir(base) if e.is_dir(follow_symlinks=False) and NAME.match(e.name)
+                   and not IN_FLIGHT.search(e.name)]
     except OSError:
         return
-    entries.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+    entries.sort(key=lambda e: e.stat(follow_symlinks=False).st_mtime, reverse=True)
     for e in entries[KEEP_LOCAL:]:
-        if e.name not in keep_names:
+        if e.name not in keep:
             shutil.rmtree(e.path, ignore_errors=True)
 
 

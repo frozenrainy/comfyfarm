@@ -302,3 +302,42 @@ def test_env_values_that_name_paths_are_refused(tmp_path):
         assert launcher.env_problem(k, v) and "\n" not in launcher.env_problem(k, v)
         with pytest.raises(HTTPException, match="environment"):
             check_profile(dict(profile, env={k: v}))
+
+
+def test_prune_keeps_what_any_instance_runs_and_orders_by_use(tmp_path):
+    """QA-5: with a shared <LOCAL>, one launcher must not delete what another instance runs; "most recently used" is
+    the launcher's own stamp, not the publish time that copytree carries over."""
+    import time
+    art, local = tmp_path / "art", tmp_path / "local"
+
+    def published(name, mtime):
+        d = art / "core" / name
+        d.mkdir(parents=True)
+        (d / "main.py").write_text(name)
+        (d / "manifest.json").write_text(json.dumps({"tree_sha256": "h-" + name}))
+        os.utime(d, (mtime, mtime))
+        return {"kind": "core", "name": name, "src": str(d), "dst": str(local / "core" / name)}
+    entries = {n: published(n, 1000 + i * 100) for i, n in enumerate(["c1", "c2", "c3", "c4", "c5"])}
+    for n in ["c5", "c4", "c3", "c2", "c1"]:                              # used newest-published first
+        launcher.sync(entries[n])
+        time.sleep(0.02)
+    launcher.prune(str(local), "core", set())
+    assert sorted(os.listdir(local / "core")) == ["c1", "c2", "c3"]       # the three used last, whatever their age
+
+    # another instance (gpu-2) on the same <LOCAL> runs c5: kept although it is the least recently used
+    launcher.sync(entries["c5"])
+    run2 = local / "run" / "gpu-2"
+    run2.mkdir(parents=True)
+    (run2 / "render.json").write_text(json.dumps({"sync": [entries["c5"]]}))
+    time.sleep(0.02)
+    for n in ["c4", "c3", "c2", "c1"]:
+        launcher.sync(entries[n])
+        time.sleep(0.02)
+    (local / "core" / "c9.tmp-4242").mkdir()                               # another launcher mid-copy
+    launcher.prune(str(local), "core", {"c1"})
+    assert sorted(os.listdir(local / "core")) == ["c1", "c2", "c3", "c5", "c9.tmp-4242"]
+    # an unreadable run state: nothing is removed (what it references is unknown)
+    (run2 / "render.json").write_text("{not json")
+    launcher.sync(entries["c4"])
+    launcher.prune(str(local), "core", {"c4"})
+    assert "c1" in os.listdir(local / "core") and "c5" in os.listdir(local / "core")
