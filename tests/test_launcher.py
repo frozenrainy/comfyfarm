@@ -219,3 +219,28 @@ def test_sync_skips_current_copies_and_publish_hash(tmp_path):
     (src / "manifest.json").write_text(json.dumps({"tree_sha256": launcher.tree_sha256(str(src))}))
     launcher.sync({"src": str(src), "dst": str(dst)})
     assert not (dst / "marker").exists() and (dst / "a.py").read_text() == "changed!"
+
+
+def test_user_writable_dirs_stay_out_of_code(tmp_path):
+    """QA-1: uploads must never land where ComfyUI imports code — not inside <LOCAL> (core and node copies) or <ART>,
+    and not in a parent of them either (an upload's subfolder reaches everything below the input directory)."""
+    from fastapi import HTTPException
+    from comfyfarm.api.rollout import InstanceIn, check_instance
+    profile, inst = make_world(tmp_path)
+    p = inst["paths"]
+    every = [p[k] for k in ("models", "input", "output", "user", "temp")] + [str(tmp_path)]
+    validate(rd.build(profile, inst), inst, prefixes=every)                         # positive control
+    check_instance(InstanceIn(**{**inst, "port": 8188}))
+    for key, value in [("input", f"{p['local']}/core/{profile['core']}/custom_nodes"), ("user", f"{p['local']}/nodes/base-nodes"),
+                       ("input", p["local"]), ("temp", f"{p['local']}/run/gpu-1/tmp"), ("output", str(tmp_path))]:
+        bad = dict(inst, paths={**p, key: value})
+        with pytest.raises(launcher.Refused, match="outside <ART> and <LOCAL>"):
+            validate(rd.build(profile, bad), bad, prefixes=every)
+        with pytest.raises(rd.BadProfile, match="outside <ART> and <LOCAL>"):
+            rd.check(profile, bad)
+        with pytest.raises(HTTPException, match="overlaps"):
+            check_instance(InstanceIn(**{**bad, "port": 8188}))
+    win = dict(inst, platform="windows", paths={k: "C:\\farm\\" + k for k in p})
+    check_instance(InstanceIn(**{**win, "port": 8188}))
+    with pytest.raises(HTTPException, match="overlaps"):
+        check_instance(InstanceIn(**{**win, "paths": {**win["paths"], "input": "c:\\FARM\\local\\nodes\\x"}, "port": 8188}))

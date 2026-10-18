@@ -107,6 +107,9 @@ def check_instance(body: InstanceIn) -> dict:
         v = body.paths[k]
         if not (re.match(r"^[A-Za-z]:\\", v) if win else v.startswith("/")):
             raise HTTPException(400, f"paths.{k} must be absolute")
+    if bad := rd.path_problems(body.paths, win):
+        raise HTTPException(400, "; ".join(bad) + ": directories users write to must lie outside the artifact store "
+                                 "and the local copies (custom nodes are imported from there)")
     if not 1 <= body.port <= 65535:
         raise HTTPException(400, "port out of range")
     try:

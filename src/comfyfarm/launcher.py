@@ -69,6 +69,10 @@ OPTIONS: dict[str, tuple[object, bool]] = {
 ENV_PREFIXES = ("PYTORCH_", "TORCH_", "CUDA_", "HIP_", "HSA_", "ROCM_", "MIOPEN_", "AMD_", "TRITON_", "NCCL_",
                 "COMFYFARM_")        # the worker extension's own settings (COMFYFARM_ALLOW)
 ENV_KEYS = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "TOKENIZERS_PARALLELISM", "TZ"}
+# Directories ComfyUI lets users write to (uploads, outputs, user files). They must not overlap <ART> or <LOCAL> in
+# either direction: <LOCAL> holds the core and node copies ComfyUI imports as code, and an upload's subfolder can reach
+# anything below the input directory.
+WRITABLE = ("--input-directory", "--output-directory", "--temp-directory", "--user-directory", "--previews-directory")
 
 
 def nodes_yaml(node_dirs: list[str]) -> str:
@@ -145,6 +149,8 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
         for v in values:
             if is_path and opt != "--front-end-root" and (not under(v, roots) or under(v, [art])):   # that one: below
                 raise Refused(f"{opt} {v!r} is outside the allowed prefixes")
+            if opt in WRITABLE and (under(v, [art, local]) or under(art, [v]) or under(local, [v])):
+                raise Refused(f"{opt} {v!r} must lie outside <ART> and <LOCAL> (users write there; code is imported from there)")
         opts.append((opt, values))
     env = render.get("env", {})
     if not isinstance(env, dict):
