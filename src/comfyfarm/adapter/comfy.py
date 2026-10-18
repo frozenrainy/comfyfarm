@@ -71,6 +71,16 @@ def _ename(e: Exception) -> str:
     return f"{type(e).__name__}: {e}" if str(e) else type(e).__name__   # httpx messages are often empty
 
 
+def _object(r: httpx.Response) -> dict | None:
+    """The body as a JSON object, else None. Something other than ComfyUI can answer 200 on a worker's address (a login
+    page in front of it, a proxy's error page, `null`): that is no answer, not an answer with nothing in it."""
+    try:
+        j = r.json()
+    except ValueError:                                           # also covers undecodable bytes
+        return None
+    return j if isinstance(j, dict) else None
+
+
 class ComfyAdapter:
     def __init__(self, client: httpx.AsyncClient | None = None):
         self.http = client or httpx.AsyncClient()
@@ -87,15 +97,12 @@ class ComfyAdapter:
         except Exception as e:                                   # read/write timeout, reset after send, …
             return Ambiguous(_ename(e))
         if r.status_code == 200:
-            try:
-                return Accepted(r.json().get("number"))
-            except ValueError:
-                return Accepted(None)
+            j = _object(r)
+            if j is None:                                        # not ComfyUI's answer: nothing says it was queued
+                return Ambiguous("HTTP 200 without a JSON object")
+            return Accepted(j.get("number"))
         if 400 <= r.status_code < 500:
-            try:
-                j = r.json()
-            except ValueError:
-                j = {}
+            j = _object(r) or {}
             return Rejected(r.status_code, j.get("error") or {}, j.get("node_errors") or {})
         return Ambiguous(f"HTTP {r.status_code}")                # 5xx: the worker may have queued it
 
@@ -111,26 +118,28 @@ class ComfyAdapter:
             return JobState(None)
         if r.status_code != 200:
             return NoAnswer(f"HTTP {r.status_code}")
-        j = r.json()
+        j = _object(r)
+        if j is None:
+            return NoAnswer("HTTP 200 without a JSON object")
         return JobState(j.get("status"), j)
 
     async def _job_state_legacy(self, base_url: str, prompt_id: str) -> JobState | NoAnswer:
-        try:
+        try:                                                     # a malformed answer anywhere = no answer
             q = (await self.http.get(f"{base_url}/queue", timeout=QUERY_TIMEOUT)).json()
             if any(x[1] == prompt_id for x in q.get("queue_running", [])):
                 return JobState("in_progress")
             if any(x[1] == prompt_id for x in q.get("queue_pending", [])):
                 return JobState("pending")
             h = (await self.http.get(f"{base_url}/history/{prompt_id}", timeout=QUERY_TIMEOUT)).json().get(prompt_id)
+            if not h:
+                return JobState(None)
+            st = h.get("status", {})
+            msgs = [m[0] for m in st.get("messages", [])]
+            if "execution_interrupted" in msgs:                  # P8
+                return JobState("cancelled", h)
+            return JobState("completed" if st.get("completed") else "failed", h)
         except Exception as e:
             return NoAnswer(_ename(e))
-        if not h:
-            return JobState(None)
-        st = h.get("status", {})
-        msgs = [m[0] for m in st.get("messages", [])]
-        if "execution_interrupted" in msgs:                     # P8
-            return JobState("cancelled", h)
-        return JobState("completed" if st.get("completed") else "failed", h)
 
     async def supports_jobs_api(self, base_url: str) -> bool | None:
         try:
@@ -168,10 +177,8 @@ class ComfyAdapter:
             return None
         if r.status_code == 404:
             return {"installed": False}
-        try:
-            return {"installed": True, **r.json()} if r.status_code == 200 else None
-        except ValueError:
-            return None
+        j = _object(r) if r.status_code == 200 else None
+        return {"installed": True, **j} if j is not None else None
 
     async def cancel(self, base_url: str, prompt_id: str, jobs_api: bool = True) -> bool | None:
         """Cancel wherever the job is (pending or running). True = something was cancelled, False = nothing to
@@ -197,19 +204,17 @@ class ComfyAdapter:
             return "unavailable", {}
         if r.status_code == 200:
             return "ok", {}
-        if r.status_code == 400:
-            try:
-                return "invalid", r.json()
-            except ValueError:
-                return "unavailable", {}
+        if r.status_code == 400 and (j := _object(r)) is not None:
+            return "invalid", j
         return "unavailable", {}
 
     async def history(self, base_url: str, prompt_id: str) -> dict | None:
         try:
             r = await self.http.get(f"{base_url}/history/{prompt_id}", timeout=QUERY_TIMEOUT)
-            return r.json().get(prompt_id) if r.status_code == 200 else None
+            h = r.json().get(prompt_id) if r.status_code == 200 else None
         except Exception:
             return None
+        return h if isinstance(h, dict) else None
 
     async def interrupt(self, base_url: str, prompt_id: str) -> bool:
         try:
@@ -237,14 +242,14 @@ class ComfyAdapter:
         return False, "busy", f"HTTP {r.status_code}"
 
     async def capabilities(self, base_url: str) -> dict | None:
-        try:
+        try:                                                     # a malformed answer = no answer, never a crashed tick
             r = await self.http.get(f"{base_url}/system_stats", timeout=QUERY_TIMEOUT)
             s = r.json()
+            system, devices = s.get("system", {}), s.get("devices", [])
+            torch = system.get("pytorch_version", "")
+            backend = "rocm" if "rocm" in torch else "cuda" if "+cu" in torch else (devices[0].get("type") if devices else "cpu")
+            return {"backend": backend, "torch": torch, "comfyui": system.get("comfyui_version"), "os": system.get("os"),
+                    "argv": system.get("argv"),
+                    "devices": [{"name": d.get("name"), "type": d.get("type"), "vram_total": d.get("vram_total")} for d in devices]}
         except Exception:
             return None
-        system, devices = s.get("system", {}), s.get("devices", [])
-        torch = system.get("pytorch_version", "")
-        backend = "rocm" if "rocm" in torch else "cuda" if "+cu" in torch else (devices[0].get("type") if devices else "cpu")
-        return {"backend": backend, "torch": torch, "comfyui": system.get("comfyui_version"), "os": system.get("os"),
-                "argv": system.get("argv"),
-                "devices": [{"name": d.get("name"), "type": d.get("type"), "vram_total": d.get("vram_total")} for d in devices]}

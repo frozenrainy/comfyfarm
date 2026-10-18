@@ -195,3 +195,105 @@ async def test_cancel_pending_and_running(router_factory, fakes):
     assert queued not in w.fake.post_log
     async with r.db.conn() as c:
         assert await c.fetchval("SELECT current_job_id FROM workers WHERE id = $1", wid) is None   # worker freed
+
+
+# ---- dispatch / reconcile edges found in review --------------------------------------------------------------------
+async def quiet(router_factory, **kw):
+    """A router whose loops are stopped: the test drives the ticks itself, so nothing moves on its own."""
+    r = await router_factory(**kw)
+    for t in r.tasks:
+        t.cancel()
+    r.dispatcher.ready = lambda wid: True
+    return r
+
+
+async def set_worker(r, wid, **kw):
+    async with r.db.conn() as c:
+        for k, v in kw.items():
+            await c.execute(f"UPDATE workers SET {k} = $2 WHERE id = $1", wid, v)
+
+
+async def job_row(r, jid):
+    async with r.db.conn() as c:
+        return dict(await c.fetchrow("SELECT status, worker_id, error, outputs FROM jobs WHERE id = $1", jid))
+
+
+async def drain(r):
+    while r.dispatcher.inflight:
+        await asyncio.gather(*list(r.dispatcher.inflight), return_exceptions=True)
+
+
+@pytest.fixture
+async def foreign():
+    """Something that is not ComfyUI answering 200 on a worker's address (a login page in front of it, `null`)."""
+    from aiohttp import web
+    from conftest import free_port
+    runners = []
+
+    async def start(body: str, content_type: str):
+        app = web.Application()
+
+        async def any_path(_req):
+            return web.Response(text=body, content_type=content_type)
+        app.router.add_route("*", "/{tail:.*}", any_path)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = free_port()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        runners.append(runner)
+        return f"http://127.0.0.1:{port}"
+
+    yield start
+    for runner in runners:
+        await runner.cleanup()
+
+
+@pytest.mark.parametrize("body,ctype", [("<html>login</html>", "text/html"), ("null", "application/json")])
+async def test_foreign_answer_from_one_worker_does_not_stop_reconcile(router_factory, fakes, foreign, body, ctype):
+    """A worker answering 200 with something that is not a JSON object is 'no answer' for that worker only; the other
+    worker's restarted-and-forgotten job is still judged lost in the same tick."""
+    r = await quiet(router_factory)
+    good = await fakes()
+    _, wbad = await add_worker(r, await foreign(body, ctype), name="bad")
+    _, wgood = await add_worker(r, good.url, name="good")
+    ids = []
+    async with r.db.conn() as c:
+        for wid in (wbad, wgood):
+            j, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+            await c.execute("UPDATE jobs SET status = 'running', worker_id = $2, dispatched_at = now() - interval '1 hour', "
+                            "dispatch_ended_at = now() - interval '1 hour' WHERE id = $1", j["id"], wid)
+            ids.append(j["id"])
+    await r.reconciler.tick()                                     # must not raise
+    assert (await job_row(r, ids[1]))["error"]["kind"] == "lost"
+    assert (await job_row(r, ids[0]))["status"] == "running"      # no answer is not evidence of anything
+
+
+async def test_html_200_to_post_prompt_is_not_an_acceptance(router_factory, foreign):
+    from comfyfarm.adapter.comfy import Accepted, Ambiguous
+    r = await quiet(router_factory)
+    out = await r.adapter.submit(await foreign("<html>login</html>", "text/html"), str(uuid.uuid4()), tiny(), {}, "c")
+    assert not isinstance(out, Accepted) and isinstance(out, Ambiguous), out
+
+
+async def test_unexpected_error_asking_one_worker_does_not_stop_reconcile(router_factory, fakes):
+    """Defence in depth behind the adapter: whatever goes wrong asking one worker stays with that worker."""
+    r = await quiet(router_factory)
+    good = await fakes()
+    _, wbad = await add_worker(r, "http://127.0.0.1:9", name="bad")
+    _, wgood = await add_worker(r, good.url, name="good")
+    ids = []
+    async with r.db.conn() as c:
+        for wid in (wbad, wgood):
+            j, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+            await c.execute("UPDATE jobs SET status = 'running', worker_id = $2, dispatched_at = now() - interval '1 hour', "
+                            "dispatch_ended_at = now() - interval '1 hour' WHERE id = $1", j["id"], wid)
+            ids.append(j["id"])
+    real = r.adapter.job_state
+
+    async def job_state(base_url, *a):
+        if base_url.endswith(":9"):
+            raise RuntimeError("adapter bug")
+        return await real(base_url, *a)
+    r.adapter.job_state = job_state
+    await r.reconciler.tick()
+    assert (await job_row(r, ids[1]))["error"]["kind"] == "lost"

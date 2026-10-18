@@ -40,12 +40,19 @@ class Reconciler:
             await c.execute("UPDATE workers SET current_job_id = NULL WHERE current_job_id IN "
                             "(SELECT id FROM jobs WHERE status IN ('completed','failed','cancelled','pending','paused'))")
         now = datetime.now(timezone.utc)
-        answers = await asyncio.gather(*(self._ask(r, now) for r in rows))
+        # one worker answering nonsense (or a bug in one branch) must not stop the tick for every other worker
+        answers = await asyncio.gather(*(self._ask(r, now) for r in rows), return_exceptions=True)
         changed = False
         async with self.db.conn() as c:
             for r, ans in zip(rows, answers):
-                async with c.transaction():
-                    changed |= await self._apply(c, r, ans, now)
+                if isinstance(ans, Exception):
+                    log.warning("reconcile: asking about job %s failed: %s", r["id"], type(ans).__name__)
+                    continue
+                try:
+                    async with c.transaction():
+                        changed |= await self._apply(c, r, ans, now)
+                except Exception:
+                    log.exception("reconcile of job %s failed", r["id"])
         if changed and self.wake:
             self.wake.set()
         await self.collect_outputs()
