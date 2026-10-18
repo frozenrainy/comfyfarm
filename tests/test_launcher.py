@@ -115,6 +115,12 @@ def bad_cases(r, p):
         ("require odd path", lambda x: x["require"].append("/tmp/READY")),
         ("bad rev", lambda x: x.update(rev="xyz")),
         ("option without value", argv_add("--port")),
+        # QA-8: malformed, not merely wrong — must be a refusal (exit 2), never a crash (exit 1: restart loop)
+        ("sync entry not an object", lambda x: x["sync"].append("x")),
+        ("sync as an object", lambda x: x.update(sync={"core": x["sync"][0]})),
+        ("sync name not a string", lambda x: x["sync"][1].update(name=5)),
+        ("files as a list", lambda x: x.update(files=list(x["files"]))),
+        ("require as a string", lambda x: x.update(require=x["require"][0])),
     ]
 
 
@@ -199,6 +205,27 @@ def test_launcher_run(tmp_path, monkeypatch, capsys):
         fr.body = json.dumps(bad).encode()
         n = len(execs)
         assert launcher.main([]) == 2 and len(execs) == n
+    finally:
+        fr.close()
+
+
+def test_launcher_malformed_render_exits_2(tmp_path, monkeypatch, capsys):
+    """QA-8: a malformed render from the router is a refusal (exit 2, one line), not an exception (exit 1)."""
+    profile, inst = make_world(tmp_path)
+    fr = FakeRouter()
+    p = inst["paths"]
+    for k, v in {"ROUTER": f"http://127.0.0.1:{fr.port}", "INSTANCE": "gpu-1", "ARTIFACTS": p["art"], "LOCAL": p["local"],
+                 "PREFIXES": ",".join(p[k] for k in ("models", "input", "output", "user", "temp"))}.items():
+        monkeypatch.setenv(f"COMFY_LAUNCH_{k}", v)
+    monkeypatch.setattr(os, "execve", lambda *a: pytest.fail("must not start"))
+    try:
+        for mutate in (lambda x: x["sync"].append("x"), lambda x: x.update(files=list(x["files"])), lambda x: x.update(env=[])):
+            bad = rd.build(profile, inst)
+            mutate(bad)
+            fr.body = json.dumps(bad).encode()
+            assert launcher.main(["--check"]) == 2
+            err = capsys.readouterr().err
+            assert "refused" in err and err.count("\n") == 1
     finally:
         fr.close()
 

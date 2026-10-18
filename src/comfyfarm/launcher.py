@@ -191,10 +191,15 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
         if why := env_problem(k, v):
             raise Refused(why)
 
+    for key, typ in (("sync", list), ("files", dict), ("mkdirs", list), ("require", list)):
+        if not isinstance(render.get(key, typ()), typ):
+            raise Refused(f"{key} must be {'a list' if typ is list else 'an object'}")
     synced: dict[str, list[str]] = {"core": [], "nodes": [], "frontend": []}
     for e in render.get("sync", []):
+        if not isinstance(e, dict):
+            raise Refused(f"bad sync entry {e!r}")
         kind, name = e.get("kind"), e.get("name", "")
-        if kind not in synced or not NAME.match(name):
+        if kind not in synced or not isinstance(name, str) or not NAME.match(name):
             raise Refused(f"bad sync entry {e!r}")
         if _norm(e.get("src", "")) != f"{art}/{kind}/{name}" or _norm(e.get("dst", "")) != f"{local}/{kind}/{name}":
             raise Refused(f"sync {kind}/{name} must copy <ART>/{kind}/{name} to <LOCAL>/{kind}/{name}")
@@ -215,7 +220,7 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
     for path, content in files.items():
         if not re.fullmatch(re.escape(run_dir) + r"/extra_model_paths\.[0-9a-f]{12}\.yaml", _norm(path)):
             raise Refused(f"files may only be {run_dir}/extra_model_paths.<rev>.yaml: {path!r}")
-        if content != nodes_yaml([f"{local}/nodes/{n}" for n in synced["nodes"]]):
+        if not isinstance(content, str) or content != nodes_yaml([f"{local}/nodes/{n}" for n in synced["nodes"]]):
             raise Refused("extra model paths content is not the synced node artifacts")
     for opt, vals in opts:
         if opt == "--front-end-root":
@@ -364,7 +369,10 @@ def main(argv: list[str] | None = None) -> int:
             raise Refused("bad instance name")
         prefixes = [p for p in env.get("COMFY_LAUNCH_PREFIXES", "").split(",") if p]
         render = fetch(cfg["router"], cfg["instance"], cfg["local"])
-        validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes)
+        try:
+            validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes)
+        except (TypeError, AttributeError, KeyError, ValueError) as e:     # any malformed render is a refusal, not a crash
+            raise Refused(f"malformed render ({type(e).__name__}: {e})".replace("\n", " "))
         if "--check" in args:
             print(f"ok {render['rev']}")
             return 0
