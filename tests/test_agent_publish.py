@@ -115,7 +115,24 @@ def test_publish_venv(tmp_path):
     m = publish.publish_venv(str(art), "plain-1", sys.executable, [], "cpu", [], ["--quiet"])
     d = art / "venv" / "plain-1"
     assert (d / "READY").exists() and (d / "freeze.txt").exists() and m["accelerator"] == "cpu" and m["platform"] == "posix"
-    assert os.path.realpath(d / "bin" / "python").startswith("/")
+    real = os.path.realpath(d / "bin" / "python")
+    assert real.startswith(os.path.realpath(d) + os.sep) or real.startswith("/usr/")       # D-42: runs on any host
+    assert publish.interpreter_problems(str(d)) == []
+    out = subprocess.run([str(d / "bin" / "python"), "-c", "import sys; print(sys.prefix)"], capture_output=True, text=True)
+    assert out.returncode == 0 and os.path.realpath(out.stdout.strip()) == os.path.realpath(d)
+
+
+def test_a_venv_tied_to_the_build_host_is_refused(tmp_path):
+    """D-42: a venv whose interpreter lives in the builder's home (uv's store, a pyenv) only works on that host."""
+    v = tmp_path / "v"
+    (v / "bin").mkdir(parents=True)
+    outside = tmp_path / "home" / ".local" / "share" / "uv" / "python" / "cpython-3.12" / "bin"
+    outside.mkdir(parents=True)
+    (outside / "python3.12").write_text("")
+    os.symlink(outside / "python3.12", v / "bin" / "python")
+    (v / "pyvenv.cfg").write_text(f"home = {outside}\nversion_info = 3.12\n")
+    bad = publish.interpreter_problems(str(v))
+    assert len(bad) == 2 and "bin/python" in bad[0] and "home" in bad[1]
 
 
 def test_tree_hash_encoding_is_the_contract_one(tmp_path):
@@ -259,3 +276,19 @@ def test_venv_escape_relative_pth(tmp_path):
     assert publish.venv_escapes(str(v)) == []
     (site / "up.pth").write_text("../../../../src/pkg\n")
     assert any("up.pth" in b for b in publish.venv_escapes(str(v)))
+
+
+def test_agent_reads_its_config_file_and_runs_the_host_check(fake_systemctl, tmp_path):
+    """A forced command cannot pass environment: setup writes /etc/comfyfarm/agent.env (here: a temp file). `check`
+    runs the read-only host check for a served instance only; anything else stays refused."""
+    env, log = fake_systemctl
+    conf = tmp_path / "agent.env"
+    conf.write_text("COMFYFARM_AGENT_INSTANCES=gpu-9\nCOMFYFARM_AGENT_USER=1\n")
+    env = {k: v for k, v in env.items() if not k.startswith("COMFYFARM_AGENT_")}
+    env["COMFYFARM_AGENT_CONFIG"] = str(conf)
+    assert run_ssh(env, "restart gpu-9").returncode == 0 and "--user restart --no-block comfyfarm@gpu-9" in log.read_text()
+    assert run_ssh(env, "restart gpu-1").returncode == 2                              # not in the file
+    r = run_ssh(env, "check gpu-9")                                                   # no /etc/comfyfarm/gpu-9.* here
+    assert r.returncode == 2 and "not set up" in (r.stdout + r.stderr)
+    assert run_ssh(env, "check gpu-1").returncode == 2
+    assert run_ssh(env, "sh -c id").returncode == 2

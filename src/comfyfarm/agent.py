@@ -1,5 +1,6 @@
-"""Restart agent for a worker host (contract §6): the only thing the router may ask a host is `restart <instance>` and
-`status <instance>`. Standard library only — copy this file to the host.
+"""Restart agent for a worker host (contract §6): the only things the router may ask a host are `restart <instance>`,
+`status <instance>` and `check <instance>` (the read-only host check, docs/design/14). Standard library only —
+installed by worker setup into /opt/comfyfarm/worker/ (root-owned: the router cannot replace it, D-40).
 
 SSH forced command (backend `ssh`): in ~/.ssh/authorized_keys of the service account
 
@@ -7,7 +8,7 @@ SSH forced command (backend `ssh`): in ~/.ssh/authorized_keys of the service acc
 
 HTTP (backend `http-agent`, e.g. Windows hosts later):  python3 agent.py serve --port 8399 --token-file /etc/comfyfarm/token
 
-Configuration (environment):
+Configuration (environment, else /etc/comfyfarm/agent.env — a forced command cannot pass environment):
   COMFYFARM_AGENT_INSTANCES   comma-separated instances this host serves (anything else is refused)
   COMFYFARM_AGENT_UNIT        systemd unit template, default comfyfarm@{instance}
   COMFYFARM_AGENT_USER        1 = user units (systemctl --user; enable lingering for the account)
@@ -31,18 +32,40 @@ class Refused(Exception):
     pass
 
 
+CONFIG = os.environ.get("COMFYFARM_AGENT_CONFIG", "/etc/comfyfarm/agent.env")
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def setting(key: str, default: str = "") -> str:
+    if key in os.environ:
+        return os.environ[key]
+    try:
+        with open(CONFIG) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k.strip() == key:
+                    return v.strip()
+    except OSError:
+        pass
+    return default
+
+
 def instances() -> set[str]:
-    return {x.strip() for x in os.environ.get("COMFYFARM_AGENT_INSTANCES", "").split(",") if x.strip()}
+    return {x.strip() for x in setting("COMFYFARM_AGENT_INSTANCES").split(",") if x.strip()}
+
+
+def served(instance: str) -> str:
+    if not INSTANCE.match(instance) or instance not in instances():
+        raise Refused(f"instance {instance!r} is not served here")
+    return instance
 
 
 def unit(instance: str) -> str:
-    if not INSTANCE.match(instance) or instance not in instances():
-        raise Refused(f"instance {instance!r} is not served here")
-    return os.environ.get("COMFYFARM_AGENT_UNIT", "comfyfarm@{instance}").format(instance=instance)
+    return setting("COMFYFARM_AGENT_UNIT", "comfyfarm@{instance}").format(instance=served(instance))
 
 
 def systemctl(*args: str) -> subprocess.CompletedProcess:
-    base = ["systemctl"] + (["--user"] if os.environ.get("COMFYFARM_AGENT_USER") == "1" else [])
+    base = ["systemctl"] + (["--user"] if setting("COMFYFARM_AGENT_USER") == "1" else [])
     return subprocess.run(base + list(args), capture_output=True, text=True, timeout=60)
 
 
@@ -56,6 +79,12 @@ def do(verb: str, instance: str) -> tuple[int, str]:
         p = systemctl("show", u, "-p", "ActiveState,ExecMainStatus,NRestarts")
         d = dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
         return p.returncode, json.dumps({k: d.get(k) for k in ("ActiveState", "ExecMainStatus", "NRestarts")})
+    if verb == "check":                         # read-only; exit 0 = the check ran (its findings are in the JSON)
+        p = subprocess.run([sys.executable, os.path.join(HERE, "hostcheck.py"), served(instance), "--json"],
+                           capture_output=True, text=True, timeout=180)
+        if p.returncode not in (0, 1):
+            return p.returncode, (p.stderr or p.stdout).strip()
+        return 0, p.stdout.strip()
     raise Refused(f"unknown command {verb!r}")
 
 
@@ -63,7 +92,7 @@ def ssh_main() -> int:
     words = os.environ.get("SSH_ORIGINAL_COMMAND", "").split()
     try:
         if len(words) != 2:
-            raise Refused("expected: restart <instance> | status <instance>")
+            raise Refused("expected: restart|status|check <instance>")
         rc, out = do(words[0], words[1])
     except Refused as e:
         print(f"refused: {e}", file=sys.stderr)
@@ -98,8 +127,8 @@ def serve(port: int, token: str, host: str = "0.0.0.0"):
             self._send(404, "not found")
 
         def do_GET(self):
-            if urlparse(self.path).path == "/status":
-                return self._go("status")
+            if urlparse(self.path).path in ("/status", "/check"):
+                return self._go(urlparse(self.path).path[1:])
             self._send(404, "not found")
 
         def log_message(self, *a):

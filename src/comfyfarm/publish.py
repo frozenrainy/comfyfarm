@@ -139,19 +139,55 @@ def venv_escapes(path: str) -> list[str]:
     return bad
 
 
+def interpreter_problems(path: str) -> list[str]:
+    """D-42: `bin/python` and pyvenv.cfg's `home` resolve inside the venv, or to the operating system's own Python
+    under /usr (present at the same path on every host). Anything else exists only on the build host."""
+    top, bad = os.path.realpath(path), []
+
+    def ok(p: str) -> bool:
+        return p == top or p.startswith(top + os.sep) or p.startswith("/usr/")
+    real = os.path.realpath(os.path.join(path, "bin", "python"))
+    if not ok(real):
+        bad.append(f"bin/python resolves outside the venv: {real}")
+    cfg = os.path.join(path, "pyvenv.cfg")
+    if os.path.isfile(cfg):
+        with open(cfg) as f:
+            home = next((line.split("=", 1)[1].strip() for line in f if line.split("=", 1)[0].strip() == "home"), None)
+        if home and not ok(os.path.realpath(home)):
+            bad.append(f"pyvenv.cfg home is outside the venv: {home}")
+    return bad
+
+
+def carry_interpreter(python: str, path: str) -> str:
+    """The interpreter the venv will run, inside the artifact (D-42). A self-contained build (uv's managed Pythons are
+    python-build-standalone, made to be moved) is copied to <venv>/.python/; the operating system's own Python under
+    /usr is used where it is. Returns the interpreter to build the venv with."""
+    real = os.path.realpath(python)
+    if real.startswith("/usr/"):
+        return python
+    root = os.path.dirname(os.path.dirname(real))                    # <install>/bin/python3.x → <install>
+    dest = os.path.join(path, ".python", os.path.basename(root))
+    shutil.copytree(root, dest, symlinks=True)
+    return os.path.join(dest, "bin", os.path.basename(real))
+
+
 def publish_venv(art: str, name: str, python: str, requirements: list[str], accelerator: str | None,
                  arch: list[str], pip_args: list[str], uv: str | None = None) -> dict:
-    """The interpreter itself stays outside (a venv links to its base Python): every worker that uses the store
-    needs that base at the same path."""
+    """Built at its final path, with its interpreter inside it (D-42), so every host that mounts the store at the same
+    path can run it — not only the build host."""
     path = target(art, "venv", name)
     py = os.path.join(path, "bin", "python")
     pip = [uv, "pip"] if uv else [py, "-m", "pip"]
     target_py = ["--python", py] if uv else []
+    os.makedirs(path)
+    base = carry_interpreter(python, path)
     if uv:
-        subprocess.run([uv, "venv", "--python", python, path], check=True)   # at its final path
+        subprocess.run([uv, "venv", "--allow-existing", "--python", base, path], check=True)   # at its final path
     else:
-        subprocess.run([python, "-m", "venv", path], check=True)             # at its final path
+        subprocess.run([base, "-m", "venv", path], check=True)                                 # at its final path
     try:
+        if bad := interpreter_problems(path):
+            raise Refused("; ".join(bad))
         for r in requirements:
             subprocess.run(pip + ["install"] + target_py + ["-r", r] + pip_args, check=True)
         subprocess.run(pip + ["check"] + target_py, check=True)
