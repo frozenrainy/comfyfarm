@@ -434,3 +434,22 @@ async def test_credentials_of_a_job_cancelled_before_dispatch_are_dropped(router
     assert await jobsvc.request_cancel(r.db, r.adapter, job["id"]) == "cancelled"
     await r.dispatcher.tick()
     assert r.dispatcher.secrets == {}
+
+
+async def test_cancel_during_a_dispatch_that_cannot_connect_ends_cancelled(router_factory):
+    """Cancelled while its POST was failing to connect: the worker never saw the job, so it is cancelled right away
+    and the worker is freed — not left `cancelling` until it fails as worker_lost minutes later."""
+    r = await quiet(router_factory)
+    dead = "http://127.0.0.1:9"
+    _, wid = await add_worker(r, dead, name="dead")
+    await set_worker(r, wid, state="online")
+    gate = asyncio.Event()
+    gated_submit(r, {dead: gate})
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    assert await r.dispatcher.tick() == 1
+    assert await jobsvc.request_cancel(r.db, r.adapter, job["id"]) == "cancelling"
+    gate.set()
+    await drain(r)
+    assert (await job_row(r, job["id"]))["status"] == "cancelled"
+    async with r.db.conn() as c:
+        assert await c.fetchval("SELECT current_job_id FROM workers WHERE id = $1", wid) is None

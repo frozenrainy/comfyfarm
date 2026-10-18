@@ -154,8 +154,12 @@ class Dispatcher:
                         # never reached the process: the worker is not dispatchable until a probe succeeds again
                         await c.execute("UPDATE workers SET state = 'suspect', failing_since = coalesce(failing_since, now()), "
                                         "failure_kind = 'dead' WHERE id = $1", worker["id"])
-                        attempt = await c.fetchval("UPDATE jobs SET attempt = attempt + 1 WHERE id = $1 RETURNING attempt", job_id)
-                        if attempt >= self.s.max_connect_attempts:
+                        if row["status"] == "cancelling":
+                            # cancelled while this POST failed to connect: the worker never saw the job, nothing to wait for
+                            await transition(c, job_id, "cancelled", ("cancelling",), f"cancelled, never reached the worker: "
+                                             f"{out.reason}", dispatch_ended_at="now()")
+                        elif (attempt := await c.fetchval("UPDATE jobs SET attempt = attempt + 1 WHERE id = $1 "
+                                                          "RETURNING attempt", job_id)) >= self.s.max_connect_attempts:
                             self.secrets.pop(job_id, None)
                             await transition(c, job_id, "failed", ("dispatching",), "unreachable", dispatch_ended_at="now()",
                                              error=error_doc("unreachable", out.reason, attempts=attempt))
