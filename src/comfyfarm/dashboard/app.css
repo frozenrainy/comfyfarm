@@ -182,3 +182,6 @@ body.workflow main { display: none; }
 .choice p { margin: 0; font-size: .8rem; color: var(--muted); }
 pre.code.log { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
 @media (max-width: 720px) { .choices { grid-template-columns: 1fr; } }
+/* `hidden` must win over every display rule (.stack, .badge, … set display themselves) */
+[hidden] { display: none !important; }
+pre.code.wrap { white-space: pre-wrap; word-break: break-all; }

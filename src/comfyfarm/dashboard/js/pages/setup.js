@@ -65,7 +65,7 @@ function runSetup(made, refresh) {
   const log = h("pre", { class: "code log", hidden: true });
   const checks = h("div");
   const finish = h("button", { type: "button", class: "primary", hidden: true, onclick: () => addWorker() }, t("Add the worker"));
-  const cmd = h("pre", { class: "code" }, made.command);
+  const cmd = h("pre", { class: "code wrap" }, made.command);
   const copy = button(t("Copy"), () => navigator.clipboard?.writeText(made.command).then(() => toast(t("Copied")), () => {}));
   const user = h("input", { autocomplete: "off", placeholder: "admin" });
   const pw = h("input", { type: "password", autocomplete: "new-password" });
