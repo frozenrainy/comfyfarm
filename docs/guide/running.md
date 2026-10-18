@@ -34,7 +34,9 @@ together with `UI_WORKER_URL=http://ui-worker:8188`. With `--log-dir` it writes 
 
 Browsers talk only to the gateway. `--provider trusted-header` takes the identity from an authenticating reverse
 proxy in front of it instead of the login page (see [08](../design/08-gateway-and-identity.md)). The proxy's
-address is what the gateway sees on the connection (`--trusted-proxy`); `X-Forwarded-For` is not read.
+address is what the gateway sees on the connection (`--trusted-proxy`); `X-Forwarded-For` is not read. A TCP proxy
+in front that hides the client address makes every client look like that proxy — see design 09, "Proxies that hide the
+client address".
 
 ## Checking a farm
 

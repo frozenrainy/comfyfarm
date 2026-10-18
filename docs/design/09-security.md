@@ -17,6 +17,15 @@ The design this project learned from ran in a closed network and trusted it. A p
 | Secrets in the repository | None committed; configuration via environment or a file outside the repo. *Planned:* CI secret scanning |
 | Secrets in the ledger | **Implemented.** Comfy.org credentials are never stored (D-29); restart backends store only references (`key` path, `token_file` path or `token_env` name) — a token value is refused at the API (a ledger backup or replica must not carry it). The references are confined: files must lie in the keys directory (`COMFYFARM_KEYS_DIR`), `token_env` must be named `COMFYFARM_AGENT_TOKEN…` (the token is sent to the agent's URL, so any other file or variable would be too); ssh `user`/`host` are checked and passed so ssh never reads them as options |
 
+## Proxies that hide the client address
+
+Address-based trust — the gateway's `--trusted-proxy` (trusted-header provider) and a worker's `COMFYFARM_ALLOW` —
+assumes the peer address is the client's. A TCP proxy that does not pass the client address on (a container port
+proxy such as an Incus `proxy` device, port forwarders, many plain TCP load balancers) makes **every** client look like
+the proxy. Never list such a proxy's address in `--trusted-proxy` unless it is the authenticating proxy itself, and
+never in `COMFYFARM_ALLOW` unless everything that can reach the proxy may reach the worker. Put access rules at the
+proxy's listening side instead (a host firewall rule on its port). Found in the install rehearsal (2026-10-18).
+
 ## Things we deliberately do not do
 
 - No arbitrary command execution features (no "run shell on worker").
