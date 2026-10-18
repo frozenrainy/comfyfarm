@@ -1,0 +1,19 @@
+# Worker (GPU host): one instance per ComfyUI on the host, e.g. `systemctl --user enable --now comfyfarm@gpu-1`.
+# User unit: ~/.config/systemd/user/comfyfarm@.service, `loginctl enable-linger <account>` once (root).
+# The account needs the render/video groups on AMD (/dev/kfd) — see docs/guide/install.md.
+[Unit]
+Description=ComfyUI worker %i (ComfyFarm launcher, comfy-upgrade/1)
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/comfyfarm/%i.env
+ExecStart=/usr/bin/python3 %h/comfyfarm/launcher.py
+# exit 2 = the launcher refused the render: do not retry; the router reads ExecMainStatus=2 and reverts
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=5
+StandardOutput=append:%h/comfyfarm/%i.log
+StandardError=append:%h/comfyfarm/%i.log
+
+[Install]
+WantedBy=default.target

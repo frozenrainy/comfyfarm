@@ -1,0 +1,15 @@
+# Router without containers: pip install comfyfarm into /opt/comfyfarm/venv, settings in /etc/comfyfarm/router.env
+[Unit]
+Description=ComfyFarm router
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=comfyfarm
+EnvironmentFile=/etc/comfyfarm/router.env
+ExecStart=/opt/comfyfarm/venv/bin/comfyfarm serve --host 0.0.0.0 --port 8188 --log-dir /var/log/comfyfarm
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,61 @@
+# ComfyFarm control plane: Postgres + router + gateway on one host. Workers (GPU machines running ComfyUI) and the
+# UI worker are separate — see docs/guide/install.md. Settings come from .env next to this file (cp env.example .env).
+name: comfyfarm
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: comfyfarm
+      POSTGRES_DB: comfyfarm
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U comfyfarm -d comfyfarm"]
+      interval: 5s
+      retries: 20
+
+  router:
+    image: comfyfarm:${COMFYFARM_VERSION:-latest}
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      COMFYFARM_DSN: postgresql://comfyfarm:${DB_PASSWORD}@db/comfyfarm
+      COMFYFARM_GATEWAY_SECRET: ${COMFYFARM_GATEWAY_SECRET:?run comfyfarm secrets and put the values in .env}
+      COMFYFARM_INSTANCE: ${COMFYFARM_INSTANCE:-comfyfarm-1}
+      COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}
+      COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:+/artifacts}
+    # Launchers on the workers fetch their render here; /metrics and /api/health/dispatch are here too.
+    # Browsers never come here — firewall this port to the worker hosts and your monitoring.
+    ports:
+      - "${ROUTER_PORT:-8188}:8188"
+    volumes:
+      - logs:/var/log/comfyfarm
+      - ${COMFYFARM_KEYS_DIR:-./keys}:/keys:ro                       # ssh keys / agent token files (restart backends)
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:/artifacts:ro   # optional: the artifact store, read-only
+
+  gateway:
+    image: comfyfarm:${COMFYFARM_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      - router
+    command: ["comfyfarm-gateway", "--router", "http://router:8188", "--ui", "${UI_WORKER_URL:?set UI_WORKER_URL in .env}",
+              "--port", "8080", "--log-dir", "/var/log/comfyfarm"]
+    environment:
+      COMFYFARM_GATEWAY_SECRET: ${COMFYFARM_GATEWAY_SECRET}
+      COMFYFARM_SESSION_KEY: ${COMFYFARM_SESSION_KEY:?run comfyfarm secrets and put the values in .env}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"        # the only address users need
+    volumes:
+      - logs:/var/log/comfyfarm
+
+volumes:
+  db:
+  logs:

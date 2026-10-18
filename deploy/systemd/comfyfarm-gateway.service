@@ -1,0 +1,15 @@
+# Gateway without containers; settings (COMFYFARM_GATEWAY_SECRET, COMFYFARM_SESSION_KEY) in /etc/comfyfarm/gateway.env
+[Unit]
+Description=ComfyFarm gateway
+After=network-online.target comfyfarm-router.service
+Wants=network-online.target
+
+[Service]
+User=comfyfarm
+EnvironmentFile=/etc/comfyfarm/gateway.env
+ExecStart=/opt/comfyfarm/venv/bin/comfyfarm-gateway --router http://127.0.0.1:8188 --ui ${UI_WORKER_URL} --port 8080 --log-dir /var/log/comfyfarm
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

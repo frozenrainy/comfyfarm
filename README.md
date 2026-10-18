@@ -31,6 +31,21 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
   ([setup](docs/guide/rollouts.md)).
 - Postgres ledger; single box by default, HA as an optional module.
 
+## Quick start
+
+ComfyFarm is for a site that keeps its content inside its own network: one control-plane host, a NAS, a handful of
+GPU machines running ComfyUI. Installing takes an engineer (or an AI assistant) an afternoon; running it afterwards
+is the dashboard.
+
+1. **Control plane** — router, gateway and Postgres as containers: `deploy/compose/` (build outside, `docker load`
+   inside), or as systemd services: `deploy/systemd/`.
+2. **Workers** — stock ComfyUI on each GPU machine, started by ComfyFarm's launcher, with the `comfyfarm_worker`
+   extension locked to the control plane (`COMFYFARM_ALLOW`).
+3. **Check** — `comfyfarm doctor` tells you, line by line, what is not right yet.
+
+Guides: [install](docs/guide/install.md) · [running](docs/guide/running.md) · [rolling upgrades](docs/guide/rollouts.md) ·
+[backup](docs/guide/backup.md) · security reports: [SECURITY.md](SECURITY.md)
+
 ## Documents
 
 Start with [docs/design/00-overview.md](docs/design/00-overview.md) and the [decision log](docs/design/decisions.md).

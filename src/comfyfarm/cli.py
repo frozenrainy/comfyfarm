@@ -5,6 +5,7 @@
   comfyfarm backup <dir> [--user-dir PATH] [--pg-bin DIR]              ledger dump + user data + artifact list
   comfyfarm restore <backup-dir> --yes [--user-dir PATH] [--pg-bin DIR]
   comfyfarm doctor [--ui URL]                                          health of ledger, workers, groups, storage, disk
+  comfyfarm secrets                                                    print fresh gateway secret and session key
 
 Configuration comes from the environment: COMFYFARM_DSN (required), COMFYFARM_INSTANCE, COMFYFARM_GATEWAY_SECRET,
 COMFYFARM_DEFAULT_GROUP, COMFYFARM_ARTIFACTS_DIR, COMFYFARM_DEV_IDENTITY (loopback development only).
@@ -152,8 +153,14 @@ def main(argv=None):
     d = sub.add_parser("doctor", help="check ledger, workers, groups, storage, disk")
     d.add_argument("--ui", help="UI worker URL: verifies that GPU workers see files uploaded there (shared storage)")
     d.add_argument("--pg-bin")
+    sub.add_parser("secrets", help="print a fresh COMFYFARM_GATEWAY_SECRET and COMFYFARM_SESSION_KEY")
     args = ap.parse_args(argv)
 
+    if args.cmd == "secrets":
+        import secrets as _s
+        print(f"COMFYFARM_GATEWAY_SECRET={_s.token_urlsafe(32)}")
+        print(f"COMFYFARM_SESSION_KEY={_s.token_urlsafe(48)}")
+        return
     if args.cmd == "serve":
         import uvicorn
         from .app import create_app

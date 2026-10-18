@@ -350,20 +350,34 @@ def create_gateway(s: GatewaySettings) -> Starlette:
     ], lifespan=lifespan)
 
 
-def main():
+def main(argv=None):
     import os
     import uvicorn
-    ap = argparse.ArgumentParser(prog="comfyfarm-gateway")
-    ap.add_argument("--router", required=True)
-    ap.add_argument("--ui", required=True)
+    from .logs import setup
+    ap = argparse.ArgumentParser(prog="comfyfarm-gateway",
+                                 description="Browser entry point: login, ComfyUI frontend, routing to the router and workers. "
+                                             "Needs COMFYFARM_GATEWAY_SECRET (same as the router) and COMFYFARM_SESSION_KEY "
+                                             "(see `comfyfarm secrets`).")
+    ap.add_argument("--router", required=True, help="router URL, e.g. http://127.0.0.1:8188")
+    ap.add_argument("--ui", required=True, help="UI worker URL (a stock ComfyUI with the comfyfarm_ui extension)")
     ap.add_argument("--provider", default="local", choices=["local", "trusted-header", "dev"])
+    ap.add_argument("--trusted-proxy", action="append", default=[],
+                    help="trusted-header: address of the authenticating reverse proxy (repeatable)")
+    ap.add_argument("--secure-cookie", action="store_true", help="mark the session cookie Secure (when served over TLS)")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
-    a = ap.parse_args()
+    ap.add_argument("--log-dir")
+    a = ap.parse_args(argv)
     secret = os.environ.get("COMFYFARM_GATEWAY_SECRET") or ap.error("COMFYFARM_GATEWAY_SECRET is not set")
     key = (os.environ.get("COMFYFARM_SESSION_KEY") or ap.error("COMFYFARM_SESSION_KEY is not set")).encode()
-    app = create_gateway(GatewaySettings(a.router.rstrip("/"), a.ui.rstrip("/"), secret, key, provider=a.provider))
-    uvicorn.run(app, host=a.host, port=a.port)
+    if len(key) < 32:
+        ap.error("COMFYFARM_SESSION_KEY must be at least 32 characters (comfyfarm secrets)")
+    if a.provider == "trusted-header" and not a.trusted_proxy:
+        ap.error("--provider trusted-header needs --trusted-proxy <address>")
+    setup(a.log_dir)
+    app = create_gateway(GatewaySettings(a.router.rstrip("/"), a.ui.rstrip("/"), secret, key, provider=a.provider,
+                                         trusted_proxies=tuple(a.trusted_proxy), secure_cookie=a.secure_cookie))
+    uvicorn.run(app, host=a.host, port=a.port, log_config=None)
 
 
 if __name__ == "__main__":

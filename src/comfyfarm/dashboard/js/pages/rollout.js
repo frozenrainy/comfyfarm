@@ -11,6 +11,8 @@ const BACKEND_HINT = {
   "http-agent": '{"url": "http://host:8399", "token_file": "/path/on/router/agent.token"}  — or "token_env": "NAME"; the token value itself is never stored',
   "systemd-local": '{"unit": "comfyfarm@{instance}", "user": true}  — router and worker on the same host',
 };
+// manual and ssh cover a normal site; the other two exist for special cases (no ssh, or router and worker on one host)
+const ADVANCED = ["http-agent", "systemd-local"];
 const head = (title, ...right) => h("div", { class: "section-head" }, h("h2", {}, title), ...right);
 const words = (s) => s.split(/[\s,]+/).filter(Boolean);
 
@@ -67,9 +69,10 @@ export function rollout(root, { refresh }) {
       { name: "role", label: "Role", type: "select", value: cur.role, options: [{ value: "gpu", label: "GPU worker" }, { value: "ui", label: "UI worker" }] },
       ...PATHS.map(([k, label]) => ({ name: `path_${k}`, label, value: cur.paths[k] ?? "" })),
       { name: "restart_backend", label: "Restart via", type: "select", value: cur.restart_backend,
-        options: Object.keys(BACKEND_HINT).map((b) => ({ value: b, label: b })) },
+        options: Object.keys(BACKEND_HINT).map((b) => ({ value: b, label: ADVANCED.includes(b) ? `${b} (advanced)` : b })) },
       { name: "restart_config", label: "Restart configuration (JSON)", type: "textarea", rows: 3, value: JSON.stringify(cur.restart_config),
-        hint: Object.entries(BACKEND_HINT).map(([k, t]) => `${k}: ${t}`).join("  ·  ") },
+        hint: Object.entries(BACKEND_HINT).filter(([k]) => !ADVANCED.includes(k) || k === cur.restart_backend)
+          .map(([k, t]) => `${k}: ${t}`).join("  ·  ") },
     ], "Save", { wide: true });
     if (!v) return;
     let cfg;
