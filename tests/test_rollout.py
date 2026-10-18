@@ -442,3 +442,18 @@ async def test_recheck_under_the_start_lock_never_holds_it(farm, monkeypatch):
     assert (await api.post(f"/api/admin/rollouts/{rid}/abort", headers=H)).status_code == 200
     ro = await wait_rollout(api, rid)
     assert ro["status"] == "aborted" and hosts["w1"].restarts == 0
+
+
+async def test_revert_target_is_in_use_during_a_rollout(farm):
+    """QA-4: the profile a step would revert to must not be editable while the rollout is active (D-36)."""
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    p_old = (await api.post("/api/admin/profiles", json={"name": "old", "core": "c1", "venv": "v1"}, headers=H)).json()["id"]
+    assert (await api.patch(f"/api/admin/profiles/{p_old}", json={"venv": "v2"}, headers=H)).status_code == 200   # unused
+    async with r.db.conn() as c:                     # w1 was on `old` when the (now interrupted) rollout started
+        rid = await c.fetchval("INSERT INTO rollouts(target_profile_id, created_by, status) VALUES ($1, 'x', 'interrupted') "
+                               "RETURNING id", farm["p2"])
+        await c.execute("INSERT INTO rollout_steps(rollout_id, worker_id, position, from_profile_id, to_profile_id, status) "
+                        "VALUES ($1, $2, 0, $3, $4, 'starting')", rid, hosts["w1"].wid, p_old, farm["p2"])
+    res = await api.patch(f"/api/admin/profiles/{p_old}", json={"venv": "v1"}, headers=H)
+    assert res.status_code == 409, res.text
+    assert (await api.patch(f"/api/admin/profiles/{p_old}", json={"note": "revert target"}, headers=H)).status_code == 200

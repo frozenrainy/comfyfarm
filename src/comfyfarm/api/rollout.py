@@ -210,7 +210,8 @@ def make_router(ctx: Ctx) -> APIRouter:
                     raise HTTPException(404, "not found")
                 in_use = await c.fetchval("SELECT count(*) FROM instances WHERE profile_id = $1", profile_id) or \
                     await c.fetchval("SELECT count(*) FROM rollout_steps s JOIN rollouts r ON r.id = s.rollout_id WHERE "
-                                     "s.to_profile_id = $1 AND r.status IN ('running','aborting','interrupted')", profile_id)
+                                     "$1 IN (s.to_profile_id, s.from_profile_id) AND r.status IN ('running','aborting','interrupted')",
+                                     profile_id)                     # the target, and the profile a step reverts to
                 if in_use and set(patch) - {"note"}:
                     raise HTTPException(409, "this profile is in use: copy it and roll the copy out (only the note can change)")
                 merged = check_profile({**{k: cur[k] for k in ("name", "core", "venv", "nodes", "frontend", "flags", "env", "note")},
