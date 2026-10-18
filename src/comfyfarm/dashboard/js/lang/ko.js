@@ -286,4 +286,7 @@ export default {
   "UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>":
     "UI용 프로필: GPU 워커와 같은 코어, CPU venv, 노드 comfyfarm_ui·comfyfarm_worker, 플래그 --cpu, env COMFYFARM_ALLOW=<게이트웨이·라우터 주소>",
   "not 8188 when it shares the host with the router": "라우터와 같은 호스트라면 8188은 피하세요",
+  "Continue: {name} on {host} ({status})": "이어서: {host}의 {name} ({status})",
+  "(the host has reported — no need to run the script again)": "(호스트가 이미 보고했습니다 — 스크립트를 다시 실행할 필요 없음)",
+  "http://<router address>:<router port> — the address the launcher fetches its render from": "http://<라우터 주소>:<라우터 포트> — 런처가 렌더를 받아 가는 주소",
 };

@@ -207,3 +207,17 @@ async def test_a_ui_worker_is_set_up_the_same_way_and_never_in_a_group(farm, tmp
     listed = (await c.get("/api/admin/workers", headers=H)).json()
     me = next(x for x in listed if x["id"] == w["id"])
     assert me["kind"] == "ui" and not any("no group" in x for x in me["warnings"])
+
+
+async def test_an_unfinished_setup_gets_a_new_command(farm):
+    """Doc-only rehearsal: the dialog was closed while the host ran the script, and the setup could not be reached again.
+    Only the token's hash is kept, so a new command is made; the old one stops working."""
+    r, c, keys = farm
+    made = (await c.post("/api/admin/setups", json=spec(), headers=H)).json()
+    old = "/" + made["script_url"].split("/", 3)[3]
+    again = (await c.post(f"/api/admin/setups/{made['id']}/renew", headers=H)).json()
+    new = "/" + again["script_url"].split("/", 3)[3]
+    assert new != old and again["script_sha256"] in again["command"]
+    assert (await c.get(old)).status_code == 404 and (await c.get(new)).status_code == 200
+    await c.post(new.replace("/script", "/report"), content=json.dumps({"ok": True, "host_keys": ["ssh-ed25519 AAAAhostkey"]}))
+    assert (await c.post(f"/api/admin/setups/{made['id']}/renew", headers=H)).status_code == 409    # reported: add it instead

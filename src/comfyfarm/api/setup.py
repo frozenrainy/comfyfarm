@@ -222,6 +222,29 @@ def make_router(ctx: Ctx) -> APIRouter:
         t.add_done_callback(lambda _t: running.pop(sid, None))
         return {"started": True}
 
+    @api.post("/api/admin/setups/{sid}/renew")
+    async def renew(sid: int, x_comfyfarm_user: str | None = Header(default=None)):
+        """A new command for an unfinished setup (the dialog was closed; only the token's hash is kept, so the old command
+        cannot be shown again). Same parameters, a new token and checksum; the old token stops working."""
+        who = ctx.admin(x_comfyfarm_user)
+        token = secrets.token_urlsafe(24)
+        async with db.conn() as c:
+            async with c.transaction():
+                r = await c.fetchrow("SELECT * FROM worker_setups WHERE id = $1 FOR UPDATE", sid)
+                if r is None:
+                    raise HTTPException(404, "no such setup")
+                if r["status"] not in ("waiting", "failed"):
+                    raise HTTPException(409, f"this setup is {r['status']}")
+                base = r["spec"]["router_url"]
+                script, sha = hostsetup.build_script(r["spec"], f"{base}/api/worker_setup/{token}/report", version())
+                await c.execute("UPDATE worker_setups SET token_sha256 = $2, script = $3, script_sha256 = $4, status = 'waiting', "
+                                "expires_at = now() + $5::interval WHERE id = $1", sid, hashlib.sha256(token.encode()).hexdigest(),
+                                script, sha, TOKEN_TTL)
+                await audit(c, who, "worker setup renewed", r["spec"]["instance"], setup=sid)
+        url = f"{base}/api/worker_setup/{token}/script"
+        return {"id": sid, "script_url": url, "script_sha256": sha, "command": hostsetup.operator_command(url, sha),
+                "expires_in": int(TOKEN_TTL.total_seconds())}
+
     @api.post("/api/admin/setups/{sid}/finished")
     async def mark_finished(sid: int, worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
         """The dashboard added the worker (POST workers, PUT instance, assign, start): the token stops working."""

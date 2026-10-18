@@ -138,8 +138,10 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
                 if r.status_code != 200:
                     out.append((FAIL, "shared storage", f"upload to the UI worker answered {r.status_code}"
                                 + (" — if it runs with COMFYFARM_ALLOW, the control plane's address must be in it"
-                                   if r.status_code == 403 else " — its log says why (e.g. an input directory or a file there it "
-                                   "cannot write as its account)")))
+                                   if r.status_code == 403 else
+                                   f" — is {ui_url} the UI worker? (the router answers 404 here; run doctor without --ui and it "
+                                   "finds the UI worker itself)" if r.status_code == 404 else
+                                   " — its log says why (e.g. an input directory or a file there it cannot write as its account)")))
                 else:
                     for w in workers:
                         if not w["enabled"] or w["state"] != "online" or w["base_url"].rstrip("/") == ui_url.rstrip("/"):

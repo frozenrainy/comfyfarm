@@ -258,8 +258,15 @@ def mounts(h: Host, spec: dict):
         if not re.fullmatch(r"[A-Za-z0-9._-]+:/[^\s]*", src) or not target.startswith("/") or " " in target:
             raise Failed(f"bad mount {src} → {target}")
         opts = ",".join(["defaults", "_netdev", "nofail"] + ([m["options"]] if m.get("options") else []))
+        listed = any(line.split()[:2] == [src, target] for line in fstab.splitlines() if line.strip() and not line.startswith("#"))
+        code, _ = h.run(["mountpoint", "-q", target], check=False)
+        if code == 0 and not listed:
+            # the site mounted something there already (rehearsal: a mount line carried over from another host's setup
+            # would have stacked an NFS mount on the site's own after the next boot)
+            h.log(f"{target} is already mounted by this host — left as it is, nothing added to /etc/fstab")
+            continue
         h.mkdir(target)
-        if not any(line.split()[:2] == [src, target] for line in fstab.splitlines() if line.strip() and not line.startswith("#")):
+        if not listed:
             fstab = fstab.rstrip("\n") + f"\n{src} {target} nfs {opts} 0 0  {MARK}\n"
             h.write("/etc/fstab", fstab)
         code, _ = h.run(["mountpoint", "-q", target], check=False)

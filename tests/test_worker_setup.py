@@ -153,3 +153,19 @@ def test_an_existing_account_with_another_uid_is_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 998, 998, "", "/var/lib/comfyfarm", "/bin/sh")))
     res = ws.setup(payload(uid=47800), ws.Host(root=str(fake_root(tmp_path)), run=Recorder()))
     assert not res["ok"] and "uid 998" in res["error"] and "47800" in res["error"]
+
+
+def test_a_mount_point_the_site_already_mounted_is_left_alone(tmp_path):
+    """Doc-only rehearsal: a mount line carried over from another host's setup went into the fstab of a host whose site
+    had mounted the share there already — after a reboot two mounts would stack."""
+    class Mounted(Recorder):
+        def __call__(self, argv):
+            self.calls.append(argv)
+            if argv[0] == "mountpoint":
+                return 0, ""                                     # something is mounted there
+            return super().__call__(argv) if "hostcheck.py" in " ".join(argv) else (0, "")
+    root, rec = fake_root(tmp_path), Mounted()
+    h = ws.Host(root=str(root), run=rec)
+    res = ws.setup(payload(), h)
+    assert res["ok"] and "nas:/export/farm" not in (root / "etc/fstab").read_text()
+    assert not rec.ran("mount", "/mnt/farm") and any("already mounted" in m for m in h.done)

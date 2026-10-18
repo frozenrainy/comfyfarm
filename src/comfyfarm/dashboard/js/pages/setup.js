@@ -18,18 +18,35 @@ function checkTable(rows) {
 
 // Step 1: what the host should become. Defaults: the last setup's answers (a farm's hosts look alike).
 export async function setupWorker(refresh) {
+  // unfinished setups can be continued: the dialog may have been closed while the host ran the script
+  const open = (await api("GET", "/api/admin/setups")).filter((x) => ["waiting", "failed", "reported"].includes(x.status));
   const pickRole = await formDialog(t("Set up a worker"), [
     { name: "role", label: t("What will this host be?"), type: "select", value: "gpu",
       options: [{ value: "gpu", label: t("GPU worker — runs the jobs") },
-                { value: "ui", label: t("UI worker — serves the screen and the users' files (no GPU, no jobs)") }],
+                { value: "ui", label: t("UI worker — serves the screen and the users' files (no GPU, no jobs)") },
+                ...open.map((x) => ({ value: `continue:${x.id}`,
+                  label: t("Continue: {name} on {host} ({status})", { name: x.spec.instance, host: x.extra.host, status: t(x.status) }) }))],
       hint: t("A farm has one UI worker (often on the control-plane host) and any number of GPU workers. The gateway finds the UI worker by itself.") },
   ], t("Next"));
   if (!pickRole) return;
+  if (pickRole.role.startsWith("continue:")) {
+    const s = open.find((x) => `continue:${x.id}` === pickRole.role);
+    const made = s.status === "reported" ? { id: s.id, command: null }
+      : await act(() => api("POST", `/api/admin/setups/${s.id}/renew`));
+    if (made) runSetup({ ...made, instance: s.spec.instance }, refresh);
+    return;
+  }
   const ui = pickRole.role === "ui";
   const [groups, profiles, recent] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
                                                        api("GET", "/api/admin/setups")]);
   const last = recent[0]?.spec;
-  const pathOf = (k, d) => (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
+  const pathOf = (k, d) => {
+    if (k === "temp") {                                   // per instance: keep the template, not the last one's name
+      const lt = last?.paths?.temp, li = last?.instance;
+      return lt && li && lt.endsWith("/" + li) ? lt.slice(0, -li.length) + "{instance}" : d;
+    }
+    return (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
+  };
   const v = await formDialog(ui ? t("Set up the UI worker") : t("Set up a GPU worker"), [
     { name: "name", label: t("Worker name (shown in the dashboard)"), value: ui ? "ui" : "" },
     { name: "host", label: t("Host address"), placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
@@ -49,10 +66,11 @@ export async function setupWorker(refresh) {
       hint: t("created by setup; runs ComfyUI; the router's key can only restart, query and check it") },
     { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
       hint: t("the same number on every host: shared storage checks numbers, not names") },
-    { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188" },
+    { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188",
+      hint: t("http://<router address>:<router port> — the address the launcher fetches its render from") },
     ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
     { name: "mounts", label: t("NFS mounts (optional, one per line: server:/export /mountpoint [options])"), type: "textarea", rows: 2,
-      value: (last?.mounts || []).map((m) => `${m.source} ${m.target}${m.options ? " " + m.options : ""}`).join("\n"),
+      value: "",                                            // per host: never carried over from another host's setup
       hint: t("written to /etc/fstab and mounted by setup; needs nfs-common on the host. Other storage: mount it yourself, the host check verifies it") },
   ], t("Next"), { wide: true });
   if (!v) return;
@@ -79,8 +97,9 @@ function runSetup(made, refresh) {
   const log = h("pre", { class: "code log", hidden: true });
   const checks = h("div");
   const finish = h("button", { type: "button", class: "primary", hidden: true, onclick: () => addWorker() }, t("Add the worker"));
-  const cmd = h("pre", { class: "code wrap" }, made.command);
+  const cmd = h("pre", { class: "code wrap" }, made.command ?? t("(the host has reported — no need to run the script again)"));
   const copy = button(t("Copy"), () => navigator.clipboard?.writeText(made.command).then(() => toast(t("Copied")), () => {}));
+  copy.hidden = !made.command;
   const user = h("input", { autocomplete: "off", placeholder: "admin" });
   const pw = h("input", { type: "password", autocomplete: "new-password" });
   const runSsh = button(t("Log in and run"), async () => {

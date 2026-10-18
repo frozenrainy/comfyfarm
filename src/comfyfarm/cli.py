@@ -259,6 +259,10 @@ def main(argv=None):
     elif args.cmd == "backup":
         dest = backup(st.dsn, args.dir, args.user_dir, st.artifacts_dir, args.pg_bin)
         print(f"backup written to {dest}")
+        if not args.user_dir:
+            print("note: the users' workflows and settings (the UI worker's user directory) are NOT in this backup — "
+                  "pass --user-dir (with containers: COMFYFARM_USER_DIR in .env, then --user-dir /userdata), or back that "
+                  "directory up with the shared storage (backup.md)")
     elif args.cmd == "restore":
         if not args.yes:
             sys.exit("this replaces the live ledger; stop the router, then run again with --yes")

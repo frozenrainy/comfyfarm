@@ -44,6 +44,7 @@ services:
       - ${COMFYFARM_KEYS_DIR:-./keys}:/keys                          # agent key, known_hosts, token files (owned by uid 10001)
       - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:/artifacts:ro   # optional: the artifact store, read-only
       - ${COMFYFARM_BACKUP_DIR:-./backups}:/backups                    # comfyfarm backup /backups (owned by uid 10001)
+      - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # the UI worker's user directory (backup --user-dir)
 
   gateway:
     image: comfyfarm:${COMFYFARM_VERSION:-latest}

@@ -28,20 +28,26 @@ docker pull postgres:17
 docker save comfyfarm:latest postgres:17 | gzip > comfyfarm-images.tar.gz
 ```
 
-On the control-plane host inside the network:
+The control-plane host needs Docker with the Compose v2 plugin (`docker compose version`; tested with Docker 29 and
+Compose 2.40, Ubuntu 24.04's `docker.io` and `docker-compose-v2`), and an ssh server if the UI worker will run on it
+(§2). Carry in the images and the release tarball, then:
 
 ```sh
 docker load < comfyfarm-images.tar.gz
-cd deploy/compose && cp env.example .env
-docker run --rm comfyfarm:latest comfyfarm secrets >> .env    # then set DB_PASSWORD in .env
+sudo tar xzf comfyfarm-<version>.tar.gz -C /opt                # → /opt/comfyfarm; keep it there (upgrades go over it)
+cd /opt/comfyfarm/deploy/compose && sudo cp env.example .env && sudo chmod 600 .env
+docker run --rm comfyfarm:latest comfyfarm secrets | sudo tee -a .env >/dev/null
+sudo editor .env      # set DB_PASSWORD (letters/digits); COMFYFARM_ARTIFACTS_MOUNT=<ART> (the artifact store as mounted on
+                      # this host: the dashboard then lists and checks published artifacts); COMFYFARM_USER_DIR=<the UI
+                      # worker's user directory on this host> so that backups include the users' workflows (backup.md)
 sudo mkdir -p /srv/comfyfarm/keys /srv/comfyfarm/backups && sudo chown 10001 /srv/comfyfarm/keys /srv/comfyfarm/backups
 docker compose up -d                                          # (the router keeps its agent key and backups there)
-docker compose exec router sh -c 'echo "<password>" | comfyfarm add-user <you> --admin'
+docker compose exec router comfyfarm add-user <you> --admin   # asks for the password
 ```
 
-**Upgrading the control plane**: `docker load` the new images, then unpack the new release **over** the old directory
-(`tar xzf comfyfarm-<version>.tar.gz`) — never delete it first: `.env` with the secrets lives there — and run
-`docker compose up -d`. Migrations run when the router starts; take a backup before (backup.md).
+**Upgrading the control plane**: `docker load` the new images, then unpack the new release **over** the old one
+(`sudo tar xzf comfyfarm-<version>.tar.gz -C /opt`) — never delete `/opt/comfyfarm` first: `.env` with the secrets
+lives there — and run `docker compose up -d`. Migrations run when the router starts; take a backup before (backup.md).
 
 Not `docker compose build`/`run` for the first two steps: compose refuses to read its file until DB_PASSWORD and the
 two secrets are set. The database is PostgreSQL 17 because the image's `pg_dump` is 17 — a dump only restores into
@@ -63,8 +69,9 @@ Without containers: `pip install` the package into `/opt/comfyfarm/venv`, put th
 ## 2. UI worker
 
 A stock ComfyUI that serves the screen and the users' files. It needs no GPU and never runs a job; it usually lives on
-the control-plane host (port 8189 there, 8188 is the router). Set it up like a GPU worker (§3) — *Set up a worker →
-UI worker* — after publishing what it runs:
+the control-plane host (port 8189 there, 8188 is the router). Its host needs what §3 lists for any worker host — an ssh
+server included: the router starts and checks it over ssh like the others. Set it up like a GPU worker (§3) — *Set up
+a worker → UI worker* — after publishing what it runs and creating its profile (setup offers the profiles that exist):
 
 - a node set with the two extensions: `python3 publish.py nodes <ART> farm-ui-1 --from <dir>` where `<dir>` holds
   `ui_ext/comfyfarm_ui` and `worker_ext/comfyfarm_worker` (the latter locks it to the farm's addresses);
@@ -80,19 +87,31 @@ host-checked and rolled out with the others, so its ComfyUI and frontend follow 
 
 ## 3. GPU workers
 
-What a GPU host needs before setup: Linux with systemd, Python ≥ 3.10, an ssh server, the GPU driver (ComfyFarm checks
-it, never installs it), and — for NFS mounts written by setup — `nfs-common`. Everything else comes from the router.
+What a worker host needs before setup: Linux with systemd, Python ≥ 3.10, an ssh server, the GPU driver (ComfyFarm checks
+it, never installs it), the system libraries the GPU wheels load (ROCm PyTorch: `libatomic1`; the host check names any
+that is missing), and — for NFS mounts written by setup — `nfs-common`. Everything else comes from the router.
+
+The shared directories (`input`, `output`, `user` on the NAS) must be writable by the service account's uid — the same
+uid on every host (setup's *Service account uid*, default 47800): `chown 47800` them on the NAS once, or the host check
+says so.
 
 **In the dashboard: System → Workers → Set up a worker** (docs/design/14). Describe the host — address, instance name,
-GPU, group, the profile to run, the paths (the artifact store at the **same path on every host**) and NFS mounts if
-setup should write them. Then choose how setup gets root on the host:
+GPU, group, the profile to run, the router's address as the worker reaches it (`http://<router>:8188`), the paths (the
+artifact store at the **same path on every host**) and NFS mounts **only if setup should write them** (leave the box
+empty where the site has mounted the share; setup also leaves an existing mount alone). Then choose how setup gets
+root on the host:
 
 - **Run a command yourself** (recommended): copy the one line the dashboard shows and run it on the host as a user who
   may use `sudo`. It downloads the setup script, checks it against the checksum shown, and runs it. The router never
   holds root on your workers.
 - **Let the router log in once**: type an admin account and password for the host. The router logs in over ssh and
   runs the same script with `sudo`; the password is used for that run only. For those minutes the router has root on
-  the host.
+  the host. That account must be allowed to log in with a password over ssh (`PasswordAuthentication`) and to use
+  `sudo` (with its password or without).
+
+Closed the dialog while the host was running the script? *Set up a worker* offers **Continue** for unfinished setups:
+a reported one goes straight to *Add the worker*; for the others the dashboard makes a new command (the old one stops
+working).
 
 The script creates the service account (`render`/`video` groups), installs the worker tools root-owned (the router
 cannot replace them), writes the unit and instance configuration, mounts NFS, installs the router's agent key with a
@@ -104,29 +123,35 @@ configures its instance with the ssh restart backend and the pinned host keys, a
 Later: *Check host* on the instance (System → Rollout) and `comfyfarm doctor` run the same check through the agent.
 
 Worker access control: put `COMFYFARM_ALLOW=<control-plane address>` in the profile's environment (with containers
-the control plane talks from the host's address). Without it the dashboard shows the worker as **unsecured**. On AMD
-with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every worker burns one CPU
-core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)).
+the control plane talks to other hosts from the host's address). Without it the dashboard shows the worker as
+**unsecured**. On AMD with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every
+worker burns one CPU core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)). The host
+check shows each venv's PyTorch version (also in `<ART>/venv/<name>/freeze.txt`).
 
 One ComfyUI instance per GPU: ComfyUI keeps models in VRAM between jobs, so two instances sharing a GPU run each other
 out of memory.
 
 Without the dashboard (or to see what setup does): [rollouts.md](rollouts.md) §2 lists the same pieces by hand.
 
-The router's keys directory (`COMFYFARM_KEYS_DIR`; with containers `deploy/compose/keys`, owned by uid 10001) holds
-its agent key (made on first use) and `known_hosts`.
+The router's keys directory (`COMFYFARM_KEYS_DIR`; with containers `/srv/comfyfarm/keys` on the host, owned by uid
+10001 — inside the router container it is `/keys`) holds its agent key (made on first use) and `known_hosts`.
 
 ## 4. In the dashboard
 
-System → Groups (one per set of identical workers) first, then *Set up a worker* for each GPU host (above) → Users
-(accounts, which groups each may use).
+In this order: System → Groups (one per set of identical workers; requirements are optional — leave them empty unless
+a group must only take workers with a backend or enough VRAM) → Rollout → Profiles (one for the UI worker, one per kind
+of GPU worker) → *Set up a worker*: the UI worker, then each GPU host → Users (accounts, which groups each may use).
+A group's node list is read from its workers the first time someone needs it; *Refresh nodes* is for later, after
+custom nodes change. `COMFYFARM_DEFAULT_GROUP` (optional) is the group whose nodes a user sees before picking one;
+without it, the first group the user may use.
 
 ## 5. Check
 
 ```sh
-docker compose exec router comfyfarm doctor --ui http://<ui-worker>:8188
+docker compose exec router comfyfarm doctor
 ```
 
-Every line should be OK: ledger, an administrator, each worker reachable and *secured*, groups agreeing on nodes and
-models, GPU workers seeing files uploaded through the UI worker (shared storage), disk space. Then back up
+It finds the UI worker by itself (`--ui <url>` only to check another one). Every line should be OK: ledger, an
+administrator, each worker reachable and *secured*, groups agreeing on nodes and models, GPU workers seeing files
+uploaded through the UI worker (shared storage), each host's check through its agent, disk space. Then back up
 ([backup.md](backup.md)) — before anyone depends on the farm.

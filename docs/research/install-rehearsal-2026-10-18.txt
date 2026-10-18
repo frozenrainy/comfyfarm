@@ -60,6 +60,28 @@ UI worker through setup (2026-10-19)
  15. doctor reported a failed upload to the UI worker only as "answered 500" (a probe file left by the earlier
      root-run UI worker could not be overwritten) → it now points at the UI worker's log.
 
+Second pass: an engineer with only the documentation (2026-10-19)
+  A separate agent, without this project's context and forbidden to read source code, installed the same farm from
+  empty hosts (control plane, UI worker, gpu-1 by command with NFS by setup, gpu-2 by router login) using only the
+  release's docs, driving the dashboard through a browser. All goals reached: workers online and secured, jobs on
+  both GPU workers through the gateway, outputs on the NAS, idle CPU 0, doctor 16 OK, a backup.
+  Its findings, fixed:
+ 16. The setup form carried the previous host's NFS mount line (below the fold) → setup wrote an fstab entry over the
+     site's own mount on gpu-2. Mounts are no longer pre-filled, and setup never adds an fstab line for a mount point
+     that is already mounted.
+ 17. install.md §5 said `doctor --ui http://<ui-worker>:8188` (8188 is the router) → `comfyfarm doctor` finds the UI
+     worker; a 404 from --ui now asks whether that is the UI worker.
+ 18. Backups with containers silently left out the users' workflows → COMFYFARM_USER_DIR mount + --user-dir /userdata,
+     and the backup says when user data is not in it.
+ 19. A setup could not be reached again after closing its dialog → *Continue* for unfinished setups (a new command
+     replaces the old token; a reported one goes to *Add the worker*).
+ 20. The temp path default carried the previous instance's name → the {instance} template is kept.
+ 21. Docs: ssh server on the UI worker's host; libatomic1 and the shared directories' uid among the prerequisites;
+     where to unpack the release and keep it; chmod 600 .env; Docker/Compose versions; COMFYFARM_ARTIFACTS_MOUNT in §1;
+     one keys directory path; what "Let the router log in" needs (password login, sudo); the router address format;
+     the order of §4 and what is optional there; where to read a venv's PyTorch version; add-user asks for the
+     password instead of taking it on a command line; version 0.1.0.dev0 instead of 0.0.0.
+
 Rehearsal environment only (not ComfyFarm)
   - Docker's FORWARD DROP on the host blocks container NAT: the builder's network needed a temporary DOCKER-USER rule,
     removed with it. The same DROP is what keeps the farm's bridge closed.
