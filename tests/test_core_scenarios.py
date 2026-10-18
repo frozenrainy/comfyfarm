@@ -453,3 +453,30 @@ async def test_cancel_during_a_dispatch_that_cannot_connect_ends_cancelled(route
     assert (await job_row(r, job["id"]))["status"] == "cancelled"
     async with r.db.conn() as c:
         assert await c.fetchval("SELECT current_job_id FROM workers WHERE id = $1", wid) is None
+
+
+async def test_outputs_missed_in_a_websocket_gap_are_completed_from_history(router_factory, fakes):
+    """Outputs are recorded per `executed` event (D-31); one lost in a WebSocket gap must not leave the job's outputs
+    partial for good: completion merges the worker's /history."""
+    r = await quiet(router_factory)
+    w = await fakes()
+    _, wid = await add_worker(r, w.url)
+    await set_worker(r, wid, state="online")
+    prompt = {"1": {"class_type": "EmptyImage", "inputs": {"width": 8, "height": 8, "batch_size": 1, "color": 0}},
+              "2": {"class_type": "PreviewImage", "inputs": {"images": ["1", 0]}},
+              "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}}}
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=prompt)
+    pid = str(job["prompt_id"])
+    assert await r.dispatcher.tick() == 1
+    await drain(r)
+    for _ in range(100):
+        if pid in w.fake.jobs and w.fake.jobs[pid].status == "completed":
+            break
+        await asyncio.sleep(0.05)
+    seen = {"images": [{"filename": f"fake_{pid[:8]}.png", "subfolder": "", "type": "temp"}]}
+    async with r.db.conn() as c:                         # the hub saw node 2's `executed`, the gap swallowed node 3's
+        await c.execute("UPDATE jobs SET outputs = $2 WHERE id = $1", job["id"], {"2": seen})
+    await r.reconciler.tick()
+    row = await job_row(r, job["id"])
+    assert row["status"] == "completed" and set(row["outputs"]) == {"2", "3"}, row
+    assert row["outputs"]["3"]["images"][0]["type"] == "output"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from ..adapter.comfy import DISPATCH_DEADLINE, ComfyAdapter, JobState, NoAnswer
@@ -30,6 +31,7 @@ class Reconciler:
                  posting: dict[int, int] | None = None):
         self.db, self.adapter, self.s, self.wake = db, adapter, settings, wake
         self.posting = posting if posting is not None else {}    # the dispatcher's: jobs this process is POSTing now
+        self.collected: dict[int, float] = {}                    # job id → when its outputs were read from /history
 
     async def run(self):
         while True:
@@ -65,16 +67,22 @@ class Reconciler:
         await self.collect_outputs()
 
     async def collect_outputs(self):
-        """Real outputs for recently completed jobs (history synthesis, display paths D-10, /api/view routing)."""
+        """Real outputs of recently completed jobs (history synthesis, display paths D-10, /api/view routing). The
+        `executed` events record them as they come (D-31), but events sent during a WebSocket gap are lost, so every
+        completed job is read from /history once and merged — the worker's record wins per node."""
+        cutoff = time.monotonic() - 3600
+        self.collected = {k: t for k, t in self.collected.items() if t > cutoff}
         async with self.db.conn() as c:
             rows = await c.fetch("SELECT j.id, j.prompt_id, w.base_url FROM jobs j JOIN workers w ON w.id = j.worker_id "
-                                 "WHERE j.status = 'completed' AND j.outputs IS NULL AND j.finished_at > now() - interval '1 hour' "
-                                 "ORDER BY j.finished_at DESC LIMIT 20")
+                                 "WHERE j.status = 'completed' AND j.finished_at > now() - interval '1 hour' "
+                                 "AND NOT (j.id = ANY($1)) ORDER BY j.finished_at DESC LIMIT 20", list(self.collected))
         for r in rows:
             h = await self.adapter.history(r["base_url"], str(r["prompt_id"]))
             outputs = (h or {}).get("outputs")
-            async with self.db.conn() as c:     # {} marks "asked, nothing there" so the job is not asked again
-                await c.execute("UPDATE jobs SET outputs = $2 WHERE id = $1 AND outputs IS NULL", r["id"], outputs or {})
+            async with self.db.conn() as c:     # {} marks "asked, nothing there" for jobs without any event either
+                await c.execute("UPDATE jobs SET outputs = coalesce(outputs, '{}'::jsonb) || $2::jsonb WHERE id = $1",
+                                r["id"], outputs if isinstance(outputs, dict) else {})
+            self.collected[r["id"]] = time.monotonic()                  # asked once per process, answer or not
 
     async def _ask(self, r: dict, now: datetime):
         if r["wid"] is None or r["deleted_at"] is not None or not r["enabled"]:
