@@ -82,7 +82,8 @@ class Host:
         if self._run:
             code, out = self._run(argv)
         else:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+            # as the account: from /, not root's working directory (ROCm aborts when it cannot read its cwd)
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=300, cwd="/" if as_user else None)
             code, out = p.returncode, (p.stdout + p.stderr).strip()
         if check and code != 0:
             raise Failed(f"{' '.join(argv)} → exit {code}: {out[-400:]}")

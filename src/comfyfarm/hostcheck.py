@@ -271,6 +271,7 @@ def main(argv=None) -> int:
         print("usage: hostcheck.py <instance> [--json]", file=sys.stderr)
         return 2
     inst = args[0]
+    os.chdir("/")                    # a working directory the account cannot read makes ROCm abort (rehearsal finding)
     try:
         env = read_env(os.path.join(ETC, f"{inst}.env"))
         with open(os.path.join(ETC, f"{inst}.check.json")) as f:
