@@ -88,7 +88,11 @@ within `comfy-upgrade/1` (export edition v1.1, §9):
   workflow (EmptyImage → PreviewImage) must succeed.
 - Failure after the assignment changed → revert that worker (old profile, restart, `match`), left in maintenance;
   failure before (drain timeout) → nothing changed, back to service. Either stops new steps (canary stop).
-- Interrupted rollouts are resumed or aborted by a person (D-38).
+- Interrupted rollouts are resumed or aborted by a person (D-38). An engine error (database busy or gone) interrupts
+  the rollout the same way — it is never picked up again on its own. On resume a step caught while reverting finishes
+  its revert (never forward), and a failure recorded before the interruption still stops new steps.
+- The re-check under the startup lock honours Abort and gives up after a few seconds (the step drains again without
+  the lock): the lock is never held for a drain.
 - Contract interpretations this implementation makes where the text is silent: `tree_sha256` lines are
   `f <path> <size>` / `l <path> <target>`, sorted, newline-joined, excluding the top-level `manifest.json` and `READY`
   (only our publisher and launcher compare it); `rev` hashes the render as JSON with sorted keys and no whitespace;

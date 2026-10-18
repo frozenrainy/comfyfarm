@@ -321,3 +321,124 @@ async def test_secrets_are_not_accepted_into_the_ledger(farm, tmp_path):
     assert be.make("http-agent", {"url": "http://h:8399", "token_file": str(tok)}).token() == "t" * 32
     with pytest.raises(be.BackendError, match="empty"):
         be.make("http-agent", {"url": "http://h", "token_env": "COMFYFARM_TEST_NO_SUCH_VAR"}).token()
+
+
+async def step_status(r, rid, wid):
+    async with r.db.conn() as c:
+        return await c.fetchval("SELECT status FROM rollout_steps WHERE rollout_id = $1 AND worker_id = $2", rid, wid)
+
+
+async def wait_for(cond, timeout=30.0):
+    t = asyncio.get_running_loop().time()
+    while asyncio.get_running_loop().time() - t < timeout:
+        if await cond():
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("condition not reached")
+
+
+async def test_engine_error_while_reverting_waits_for_a_person_then_reverts(farm):
+    """QA-3: an engine error (database busy, connection lost) must not let the rollout pick itself up again: a step
+    caught while reverting would be driven forward and the rollout would carry on to the fleet (D-38)."""
+    import contextlib
+    from comfyfarm.db import Busy
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    w1, w2 = hosts["w1"], hosts["w2"]
+    w1.modes = ["broken", "noop"]                    # verify fails → revert; the revert's restart hangs (not seen down)
+    eng, real = r.rollout, r.rollout.db
+    crashed = []
+
+    class FlakyDb:                                   # the driver's next database call fails once the step reverts
+        @contextlib.asynccontextmanager
+        async def conn(self, *a, **kw):
+            if not crashed and asyncio.current_task().get_coro().__qualname__ == "Engine.run" and \
+                    await step_status(r, crashed_rid[0], w1.wid) == "reverting":
+                crashed.append(1)
+                raise Busy("database pool exhausted")
+            async with real.conn(*a, **kw) as c:
+                yield c
+    crashed_rid = [None]
+    eng.db = FlakyDb()
+    rid = crashed_rid[0] = await start(api, farm["p2"], [w1.wid, w2.wid])
+    await wait_for(lambda: _status_is(api, rid, "interrupted"))
+    await asyncio.sleep(2.5)                                           # nobody drives it on its own
+    ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()
+    assert ro["status"] == "interrupted" and "engine error" in ro["error"], ro
+    assert [s["status"] for s in ro["steps"]] == ["reverting", "pending"] and w2.restarts == 0
+    eng.db = real
+    assert (await api.post(f"/api/admin/rollouts/{rid}/resume", headers=H)).status_code == 200
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "failed" and [s["status"] for s in ro["steps"]] == ["reverted", "skipped"], ro["steps"]
+    assert w2.restarts == 0
+    inst = await instances(api)
+    assert inst["w1"]["profile"] == "p1" and inst["w1"]["badge"] == "match"       # back, never forward
+
+
+async def _status_is(api, rid, status):
+    return (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()["status"] == status
+
+
+async def test_recorded_failure_survives_an_engine_error(farm):
+    """QA-3: the canary stop must not live only in the driver's memory — after an engine error and a resume, a
+    failed step still keeps the remaining workers from being touched."""
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    eng, real = r.rollout, r.rollout.finish
+    calls = []
+
+    async def finish(rid, actor):
+        calls.append(rid)
+        if len(calls) == 1:
+            raise ConnectionResetError("connection to the database lost")
+        return await real(rid, actor)
+    eng.finish = finish
+    p3 = (await api.post("/api/admin/profiles", json={"name": "p3", "core": "c2", "venv": "v-missing"}, headers=H)).json()["id"]
+    rid = await start(api, p3, [hosts["w1"].wid, hosts["w2"].wid])
+    await wait_for(lambda: _status_is(api, rid, "interrupted"))
+    await asyncio.sleep(2.5)
+    ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()
+    assert ro["status"] == "interrupted" and [s["status"] for s in ro["steps"]] == ["reverted", "pending"], ro
+    assert hosts["w2"].restarts == 0
+    assert (await api.post(f"/api/admin/rollouts/{rid}/resume", headers=H)).status_code == 200
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "failed" and [s["status"] for s in ro["steps"]] == ["reverted", "skipped"], ro["steps"]
+    assert hosts["w2"].restarts == 0
+
+
+async def test_abort_reaches_a_step_queued_on_the_start_lock(farm):
+    """QA-9: a step waiting for the startup lock is still before its restart — Abort must stop it there."""
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    await r.rollout.start_lock.acquire()                    # another startup is in progress
+    try:
+        rid = await start(api, farm["p2"], [hosts["w1"].wid])
+        await asyncio.sleep(4.0)                            # drained, now queued on the lock
+        assert (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()["steps"][0]["status"] == "draining"
+        assert (await api.post(f"/api/admin/rollouts/{rid}/abort", headers=H)).json()["status"] == "aborting"
+        await asyncio.sleep(0.5)
+    finally:
+        r.rollout.start_lock.release()
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "aborted" and ro["steps"][0]["status"] == "skipped", ro["steps"]
+    assert hosts["w1"].restarts == 0
+    assert not any(w["maintenance"] for w in (await api.get("/api/admin/workers", headers=H)).json())
+
+
+async def test_recheck_under_the_start_lock_never_holds_it(farm, monkeypatch):
+    """QA-9: with drain_timeout 0 (wait forever) a worker whose queue fills right before the restart must not keep the
+    startup lock: the step goes back to draining and the lock is free for the others."""
+    from comfyfarm.rollout import engine as engine_mod
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    monkeypatch.setattr(engine_mod, "QUICK_DRAIN", 1.0, raising=False)
+    seen = []
+
+    async def queue_empty(base_url):
+        seen.append(base_url)
+        return len(seen) <= 2                               # the full drain passes, then a job is always there
+    r.rollout.worker_queue_empty = queue_empty
+    rid = await start(api, farm["p2"], [hosts["w1"].wid], options={"drain_timeout": 0})
+    await asyncio.sleep(6.0)
+    assert not r.rollout.start_lock.locked()
+    ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()
+    assert ro["steps"][0]["status"] == "draining" and hosts["w1"].restarts == 0
+    assert (await api.post(f"/api/admin/rollouts/{rid}/abort", headers=H)).status_code == 200
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "aborted" and hosts["w1"].restarts == 0
