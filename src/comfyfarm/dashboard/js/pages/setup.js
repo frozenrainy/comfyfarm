@@ -36,6 +36,8 @@ export async function setupWorker(refresh) {
     { name: "ssh_port", label: t("ssh port"), type: "number", value: 22 },
     { name: "account", label: t("Service account"), value: last?.account ?? "comfyfarm",
       hint: t("created by setup; runs ComfyUI; the router's key can only restart, query and check it") },
+    { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
+      hint: t("the same number on every host: shared storage checks numbers, not names") },
     { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188" },
     ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
     { name: "mounts", label: t("NFS mounts (optional, one per line: server:/export /mountpoint [options])"), type: "textarea", rows: 2,
@@ -47,7 +49,7 @@ export async function setupWorker(refresh) {
   const body = {
     name: v.name.trim() || inst, host: v.host.trim(), instance: inst, gpu: v.gpu, group: v.group || null,
     profile_id: v.profile ? Number(v.profile) : null, port: v.port || 8188, ssh_port: v.ssh_port || 22,
-    account: v.account.trim(), router_url: v.router_url.trim(),
+    account: v.account.trim(), uid: v.uid || null, router_url: v.router_url.trim(),
     paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),
     mounts: v.mounts.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
       const [source, target, options] = l.split(/\s+/);

@@ -170,16 +170,25 @@ def preconditions(h: Host):
 
 
 def account(h: Host, spec: dict):
-    user, home = spec["account"], spec.get("home") or f"/var/lib/{spec['account']}"
+    user, home, uid = spec["account"], spec.get("home") or f"/var/lib/{spec['account']}", spec.get("uid")
     try:
-        pwd.getpwnam(user)
-        exists = True
+        have = pwd.getpwnam(user).pw_uid
     except KeyError:
-        exists = False
-    if not exists:
+        have = None
+    if have is not None and uid is not None and have != uid:
+        raise Failed(f"account {user} exists with uid {have}, setup asks for {uid}: shared storage needs the same uid on "
+                     "every host — change the uid in the setup, or the account on this host")
+    if have is None:
+        if uid is not None:
+            try:
+                taken = pwd.getpwuid(uid).pw_name
+                raise Failed(f"uid {uid} is already used by {taken!r} on this host — pick another uid for the farm")
+            except KeyError:
+                pass
         # a real shell: sshd runs the forced command through it (nologin would refuse the router's agent key)
-        h.run(["useradd", "--system", "--create-home", "--home-dir", home, "--shell", "/bin/sh", user])
-        h.log(f"account {user} created (home {home})")
+        h.run(["useradd", "--system", "--create-home", "--home-dir", home, "--shell", "/bin/sh", user]
+              + (["--uid", str(uid)] if uid is not None else []))
+        h.log(f"account {user} created (home {home}" + (f", uid {uid})" if uid is not None else ")"))
     for g in ("render", "video"):
         try:
             members = grp.getgrnam(g).gr_mem
@@ -217,13 +226,18 @@ def configure(h: Host, spec: dict, home: str):
         f"COMFY_LAUNCH_PREFIXES={','.join(prefixes)}", ""]))
     h.write(f"{ETC}/{inst}.check.json", json.dumps({
         "gpu": spec.get("gpu", "any"), "paths": paths, "port": spec.get("port", 8188),
-        "listen": spec.get("listen", "0.0.0.0"), "account": user}, indent=1) + "\n")
+        "listen": spec.get("listen", "0.0.0.0"), "account": user, "uid": spec.get("uid")}, indent=1) + "\n")
     served = set()
     for line in h.read(f"{ETC}/agent.env").splitlines():
         if line.startswith("COMFYFARM_AGENT_INSTANCES="):
             served = {x for x in line.split("=", 1)[1].split(",") if x}
     h.write(f"{ETC}/agent.env", "\n".join([MARK, f"COMFYFARM_AGENT_INSTANCES={','.join(sorted(served | {inst}))}",
                                            "COMFYFARM_AGENT_USER=1", ""]))
+
+
+def directories(h: Host, spec: dict):
+    """After the mounts: an instance directory on shared storage is created there, not hidden under the mount point."""
+    user, paths = spec["account"], spec.get("paths", {})
     h.mkdir(spec["local"], 0o755, owner=user)
     for key in ("input", "output", "user", "temp"):
         if paths.get(key):
@@ -311,6 +325,7 @@ def setup(payload: dict, h: Host) -> dict:
                          ("worker tools", lambda: tools(h, payload.get("files", {}), payload.get("version", ""))),
                          ("configuration", lambda: configure(h, spec, result["home"])),
                          ("mounts", lambda: mounts(h, spec)),
+                         ("directories", lambda: directories(h, spec)),
                          ("router access", lambda: ssh_access(h, spec, result["home"])),
                          ("user manager", lambda: user_manager(h, spec))]:
             print(f"- {name}", flush=True)

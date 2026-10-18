@@ -275,4 +275,6 @@ export default {
   "Read-only check of the host through its agent: driver, groups, directories, venvs, clock, router":
     "에이전트를 통한 읽기 전용 점검: 드라이버, 그룹, 디렉터리, venv, 시계, 라우터",
   "OK": "정상", "WARN": "주의", "FAIL": "실패",
+  "Service account uid": "서비스 계정 UID",
+  "the same number on every host: shared storage checks numbers, not names": "모든 호스트에서 같은 번호로: 공유 스토리지는 이름이 아니라 번호로 권한을 봅니다",
 };

@@ -58,7 +58,7 @@ def test_setup_builds_a_worker_and_reports(tmp_path):
     res = ws.setup(payload(), ws.Host(root=str(root), run=rec))
     assert res["ok"], res
     assert [s["step"] for s in res["steps"]] == ["preconditions", "account", "worker tools", "configuration", "mounts",
-                                                 "router access", "user manager"]
+                                                 "directories", "router access", "user manager"]
     assert res["host_keys"] == ["ssh-ed25519 AAAAhostkey"]
     # account with a real shell (sshd runs the forced command through it)
     assert rec.ran("useradd")[0][-3:] == ["--shell", "/bin/sh", "comfyfarm"] or "/bin/sh" in rec.ran("useradd")[0]
@@ -134,3 +134,22 @@ def test_new_groups_restart_the_user_manager(tmp_path, monkeypatch):
     rec = Recorder()
     ws.setup(payload(), ws.Host(root=str(fake_root(tmp_path)), run=rec))
     assert rec.ran("usermod", "-aG", "render", "comfyfarm") and rec.ran("systemctl", "restart", "user@0.service")
+
+
+def test_directories_come_after_the_mounts_and_the_uid_is_fixed(tmp_path):
+    """Rehearsal: the instance directories were made before NFS was mounted (and hidden under it); and shared storage
+    needs one uid on every host."""
+    h = ws.Host(root=str(fake_root(tmp_path)), run=Recorder())
+    ws.setup(payload(uid=47800), h)
+    order = [m for m in h.done if m in ("mounted nas:/export/farm on /mnt/farm", "created /mnt/farm/input")]
+    assert order == ["mounted nas:/export/farm on /mnt/farm", "created /mnt/farm/input"]
+    rec = Recorder()
+    ws.setup(payload(uid=47800), ws.Host(root=str(fake_root(tmp_path / "b")), run=rec))
+    assert rec.ran("useradd")[0][-2:] == ["--uid", "47800"]
+
+
+def test_an_existing_account_with_another_uid_is_refused(tmp_path, monkeypatch):
+    import pwd
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 998, 998, "", "/var/lib/comfyfarm", "/bin/sh")))
+    res = ws.setup(payload(uid=47800), ws.Host(root=str(fake_root(tmp_path)), run=Recorder()))
+    assert not res["ok"] and "uid 998" in res["error"] and "47800" in res["error"]

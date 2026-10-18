@@ -41,6 +41,7 @@ class SetupIn(BaseModel):
     host: str                                   # address the router and the gateway reach it at
     ssh_port: int = 22
     account: str = "comfyfarm"
+    uid: int | None = 47800                     # the same on every host: shared storage checks numbers, not names
     instance: str
     port: int = 8188
     listen: str = "0.0.0.0"
@@ -72,6 +73,8 @@ def check_spec(body: SetupIn) -> None:
         raise HTTPException(400, "host: a host name or an IP address")
     if not ACCOUNT.match(body.account) or body.account == "root":
         raise HTTPException(400, "account: a lower-case account name, not root")
+    if body.uid is not None and not 1000 <= body.uid <= 60000:
+        raise HTTPException(400, "uid: 1000…60000 (the same number on every host that shares storage)")
     if body.gpu not in GPU:
         raise HTTPException(400, f"gpu: one of {', '.join(GPU)}")
     for p in (body.port, body.ssh_port):
@@ -138,7 +141,7 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(400, str(e))
         token = secrets.token_urlsafe(24)
         base = body.router_url.rstrip("/")
-        spec = {"instance": body.instance, "account": body.account, "router_url": base, "art": body.paths["art"],
+        spec = {"instance": body.instance, "account": body.account, "uid": body.uid, "router_url": base, "art": body.paths["art"],
                 "local": body.paths["local"], "gpu": body.gpu, "port": body.port, "listen": body.listen,
                 "paths": {k: v for k, v in body.paths.items() if k not in ("art", "local")},
                 "mounts": [m.model_dump(exclude_none=True) for m in body.mounts], "agent_pubkey": pub}

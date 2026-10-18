@@ -140,7 +140,9 @@ class Check:
             if not d:
                 continue
             ok = os.path.isdir(d) and os.access(d, os.W_OK | os.X_OK)
-            self.add(OK if ok else FAIL, f"{key} directory", f"{d}" + ("" if ok else f" — missing or not writable by {self.user}"))
+            who = f"{self.user} (uid {os.getuid()})" if not self.root else self.user
+            self.add(OK if ok else FAIL, f"{key} directory", f"{d}" + ("" if ok else f" — missing or not writable by {who}; on "
+                     "shared storage give that uid write access there (every host uses the same uid)"))
         if dirs.get("models"):
             m = dirs["models"]
             ok = os.path.isdir(m) and os.access(m, os.R_OK | os.X_OK)
