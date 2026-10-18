@@ -33,7 +33,7 @@ class Router:
         self.db = Database(settings.dsn)
         self.adapter = ComfyAdapter()
         self.dispatcher = Dispatcher(self.db, self.adapter, settings)
-        self.reconciler = Reconciler(self.db, self.adapter, settings, self.dispatcher.wake)
+        self.reconciler = Reconciler(self.db, self.adapter, settings, self.dispatcher.wake, self.dispatcher.posting)
         self.health = HealthMonitor(self.db, self.adapter, settings, self.dispatcher.wake)
         self.events = EventHub(self.db, settings, self.dispatcher.wake)
         self.dispatcher.ready = self.events.ready

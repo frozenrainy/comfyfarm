@@ -297,3 +297,109 @@ async def test_unexpected_error_asking_one_worker_does_not_stop_reconcile(router
     r.adapter.job_state = job_state
     await r.reconciler.tick()
     assert (await job_row(r, ids[1]))["error"]["kind"] == "lost"
+
+
+def gated_submit(r, gates: dict):
+    """POSTs to the gated workers hang until their gate opens (a body still uploading: the worker does not know the job
+    yet); the rest go through."""
+    real = r.adapter.submit
+
+    async def submit(base_url, *a):
+        if base_url in gates:
+            await gates[base_url].wait()
+        return await real(base_url, *a)
+    r.adapter.submit = submit
+
+
+async def test_slow_post_is_not_requeued_while_still_in_flight(router_factory, fakes):
+    """A POST that takes longer than any fixed guess must not be judged 'absent' by reconcile and re-queued: the job
+    would run twice (P3). Reconcile asks the dispatcher what it is still POSTing instead of guessing from time."""
+    r = await quiet(router_factory)
+    a, b = await fakes(), await fakes()
+    _, wa = await add_worker(r, a.url, name="a")
+    _, wb = await add_worker(r, b.url, name="b")
+    await set_worker(r, wa, state="online")
+    await set_worker(r, wb, state="online", maintenance=True)
+    gate = asyncio.Event()
+    gated_submit(r, {a.url: gate})
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    assert await r.dispatcher.tick() == 1
+    async with r.db.conn() as c:                    # the POST has been going on for a minute
+        await c.execute("UPDATE jobs SET dispatched_at = now() - interval '1 minute' WHERE id = $1", job["id"])
+    await r.reconciler.tick(); await asyncio.sleep(1.2); await r.reconciler.tick()   # "absent" twice, settled
+    assert (await job_row(r, job["id"]))["status"] == "dispatching"
+    await set_worker(r, wb, maintenance=False)
+    await set_worker(r, wa, maintenance=True)
+    assert await r.dispatcher.tick() == 0           # nothing to take: the job is still on its way to A
+    gate.set()
+    await drain(r)
+    pid = str(job["prompt_id"])
+    assert a.fake.post_log == [pid] and b.fake.post_log == []
+    row = await job_row(r, job["id"])
+    assert row["status"] in ("running", "completed") and row["worker_id"] == wa
+
+
+async def test_late_acceptance_does_not_take_a_job_handed_to_another_worker(router_factory, fakes):
+    """If the job was re-queued and claimed by B while A's POST was in flight (another router's reconcile did it), A's
+    late 200 must not move B's dispatch to running, and the copy A accepted is cancelled — nobody tracks it."""
+    r = await quiet(router_factory)
+    a, b = await fakes(), await fakes()
+    _, wa = await add_worker(r, a.url, name="a")
+    _, wb = await add_worker(r, b.url, name="b")
+    await set_worker(r, wa, state="online")
+    await set_worker(r, wb, state="online", maintenance=True)
+    gates = {a.url: asyncio.Event(), b.url: asyncio.Event()}
+    gated_submit(r, gates)
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny(blur=25, size=2048))    # one 4 s step on the fake
+    jid, pid = job["id"], str(job["prompt_id"])
+    assert await r.dispatcher.tick() == 1
+    to_a = set(r.dispatcher.inflight)
+    async with r.db.conn() as c:
+        async with c.transaction():
+            await jobsvc.transition(c, jid, "pending", ("dispatching",), "worker never received it (other router)",
+                                    worker_id=None, dispatched_at=None)
+    await set_worker(r, wb, maintenance=False)
+    await set_worker(r, wa, maintenance=True)
+    assert await r.dispatcher.tick() == 1
+    to_b = set(r.dispatcher.inflight) - to_a
+    gates[a.url].set()
+    await asyncio.gather(*to_a)
+    row = await job_row(r, jid)
+    assert row["status"] == "dispatching" and row["worker_id"] == wb, row
+    assert a.fake.jobs[pid].interrupt or a.fake.jobs[pid].status == "cancelled"      # the orphan copy is stopped
+    gates[b.url].set()
+    await asyncio.gather(*to_b)
+    row = await job_row(r, jid)
+    assert row["status"] == "running" and row["worker_id"] == wb
+    async with r.db.conn() as c:
+        cur = {x["id"]: x["current_job_id"] for x in await c.fetch("SELECT id, current_job_id FROM workers")}
+    assert cur == {wa: None, wb: jid}
+
+
+async def test_post_has_an_overall_deadline(router_factory, monkeypatch):
+    """httpx timeouts are per phase: an answer trickling in a byte at a time never times out. The adapter bounds the
+    whole POST, and the outcome is Ambiguous (the worker may have queued it), never a hang."""
+    from aiohttp import web
+    from comfyfarm.adapter import comfy
+    from conftest import free_port
+    r = await quiet(router_factory)
+
+    async def trickle(request):
+        resp = web.StreamResponse()
+        await resp.prepare(request)
+        for _ in range(100):
+            await resp.write(b" ")
+            await asyncio.sleep(0.2)
+        return resp
+    app = web.Application()
+    app.router.add_post("/prompt", trickle)
+    runner = web.AppRunner(app, shutdown_timeout=0.5)
+    await runner.setup()
+    port = free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    monkeypatch.setattr(comfy, "DISPATCH_DEADLINE", 1.0, raising=False)
+    try:
+        out = await asyncio.wait_for(r.adapter.submit(f"http://127.0.0.1:{port}", str(uuid.uuid4()), tiny(), {}, "c"), 5)
+        assert isinstance(out, comfy.Ambiguous), out
+    finally:
+        await runner.cleanup()

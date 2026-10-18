@@ -46,6 +46,7 @@ class Dispatcher:
         self.db, self.adapter, self.s = db, adapter, settings
         self.wake = asyncio.Event()
         self.inflight: set[asyncio.Task] = set()
+        self.posting: dict[int, int] = {}       # job id → worker id while this process POSTs it (reconcile must not ask)
         self.claimed_total = 0
         self.ready = lambda worker_id: True     # EventHub replaces this: dispatch only once events can be received
         self.secrets: dict[int, dict] = {}      # job id → credentials kept out of the ledger (D-29)
@@ -77,6 +78,7 @@ class Dispatcher:
                 continue
             claimed += 1
             self.claimed_total += 1
+            self.posting[claim[0]] = wid
             t = asyncio.create_task(self.deliver(*claim))
             self.inflight.add(t)
             t.add_done_callback(self.inflight.discard)
@@ -98,20 +100,36 @@ class Dispatcher:
         return j["id"], str(j["prompt_id"]), {k: w[k] for k in ("id", "group_id", "base_url")}, payload["prompt"], dict(payload["extra_data"] or {})
 
     async def deliver(self, job_id: int, prompt_id: str, worker: dict, prompt: dict, extra: dict):
+        try:
+            await self._deliver(job_id, prompt_id, worker, prompt, extra)
+        finally:
+            if self.posting.get(job_id) == worker["id"]:
+                del self.posting[job_id]
+
+    async def _deliver(self, job_id: int, prompt_id: str, worker: dict, prompt: dict, extra: dict):
         if self.s.preview_method and "preview_method" not in extra:
             extra["preview_method"] = self.s.preview_method                     # P16
         extra.update(self.secrets.pop(job_id, {}))                              # D-29: never stored, only forwarded
         out = await self.adapter.submit(worker["base_url"], prompt_id, prompt, extra,
                                         worker_client_id(self.s.instance, worker["id"]))
+        orphan = cancel = False
         async with self.db.conn() as c:
             async with c.transaction():
+                # While this POST was in flight the job may have been re-queued and handed to another worker (by another
+                # router's reconcile, or after a POST that outlived its deadline): only the outcome for the worker the
+                # job is with may move it. A copy this worker accepted anyway is an orphan nobody tracks.
+                row = await c.fetchrow("SELECT status, worker_id FROM jobs WHERE id = $1 FOR UPDATE", job_id)
+                if row is None or row["worker_id"] != worker["id"]:
+                    orphan = isinstance(out, (Accepted, Ambiguous))
+                    log.warning("job %s left worker %s while its POST was in flight (%s)", job_id, worker["id"],
+                                type(out).__name__)
+                    out = None
                 match out:
                     case Accepted():
                         if not await transition(c, job_id, "running", ("dispatching",), "accepted", dispatch_ended_at="now()"):
                             await c.execute("UPDATE jobs SET dispatch_ended_at = now() WHERE id = $1", job_id)
-                            if await c.fetchval("SELECT status FROM jobs WHERE id = $1", job_id) == "cancelling":
-                                # cancelled while the POST was in flight: the worker only knows the job now
-                                await self.adapter.cancel(worker["base_url"], prompt_id)
+                            # cancelled while the POST was in flight: the worker only knows the job now
+                            cancel = row["status"] == "cancelling"
                     case Rejected():
                         await transition(c, job_id, "failed", ("dispatching", "cancelling"), f"rejected {out.status}",
                                          dispatch_ended_at="now()",
@@ -133,3 +151,5 @@ class Dispatcher:
                         # may be running already; reconcile asks the worker (D-05). Never re-POST blindly (P3).
                         await c.execute("UPDATE jobs SET dispatch_ended_at = now() WHERE id = $1", job_id)
                         log.warning("dispatch of job %s to worker %s ambiguous: %s", job_id, worker["id"], out.reason)
+        if orphan or cancel:
+            await self.adapter.cancel(worker["base_url"], prompt_id)

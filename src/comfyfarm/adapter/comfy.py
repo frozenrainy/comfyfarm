@@ -4,6 +4,7 @@ The facts this module relies on are listed (and verified) in docs/design/04-work
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -13,6 +14,9 @@ import httpx
 log = logging.getLogger(__name__)
 
 DISPATCH_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0)
+# httpx timeouts are per phase: a body trickling out (or an answer trickling in) a few bytes at a time never ends. This
+# bounds one POST /prompt as a whole, so "a POST may still be in flight" has an end that other processes can rely on.
+DISPATCH_DEADLINE = 15.0
 QUERY_TIMEOUT = httpx.Timeout(connect=3.0, read=3.0, write=3.0, pool=3.0)
 
 # connect-phase failures: the request never reached the process
@@ -91,11 +95,12 @@ class ComfyAdapter:
     async def submit(self, base_url: str, prompt_id: str, prompt: dict, extra_data: dict, client_id: str) -> SubmitOutcome:
         body = {"prompt": prompt, "prompt_id": prompt_id, "client_id": client_id, "extra_data": extra_data}
         try:
-            r = await self.http.post(f"{base_url}/prompt", json=body, timeout=DISPATCH_TIMEOUT)
+            async with asyncio.timeout(DISPATCH_DEADLINE):
+                r = await self.http.post(f"{base_url}/prompt", json=body, timeout=DISPATCH_TIMEOUT)
         except CONNECT_ERRORS as e:
             return Unreachable(_ename(e))
-        except Exception as e:                                   # read/write timeout, reset after send, …
-            return Ambiguous(_ename(e))
+        except Exception as e:                                   # read/write timeout, reset after send, deadline, …
+            return Ambiguous(_ename(e) if not isinstance(e, TimeoutError) else f"no answer within {DISPATCH_DEADLINE:g} s")
         if r.status_code == 200:
             j = _object(r)
             if j is None:                                        # not ComfyUI's answer: nothing says it was queued

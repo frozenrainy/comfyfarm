@@ -5,15 +5,20 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
-from ..adapter.comfy import ComfyAdapter, JobState, NoAnswer
+from ..adapter.comfy import DISPATCH_DEADLINE, ComfyAdapter, JobState, NoAnswer
 from ..db import Busy, Database
 from .jobs import error_doc, transition
 from .settings import Settings
 
 log = logging.getLogger(__name__)
 
+# A POST by another router process (or by this one before a restart) has ended at the latest this long after the claim:
+# the adapter bounds it with DISPATCH_DEADLINE; the margin covers the time between the claim commit and the POST.
+POST_WINDOW = DISPATCH_DEADLINE + 5.0
+
 ACTIVE = """
 SELECT j.id, j.prompt_id, j.status, j.dispatched_at, j.dispatch_ended_at, j.absent_seen_at, j.started_at,
+       j.dispatch_ended_at IS NULL AND j.dispatched_at > now() - make_interval(secs => $1) AS maybe_posting,
        w.id AS wid, w.base_url, w.state, w.enabled, w.deleted_at, w.offline_since,
        coalesce((w.capabilities->>'jobs_api')::boolean, true) AS jobs_api
   FROM jobs j LEFT JOIN workers w ON w.id = j.worker_id
@@ -21,8 +26,10 @@ SELECT j.id, j.prompt_id, j.status, j.dispatched_at, j.dispatch_ended_at, j.abse
 
 
 class Reconciler:
-    def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None):
+    def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None,
+                 posting: dict[int, int] | None = None):
         self.db, self.adapter, self.s, self.wake = db, adapter, settings, wake
+        self.posting = posting if posting is not None else {}    # the dispatcher's: jobs this process is POSTing now
 
     async def run(self):
         while True:
@@ -36,7 +43,7 @@ class Reconciler:
 
     async def tick(self):
         async with self.db.conn() as c:
-            rows = [dict(r) for r in await c.fetch(ACTIVE)]
+            rows = [dict(r) for r in await c.fetch(ACTIVE, POST_WINDOW)]
             await c.execute("UPDATE workers SET current_job_id = NULL WHERE current_job_id IN "
                             "(SELECT id FROM jobs WHERE status IN ('completed','failed','cancelled','pending','paused'))")
         now = datetime.now(timezone.utc)
@@ -74,9 +81,10 @@ class Reconciler:
             return "gone"
         if r["state"] == "offline" and r["offline_since"] and now - r["offline_since"] >= timedelta(seconds=self.s.worker_lost_after):
             return "gone"
-        if r["status"] == "dispatching" and r["dispatch_ended_at"] is None and \
-                now - r["dispatched_at"] < timedelta(seconds=15):
-            return None                                          # POST still in flight in this process
+        if r["id"] in self.posting:
+            return None          # this process is still POSTing it: "absent" now would re-queue a job about to arrive
+        if r["status"] == "dispatching" and r["maybe_posting"]:
+            return None          # another router process may still be POSTing it (bounded by the deadline)
         return await self.adapter.job_state(r["base_url"], str(r["prompt_id"]), r["jobs_api"])
 
     async def _apply(self, c, r: dict, ans, now: datetime) -> bool:
@@ -87,7 +95,7 @@ class Reconciler:
             return await transition(c, jid, "failed", ("dispatching", "running", "cancelling"), "worker lost",
                                     error=error_doc("worker_lost", "the worker running this job is gone — rerun if needed"))
         assert isinstance(ans, JobState)
-        ended = r["dispatch_ended_at"] or (r["dispatched_at"] + timedelta(seconds=15))
+        ended = r["dispatch_ended_at"] or (r["dispatched_at"] + timedelta(seconds=POST_WINDOW))
         match ans.status:
             case "pending" | "in_progress":
                 fields = {"absent_seen_at": None}
