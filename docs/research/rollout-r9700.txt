@@ -30,3 +30,16 @@ Rollout 3 — 0.41.2 → 0.41.0 while a real job runs (WAN 2.2 VACE 14B fp8, 320
 
 Found and fixed during this run: after a restart shorter than the health probe interval the router kept showing the
 old ComfyUI version (only argv was re-read) → the engine now re-reads all capabilities on `match`.
+
+Idle CPU spin (found after the runs above) — every ComfyUI on this worker kept one thread at 100 % while idle
+(load average 1.00): `ioctl(/dev/kfd, AMDKFD_IOC_WAIT_EVENTS)` ~44 000×/s, each returning at once. Cause: the
+rocprofiler-sdk bundled with PyTorch ≥ 2.13 ROCm wheels registers at start and takes 4096 signals, the whole
+per-process KFD event pool; later signals get no event and the runtime's async-events loop polls forever
+(ROCm/rocm-systems#13177). Not the ROCm runtime version: torch 2.10 on the same ROCr 7.2 is clean, and the 7.1
+wheels spin too.
+Rollout 4 — profile with `HSA_TOOLS_DISABLE_REGISTER=1` added to its environment, otherwise unchanged
+  rollout done; the variable is in the worker's environment, the profiler library is still mapped
+  per-thread CPU over 20 s:  before 2005 jiffies (one thread) · after, idle 0 · after a full WAN 2.2 job 0, twice
+  the WAN job: 29 s, 9 images (rollout 3: ~30 s)
+Lesson for measuring: compare per-thread deltas between two snapshots, not the largest cumulative value of each —
+the latter shows only the busiest thread's growth and hid the spinner twice here.

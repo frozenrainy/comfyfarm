@@ -74,3 +74,15 @@ HTTP flavour (no ssh, e.g. Windows hosts later): `python3 agent.py serve --port 
    to its previous profile and stays in maintenance; the remaining workers are skipped.
 
 The backend `manual` needs no agent: the dashboard tells an operator which instance to restart and waits for it.
+
+## 4. After a new venv: watch the idle worker
+
+The verification above proves the worker renders; it does not prove it idles. After the first real job on a new venv,
+leave the worker idle for a minute and look at its per-thread CPU (`top -H -p <pid>`): an idle ComfyUI uses
+nothing. A thread that stays at 100 % costs a core for as long as the worker runs and shows only as a load average of
+1.00 on the host.
+
+Known case — AMD, PyTorch ≥ 2.13 ROCm wheels: the bundled `rocprofiler-sdk` registers at start, takes 4096 HSA
+signals and exhausts the per-process KFD event pool; the runtime then busy-polls `AMDKFD_IOC_WAIT_EVENTS` forever
+(ROCm/rocm-systems#13177, fixed upstream by a smaller pool). Put `HSA_TOOLS_DISABLE_REGISTER=1` into the profile's
+environment. The only side effect is that ROCm profilers (`rocprofv3`) cannot attach to that worker.
