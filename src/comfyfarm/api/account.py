@@ -41,6 +41,17 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(403, "gateway only")
 
     # ---- gateway ------------------------------------------------------------------------------------------------
+    @api.get("/api/internal/ui-worker")
+    async def ui_worker(request: Request):
+        """The gateway with UI_WORKER_URL=auto asks where the UI worker is: the enabled UI worker, online ones first."""
+        gateway_only(request)
+        async with db.conn() as c:
+            url = await c.fetchval("SELECT base_url FROM workers WHERE kind = 'ui' AND enabled AND deleted_at IS NULL "
+                                   "ORDER BY state = 'online' DESC, id LIMIT 1")
+        if url is None:
+            raise HTTPException(404, "no UI worker: System → Workers → Set up a worker (UI worker)")
+        return {"url": url}
+
     @api.post("/api/internal/login")
     async def internal_login(request: Request):
         """Local identity provider: check a password, hand out the session epoch the cookie will carry."""

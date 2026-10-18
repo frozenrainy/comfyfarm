@@ -91,6 +91,16 @@ router:
   chosen profile, start the unit through the agent, wait for `match`).
 - Dashboard: *Set up a worker* (System → Workers), a step-by-step dialog; *Check host* on each configured instance.
 
+## The UI worker
+
+The same setup with role `ui`: no GPU expected, no group, its own port. It becomes a worker row of kind `ui`
+(migration 0010): health checks, host checks and rollouts include it — its ComfyUI and frontend move with the GPU
+workers' — while the dispatcher never gives it a job (a group is refused for it at the API and in the ledger). The
+gateway with `--ui auto` asks the router for it (`/api/internal/ui-worker`, re-asked every 30 s; a different UI worker
+clears the user-id mapping, since ComfyUI's user ids belong to one instance). Its profile carries `comfyfarm_ui` and
+`comfyfarm_worker`: stock `--multi-user` has no login, so the allow-list is what keeps users from reading each other's
+workflows by talking to it directly.
+
 ## Venvs carry their interpreter (D-42)
 
 A venv built by `uv venv` points `bin/python` at uv's interpreter store in the builder's home — the artifact then works

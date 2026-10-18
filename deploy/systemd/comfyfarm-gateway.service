@@ -1,5 +1,6 @@
 # Gateway without containers; settings in /etc/comfyfarm/gateway.env:
-#   COMFYFARM_GATEWAY_SECRET, COMFYFARM_SESSION_KEY (comfyfarm secrets) and UI_WORKER_URL=http://<ui-worker>:8188
+#   COMFYFARM_GATEWAY_SECRET, COMFYFARM_SESSION_KEY (comfyfarm secrets) and UI_WORKER_URL=auto (the UI worker set up in the
+#   dashboard) or a fixed http://<ui-worker>:<port>
 [Unit]
 Description=ComfyFarm gateway
 After=network-online.target comfyfarm-router.service

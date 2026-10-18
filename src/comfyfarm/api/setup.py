@@ -37,6 +37,7 @@ class MountIn(BaseModel):
 
 
 class SetupIn(BaseModel):
+    role: str = "gpu"                           # gpu | ui (the UI worker: the screen and the users' files, no jobs)
     name: str                                   # the worker's name in the dashboard
     host: str                                   # address the router and the gateway reach it at
     ssh_port: int = 22
@@ -75,8 +76,12 @@ def check_spec(body: SetupIn) -> None:
         raise HTTPException(400, "account: a lower-case account name, not root")
     if body.uid is not None and not 1000 <= body.uid <= 60000:
         raise HTTPException(400, "uid: 1000…60000 (the same number on every host that shares storage)")
+    if body.role not in ("gpu", "ui"):
+        raise HTTPException(400, "role: gpu or ui")
     if body.gpu not in GPU:
         raise HTTPException(400, f"gpu: one of {', '.join(GPU)}")
+    if body.role == "ui" and body.group:
+        raise HTTPException(400, "a UI worker belongs to no group: it serves the screen, jobs go to GPU workers")
     for p in (body.port, body.ssh_port):
         if not 1 <= p <= 65535:
             raise HTTPException(400, "port out of range")
@@ -103,7 +108,7 @@ def instance_config(spec: dict, extra: dict) -> dict:
     cfg = {"host": extra["host"], "user": spec["account"], "key": hostsetup.AGENT_KEY, "known_hosts": hostsetup.KNOWN_HOSTS}
     if extra.get("ssh_port", 22) != 22:
         cfg["port"] = extra["ssh_port"]
-    return {"instance": spec["instance"], "role": "gpu", "platform": "posix", "hosts": [extra["host"]],
+    return {"instance": spec["instance"], "role": spec.get("role", "gpu"), "platform": "posix", "hosts": [extra["host"]],
             "listen": spec["listen"], "port": spec["port"], "paths": dict(spec["paths"], art=spec["art"], local=spec["local"]),
             "restart_backend": "ssh", "restart_config": cfg}
 
@@ -122,7 +127,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         if r["status"] in ("reported", "finished"):
             d["instance_config"] = instance_config(r["spec"], r["extra"])
             d["worker"] = {"name": r["extra"]["name"], "base_url": f"http://{r['extra']['host']}:{r['spec']['port']}",
-                           "group": r["extra"].get("group")}
+                           "group": r["extra"].get("group"), "kind": r["spec"].get("role", "gpu")}
         return d
 
     @api.post("/api/admin/setups")
@@ -141,8 +146,8 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(400, str(e))
         token = secrets.token_urlsafe(24)
         base = body.router_url.rstrip("/")
-        spec = {"instance": body.instance, "account": body.account, "uid": body.uid, "router_url": base, "art": body.paths["art"],
-                "local": body.paths["local"], "gpu": body.gpu, "port": body.port, "listen": body.listen,
+        spec = {"instance": body.instance, "role": body.role, "account": body.account, "uid": body.uid, "router_url": base,
+                "art": body.paths["art"], "local": body.paths["local"], "gpu": "none" if body.role == "ui" else body.gpu, "port": body.port, "listen": body.listen,
                 "paths": {k: v for k, v in body.paths.items() if k not in ("art", "local")},
                 "mounts": [m.model_dump(exclude_none=True) for m in body.mounts], "agent_pubkey": pub}
         extra = {"name": body.name.strip(), "host": body.host, "ssh_port": body.ssh_port, "group": body.group,

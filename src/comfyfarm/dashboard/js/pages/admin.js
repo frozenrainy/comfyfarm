@@ -88,7 +88,8 @@ function workers(root, { refresh }) {
     const tr = namedRow(cols, { name: "nowrap", actions: "actions" });
     const id = () => tr._item.id;
     tr.sel = h("select", { onchange: () => patch(id(), { group: tr.sel.value }, t("Group changed")) });
-    tr.c.group.append(tr.sel);
+    tr.uiNote = h("span", { class: "muted", hidden: true }, t("UI worker"));
+    tr.c.group.append(tr.sel, tr.uiNote);
     tr.note = noteInput((v) => patch(id(), { note: v }, t("Note saved")));
     tr.c.note.append(tr.note);
     tr.maint = button("", () => patch(id(), { maintenance: !tr._item.maintenance }));
@@ -121,6 +122,7 @@ function workers(root, { refresh }) {
       tr.sel.replaceChildren(...opts.map((o) => h("option", { value: o.value }, o.label)));
     }
     if (document.activeElement !== tr.sel) tr.sel.value = w.group ?? "";
+    tr.sel.hidden = w.kind === "ui"; tr.uiNote.hidden = w.kind !== "ui";      // a UI worker belongs to no group
     const st = !w.enabled ? "disabled" : w.state;
     const sig2 = `${st}|${w.maintenance}`;
     if (c.state.dataset.v !== sig2) {

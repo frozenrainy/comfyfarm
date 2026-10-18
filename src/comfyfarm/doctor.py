@@ -81,7 +81,7 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
             "SELECT i.instance, i.restart_backend, i.restart_config FROM instances i JOIN workers w ON w.id = i.worker_id "
             "WHERE w.deleted_at IS NULL AND w.enabled AND i.restart_backend IN ('ssh', 'http-agent') ORDER BY i.instance")]
         workers = [dict(r) for r in await conn.fetch(
-            "SELECT w.id, w.name, w.base_url, w.group_id, w.enabled, w.maintenance, w.state, w.capabilities, g.name AS group_name "
+            "SELECT w.id, w.name, w.kind, w.base_url, w.group_id, w.enabled, w.maintenance, w.state, w.capabilities, g.name AS group_name "
             "FROM workers w LEFT JOIN worker_groups g ON g.id = w.group_id WHERE w.deleted_at IS NULL ORDER BY w.name")]
     finally:
         await conn.close()
@@ -98,9 +98,10 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
                 out.append((FAIL, f"worker {w['name']}", f"not answering ({kind}: {detail}) — {w['base_url']}"))
                 continue
             info = await adapter.worker_info(w["base_url"])
-            bits = [f"online{' (maintenance)' if w['maintenance'] else ''}", f"group {w['group_name'] or '— NONE: receives no jobs'}"]
+            bits = [f"online{' (maintenance)' if w['maintenance'] else ''}",
+                    "UI worker" if w["kind"] == "ui" else f"group {w['group_name'] or '— NONE: receives no jobs'}"]
             st = OK
-            if w["group_id"] is None:
+            if w["group_id"] is None and w["kind"] == "gpu":
                 st = WARN
             if info is None:
                 bits.append("extension: no answer"); st = WARN
@@ -127,6 +128,8 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
             else:
                 out.append((OK, f"group {name}", f"{len(g['workers'])} worker(s) agree on nodes and models"))
         # ---- shared storage ----------------------------------------------------------------------------------------
+        if not ui_url:                      # the UI worker set up in the dashboard
+            ui_url = next((w["base_url"] for w in workers if w["kind"] == "ui" and w["enabled"]), None)
         if ui_url:
             name = "comfyfarm-doctor.png"
             try:

@@ -436,3 +436,29 @@ async def test_login_page_speaks_the_chosen_language(farm):
         c.cookies.set("comfyfarm_lang", "en")                     # the dashboard setting beats the browser
         page = (await c.get(f"{gw}/comfyfarm/login?e=1", headers={"accept-language": "ko"})).text
         assert ">Log in<" in page and "Login failed" in page
+
+
+async def test_ui_worker_auto_is_the_one_set_up_in_the_dashboard(dsn, fakes):
+    """--ui auto: the gateway asks the router for the UI worker (kind ui), so setting one up needs no gateway change."""
+    started, runners = [], []
+    router_app = create_app(fast_settings(dsn, dev_identity=None, gateway_secret=SECRET))
+    router_port = await serve_asgi(router_app, started)
+    ui = UIStub()
+    runner = web.AppRunner(ui.app, shutdown_timeout=1); await runner.setup(); runners.append(runner)
+    ui_port = free_port(); await web.TCPSite(runner, "127.0.0.1", ui_port).start()
+    gw = f"http://127.0.0.1:{await serve_asgi(create_gateway(GatewaySettings(f'http://127.0.0.1:{router_port}', 'auto', SECRET, b'k' * 32)), started)}"
+    await add_user(dsn, "alice", "pw-alice", admin=False)
+    try:
+        async with httpx.AsyncClient() as c:
+            await login(c, gw, "alice", "pw-alice")
+            r = await c.get(f"{gw}/")
+            assert r.status_code == 502 and "no UI worker is set up yet" in r.json()["error"]
+            async with router_app.state.router.db.conn() as x:
+                await x.execute("INSERT INTO workers(name, base_url, kind) VALUES ('ui-1', $1, 'ui')", f"http://127.0.0.1:{ui_port}")
+            assert (await c.get(f"{gw}/")).text == "<html>stock frontend</html>"
+    finally:
+        for server, task in started:
+            server.should_exit = True
+            await task
+        for r in runners:
+            await r.cleanup()

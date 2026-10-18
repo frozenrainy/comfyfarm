@@ -189,3 +189,21 @@ async def test_host_check_through_the_agent_in_dashboard_and_doctor(farm, tmp_pa
     answer.write_text("refused: instance 'gpu-1' is not served here")             # the agent could not run it
     resp = await c.post(f"/api/admin/instances/{w['id']}/check", headers=H)
     assert resp.status_code == 502 and "did not run" in resp.text
+
+
+async def test_a_ui_worker_is_set_up_the_same_way_and_never_in_a_group(farm, tmp_path):
+    r, c, keys = farm
+    assert (await c.post("/api/admin/setups", json=spec(role="ui", group="amd"), headers=H)).status_code == 400
+    made = (await c.post("/api/admin/setups", json=spec(role="ui", name="ui one", instance="ui-1", port=8189, gpu="amd"),
+                         headers=H)).json()
+    path = "/" + made["script_url"].split("/", 3)[3]
+    await c.post(path.replace("/script", "/report"), content=json.dumps({"ok": True, "host_keys": ["ssh-ed25519 AAAAhostkey"]}))
+    s = (await c.get(f"/api/admin/setups/{made['id']}", headers=H)).json()
+    assert s["spec"]["gpu"] == "none" and s["instance_config"]["role"] == "ui" and s["worker"]["kind"] == "ui"
+    w = (await c.post("/api/admin/workers", json=s["worker"], headers=H)).json()
+    await c.post("/api/admin/groups", json={"name": "g1", "requirements": {}}, headers=H)
+    bad = await c.patch(f"/api/admin/workers/{w['id']}", json={"group": "g1"}, headers=H)
+    assert bad.status_code == 400 and "no group" in bad.text
+    listed = (await c.get("/api/admin/workers", headers=H)).json()
+    me = next(x for x in listed if x["id"] == w["id"])
+    assert me["kind"] == "ui" and not any("no group" in x for x in me["warnings"])

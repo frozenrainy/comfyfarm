@@ -277,4 +277,13 @@ export default {
   "OK": "정상", "WARN": "주의", "FAIL": "실패",
   "Service account uid": "서비스 계정 UID",
   "the same number on every host: shared storage checks numbers, not names": "모든 호스트에서 같은 번호로: 공유 스토리지는 이름이 아니라 번호로 권한을 봅니다",
+  "What will this host be?": "이 호스트의 역할은?",
+  "GPU worker — runs the jobs": "GPU 워커 — 작업을 실행합니다",
+  "UI worker — serves the screen and the users' files (no GPU, no jobs)": "UI 워커 — 화면과 사용자 파일을 맡습니다 (GPU·작업 없음)",
+  "A farm has one UI worker (often on the control-plane host) and any number of GPU workers. The gateway finds the UI worker by itself.":
+    "팜에는 UI 워커 하나(보통 제어 호스트)와 GPU 워커 여러 대가 있습니다. 게이트웨이는 UI 워커를 스스로 찾습니다.",
+  "Set up the UI worker": "UI 워커 설치", "Set up a GPU worker": "GPU 워커 설치",
+  "UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>":
+    "UI용 프로필: GPU 워커와 같은 코어, CPU venv, 노드 comfyfarm_ui·comfyfarm_worker, 플래그 --cpu, env COMFYFARM_ALLOW=<게이트웨이·라우터 주소>",
+  "not 8188 when it shares the host with the router": "라우터와 같은 호스트라면 8188은 피하세요",
 };

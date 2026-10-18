@@ -29,7 +29,7 @@ python -m comfyfarm.gateway --router http://127.0.0.1:8188 --ui http://ui-worker
 ```
 
 With the systemd unit (`deploy/systemd/comfyfarm-gateway.service`) these go into `/etc/comfyfarm/gateway.env`
-together with `UI_WORKER_URL=http://ui-worker:8188`. With `--log-dir` it writes `gateway.log` and
+together with `UI_WORKER_URL=auto` (the UI worker set up in the dashboard; or a fixed URL). With `--log-dir` it writes `gateway.log` and
 `gateway-error.log` (the router's files are `router.*`; the units create `/var/log/comfyfarm` themselves).
 
 Browsers talk only to the gateway. `--provider trusted-header` takes the identity from an authenticating reverse

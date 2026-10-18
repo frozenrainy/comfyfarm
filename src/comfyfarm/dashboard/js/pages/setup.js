@@ -18,21 +18,32 @@ function checkTable(rows) {
 
 // Step 1: what the host should become. Defaults: the last setup's answers (a farm's hosts look alike).
 export async function setupWorker(refresh) {
+  const pickRole = await formDialog(t("Set up a worker"), [
+    { name: "role", label: t("What will this host be?"), type: "select", value: "gpu",
+      options: [{ value: "gpu", label: t("GPU worker — runs the jobs") },
+                { value: "ui", label: t("UI worker — serves the screen and the users' files (no GPU, no jobs)") }],
+      hint: t("A farm has one UI worker (often on the control-plane host) and any number of GPU workers. The gateway finds the UI worker by itself.") },
+  ], t("Next"));
+  if (!pickRole) return;
+  const ui = pickRole.role === "ui";
   const [groups, profiles, recent] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
                                                        api("GET", "/api/admin/setups")]);
   const last = recent[0]?.spec;
   const pathOf = (k, d) => (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
-  const v = await formDialog(t("Set up a worker"), [
-    { name: "name", label: t("Worker name (shown in the dashboard)") },
+  const v = await formDialog(ui ? t("Set up the UI worker") : t("Set up a GPU worker"), [
+    { name: "name", label: t("Worker name (shown in the dashboard)"), value: ui ? "ui" : "" },
     { name: "host", label: t("Host address"), placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
-    { name: "instance", label: t("Instance name"), value: "gpu-1", hint: t("one ComfyUI on this host; letters, digits, . _ -") },
-    { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu ?? "amd", options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })),
-      hint: t("ComfyFarm checks the driver; it never installs one") },
-    { name: "group", label: t("Group"), type: "select", value: groups[0]?.name ?? "",
-      options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] },
+    { name: "instance", label: t("Instance name"), value: ui ? "ui-1" : "gpu-1", hint: t("one ComfyUI on this host; letters, digits, . _ -") },
+    ...(ui ? [] : [
+      { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
+        options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })), hint: t("ComfyFarm checks the driver; it never installs one") },
+      { name: "group", label: t("Group"), type: "select", value: groups[0]?.name ?? "",
+        options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] }]),
     { name: "profile", label: t("Profile to run"), type: "select", value: "",
-      options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))] },
-    { name: "port", label: t("ComfyUI port"), type: "number", value: 8188 },
+      options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))],
+      hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
+    { name: "port", label: t("ComfyUI port"), type: "number", value: ui ? 8189 : 8188,
+      hint: ui ? t("not 8188 when it shares the host with the router") : "" },
     { name: "ssh_port", label: t("ssh port"), type: "number", value: 22 },
     { name: "account", label: t("Service account"), value: last?.account ?? "comfyfarm",
       hint: t("created by setup; runs ComfyUI; the router's key can only restart, query and check it") },
@@ -47,7 +58,8 @@ export async function setupWorker(refresh) {
   if (!v) return;
   const inst = v.instance.trim();
   const body = {
-    name: v.name.trim() || inst, host: v.host.trim(), instance: inst, gpu: v.gpu, group: v.group || null,
+    role: ui ? "ui" : "gpu", name: v.name.trim() || inst, host: v.host.trim(), instance: inst,
+    gpu: ui ? "none" : v.gpu, group: ui ? null : v.group || null,
     profile_id: v.profile ? Number(v.profile) : null, port: v.port || 8188, ssh_port: v.ssh_port || 22,
     account: v.account.trim(), uid: v.uid || null, router_url: v.router_url.trim(),
     paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),

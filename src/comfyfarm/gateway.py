@@ -172,29 +172,54 @@ def create_gateway(s: GatewaySettings) -> Starlette:
                   "x-comfyfarm-gateway": s.secret})
         return h
 
+    ui_found = {"url": None, "at": 0.0}
+
+    async def ui_base() -> str:
+        """The UI worker: fixed by --ui, or with --ui auto the one registered in the router (System → Workers → Set up
+        a worker), re-asked every SESSION_TTL. ComfyUI user ids belong to one UI worker: a new one clears the mapping."""
+        if s.ui_url != "auto":
+            return s.ui_url
+        now = time.monotonic()
+        if ui_found["url"] and now - ui_found["at"] < SESSION_TTL:
+            return ui_found["url"]
+        try:
+            r = await http.get(f"{s.router_url}/api/internal/ui-worker", headers={"x-comfyfarm-gateway-login": s.secret}, timeout=5)
+        except httpx.HTTPError as e:
+            if ui_found["url"]:
+                return ui_found["url"]                       # the router is down: keep the last known one
+            raise UiUnavailable(f"the router does not answer, so the UI worker is unknown ({type(e).__name__})")
+        if r.status_code != 200:
+            raise UiUnavailable("no UI worker is set up yet — System → Workers → Set up a worker → UI worker")
+        url = r.json()["url"].rstrip("/")
+        if url != ui_found["url"]:
+            s.comfy_users.clear()
+        ui_found.update(url=url, at=now)
+        return url
+
     async def comfy_user_id(ident: Identity) -> str:
         """Map the identity to a stock multi-user id on the UI worker (created once). Stock ComfyUI generates ids
         ('name_<uuid>'), so the mapping is looked up by username."""
+        ui = await ui_base()                             # first: a different UI worker clears the mapping
         if ident.user in s.comfy_users:
             return s.comfy_users[ident.user]
         async with comfy_user_lock:
             if ident.user in s.comfy_users:
                 return s.comfy_users[ident.user]
             try:
-                r = await http.get(f"{s.ui_url}/api/users")
+                r = await http.get(f"{ui}/api/users")
                 if r.status_code == 200:
                     users = r.json().get("users") or {}
                     uid = next((k for k, v in users.items() if v == ident.user), None)
                     if uid is None:
-                        r = await http.post(f"{s.ui_url}/api/users", json={"username": ident.user})
+                        r = await http.post(f"{ui}/api/users", json={"username": ident.user})
                         uid = r.json() if r.status_code == 200 else None
             except (httpx.HTTPError, ValueError, AttributeError) as e:
-                raise UiUnavailable(f"the UI worker at {s.ui_url} is unreachable or not ComfyUI ({type(e).__name__})")
+                raise UiUnavailable(f"the UI worker at {ui} is unreachable or not ComfyUI ({type(e).__name__})")
             if r.status_code == 403:
-                raise UiUnavailable(f"the UI worker at {s.ui_url} refused the gateway (403) — if it runs with "
+                raise UiUnavailable(f"the UI worker at {ui} refused the gateway (403) — if it runs with "
                                     "COMFYFARM_ALLOW, the gateway's address must be in it")
             if r.status_code != 200 or not isinstance(uid, str):
-                raise UiUnavailable(f"the UI worker at {s.ui_url} answered {r.status_code} to /api/users — "
+                raise UiUnavailable(f"the UI worker at {ui} answered {r.status_code} to /api/users — "
                                     "is it started with --multi-user?")
             s.comfy_users[ident.user] = uid
             return uid
@@ -334,7 +359,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             if kind == "output":
                 try:
                     base_headers["comfy-user"] = await comfy_user_id(ident)
-                    resp = await proxy(request, s.ui_url, base_headers, miss=404)
+                    resp = await proxy(request, await ui_base(), base_headers, miss=404)
                 except UiUnavailable as e:                    # still try the executing worker below
                     log.error("%s", e)
                     resp = None
@@ -354,11 +379,12 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             # the stock frontend shows a user picker in multi-user mode; the gateway already knows who this is
             return JSONResponse({"storage": "server", "migrated": True})
         try:
+            ui = await ui_base()
             base_headers["comfy-user"] = await comfy_user_id(ident)
         except UiUnavailable as e:
             log.error("%s", e)
             return JSONResponse({"error": str(e)}, status_code=502)
-        return await proxy(request, s.ui_url, base_headers, cache_immutable=bool(HASHED_ASSET.match(path)))
+        return await proxy(request, ui, base_headers, cache_immutable=bool(HASHED_ASSET.match(path)))
 
     async def ws_endpoint(ws: WebSocket):
         if not same_origin_ok(ws) or not plain_path(ws.url.path):
@@ -438,7 +464,8 @@ def main(argv=None):
                                              "Needs COMFYFARM_GATEWAY_SECRET (same as the router) and COMFYFARM_SESSION_KEY "
                                              "(see `comfyfarm secrets`).")
     ap.add_argument("--router", required=True, help="router URL, e.g. http://127.0.0.1:8188")
-    ap.add_argument("--ui", required=True, help="UI worker URL (a stock ComfyUI with the comfyfarm_ui extension)")
+    ap.add_argument("--ui", default="auto", help="UI worker URL (a stock ComfyUI with the comfyfarm_ui extension), or "
+                                                 "auto: the UI worker set up in the dashboard (default)")
     ap.add_argument("--provider", default="local", choices=["local", "trusted-header", "dev"])
     ap.add_argument("--trusted-proxy", action="append", default=[],
                     help="trusted-header: address of the authenticating reverse proxy (repeatable)")

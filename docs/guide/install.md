@@ -33,7 +33,7 @@ On the control-plane host inside the network:
 ```sh
 docker load < comfyfarm-images.tar.gz
 cd deploy/compose && cp env.example .env
-docker run --rm comfyfarm:latest comfyfarm secrets >> .env    # then set DB_PASSWORD and UI_WORKER_URL in .env
+docker run --rm comfyfarm:latest comfyfarm secrets >> .env    # then set DB_PASSWORD in .env
 sudo mkdir -p /srv/comfyfarm/keys /srv/comfyfarm/backups && sudo chown 10001 /srv/comfyfarm/keys /srv/comfyfarm/backups
 docker compose up -d                                          # (the router keeps its agent key and backups there)
 docker compose exec router sh -c 'echo "<password>" | comfyfarm add-user <you> --admin'
@@ -62,19 +62,19 @@ Without containers: `pip install` the package into `/opt/comfyfarm/venv`, put th
 
 ## 2. UI worker
 
-A stock ComfyUI that serves the screen and the users' files — on the control-plane host or any host that is not busy
-with GPU jobs. It needs no GPU: publish a CPU venv (rollouts.md §1) and use the same core as the workers. The published
-core is read-only, so the UI worker runs from a copy with the `comfyfarm_ui` extension added:
+A stock ComfyUI that serves the screen and the users' files. It needs no GPU and never runs a job; it usually lives on
+the control-plane host (port 8189 there, 8188 is the router). Set it up like a GPU worker (§3) — *Set up a worker →
+UI worker* — after publishing what it runs:
 
-```sh
-cp -a <ART>/core/comfyui-0.41.0 /opt/comfyfarm-ui && chmod -R u+w /opt/comfyfarm-ui
-cp -a ui_ext/comfyfarm_ui /opt/comfyfarm-ui/custom_nodes/
-<ART>/venv/cpu-a/bin/python /opt/comfyfarm-ui/main.py --cpu --multi-user --listen <ip> --port 8189 \
-    --input-directory <shared>/input --output-directory <shared>/output --user-directory <shared>/user
-```
+- a node set with the two extensions: `python3 publish.py nodes <ART> farm-ui-1 --from <dir>` where `<dir>` holds
+  `ui_ext/comfyfarm_ui` and `worker_ext/comfyfarm_worker` (the latter locks it to the farm's addresses);
+- a CPU venv (rollouts.md §1);
+- a profile: the same core as the GPU workers, the CPU venv, nodes `farm-ui-1`, flag `--cpu`, environment
+  `COMFYFARM_ALLOW=<gateway address>,<router address>` — stock `--multi-user` has no login of its own, so without the
+  allow-list anyone on the network could read every user's workflows.
 
-Run it as a service (a systemd unit with that command). The gateway's `UI_WORKER_URL` is `http://<ip>:8189`; the input,
-output and user directories must be the same shared storage the GPU workers use.
+The gateway finds the UI worker by itself (`UI_WORKER_URL=auto`, the default). As a worker row it is health-checked,
+host-checked and rolled out with the others, so its ComfyUI and frontend follow the GPU workers' version.
 
 ## 3. GPU workers
 

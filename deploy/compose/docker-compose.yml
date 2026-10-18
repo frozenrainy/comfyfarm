@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
     depends_on:
       - router
-    command: ["comfyfarm-gateway", "--router", "http://router:8188", "--ui", "${UI_WORKER_URL:?set UI_WORKER_URL in .env}",
+    command: ["comfyfarm-gateway", "--router", "http://router:8188", "--ui", "${UI_WORKER_URL:-auto}",
               "--port", "8080", "--log-dir", "/var/log/comfyfarm"]
     environment:
       COMFYFARM_GATEWAY_SECRET: ${COMFYFARM_GATEWAY_SECRET}

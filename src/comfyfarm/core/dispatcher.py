@@ -14,14 +14,14 @@ log = logging.getLogger(__name__)
 
 IDLE_WORKERS = """
 SELECT id FROM workers
- WHERE enabled AND NOT maintenance AND deleted_at IS NULL AND state = 'online'
+ WHERE enabled AND NOT maintenance AND deleted_at IS NULL AND state = 'online' AND kind = 'gpu'
    AND current_job_id IS NULL AND group_id IS NOT NULL
  ORDER BY last_ok_at NULLS LAST, id"""
 
 # Re-checked under the lock: a worker put into maintenance after the candidate list was read is skipped (D-02).
 LOCK_WORKER = """
 SELECT w.id, w.group_id, w.base_url, w.capabilities FROM workers w JOIN worker_groups g ON g.id = w.group_id
- WHERE w.id = $1 AND w.enabled AND NOT w.maintenance AND w.deleted_at IS NULL AND w.state = 'online'
+ WHERE w.id = $1 AND w.enabled AND NOT w.maintenance AND w.deleted_at IS NULL AND w.state = 'online' AND w.kind = 'gpu'
    AND w.current_job_id IS NULL AND comfyfarm_satisfies(w.capabilities, g.requirements)
  FOR UPDATE OF w SKIP LOCKED"""
 

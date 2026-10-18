@@ -42,6 +42,9 @@ class WorkerIn(BaseModel):
     name: str
     base_url: str
     group: str | None = None
+    kind: str = "gpu"                      # gpu | ui (serves the screen and the users' files; never gets a job)
+
+UI_NO_GROUP = "a UI worker belongs to no group: it serves the screen, jobs go to GPU workers"
 
 
 class WorkerPatch(BaseModel):
@@ -197,7 +200,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         out = []
         for r in rows:
             warn = []
-            if r["group_id"] is None:
+            if r["group_id"] is None and r["kind"] == "gpu":
                 warn.append("no group: receives no jobs")                          # D-03
             elif r["fits"] is False and r["capabilities"]:
                 warn.append("does not meet its group's requirements: receives no jobs")
@@ -208,7 +211,7 @@ def make_router(ctx: Ctx) -> APIRouter:
             warn += consistency.warnings(rep.get(r["group_id"], {}).get("workers", {}).get(r["id"]))
             devs = [d for d in caps.get("devices") or [] if isinstance(d, dict)]
             vram = max((d.get("vram_total") or 0 for d in devs), default=0)
-            out.append({"id": r["id"], "name": r["name"], "base_url": r["base_url"], "group": r["group_name"],
+            out.append({"id": r["id"], "name": r["name"], "kind": r["kind"], "base_url": r["base_url"], "group": r["group_name"],
                         "group_id": r["group_id"], "state": r["state"], "enabled": r["enabled"],
                         "maintenance": r["maintenance"], "note": r["note"], "warnings": warn,
                         "failing_since": iso(r["failing_since"]), "last_ok_at": iso(r["last_ok_at"]),
@@ -231,13 +234,17 @@ def make_router(ctx: Ctx) -> APIRouter:
     async def create_worker(body: WorkerIn, x_comfyfarm_user: str | None = Header(default=None)):
         ctx.admin(x_comfyfarm_user)
         url = check_url(body.base_url)
+        if body.kind not in ("gpu", "ui"):
+            raise HTTPException(400, "kind: gpu or ui")
         async with db.conn() as c:
             gid = await group_id_of(c, body.group)
             try:
-                wid = await c.fetchval("INSERT INTO workers(name, base_url, group_id) VALUES ($1, $2, $3) RETURNING id",
-                                       body.name.strip(), url, gid)
+                wid = await c.fetchval("INSERT INTO workers(name, base_url, group_id, kind) VALUES ($1, $2, $3, $4) RETURNING id",
+                                       body.name.strip(), url, gid, body.kind)
             except asyncpg.UniqueViolationError:
                 raise HTTPException(409, "a worker with this name or URL exists")
+            except asyncpg.CheckViolationError:
+                raise HTTPException(400, UI_NO_GROUP)
         return {"id": wid}
 
     @api.patch("/api/admin/workers/{worker_id}")
@@ -277,6 +284,8 @@ def make_router(ctx: Ctx) -> APIRouter:
                                             "RETURNING name", *args)
                 except asyncpg.UniqueViolationError:
                     raise HTTPException(409, "a worker with this name or URL exists")
+                except asyncpg.CheckViolationError:
+                    raise HTTPException(400, UI_NO_GROUP)
                 if done is not None:
                     await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ($1, 'worker changed', $2, $3)",
                                     who, done, {k: v for k, v in body.model_dump().items() if v is not None})
