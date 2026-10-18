@@ -176,14 +176,15 @@ class Check:
         art = self.env.get("COMFY_LAUNCH_ARTIFACTS", "")
         probe = ("import importlib.util, sys; v = '%d.%d.%d' % sys.version_info[:3]\n"
                  "if importlib.util.find_spec('torch'):\n import torch; v += ' · torch ' + torch.__version__\n"
-                 "print(v)")
+                 "print('comfyfarm-venv:', v)")                       # marked: GPU runtimes print noise of their own
         for ready in sorted(glob.glob(os.path.join(art, "venv", "*", "READY"))) if art else []:
             v = os.path.dirname(ready)
             name = os.path.basename(v)
             py = os.path.join(v, "bin", "python")
             code, out = self.cmd([py, "-c", probe], timeout=300)
-            if code == 0:
-                self.add(OK, f"venv {name}", f"Python {out.strip().splitlines()[-1]} runs here")
+            mark = re.search(r"comfyfarm-venv: (.+)", out)
+            if code == 0 and mark:
+                self.add(OK, f"venv {name}", f"Python {mark.group(1).strip()} runs here")
                 continue
             lib = re.search(r"(lib[\w.+-]+\.so[.\d]*): cannot open shared object file", out)
             if lib:

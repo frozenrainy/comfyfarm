@@ -153,6 +153,7 @@ def test_a_venv_missing_a_system_library_names_the_package(tmp_path, router):
     out = hostcheck.Check(env, {"gpu": "amd", "paths": paths}, root=root, cmd=fake_cmd({v: err}), user="comfyfarm").run()
     r = next(x for x in out if x["name"] == "venv rocm-x")
     assert r["level"] == "FAIL" and "libatomic.so.1" in r["detail"] and "libatomic1" in r["detail"]
-    ok = fake_cmd({v: (0, "3.12.15 · torch 2.14.1+rocm7.2")})
+    ok = fake_cmd({v: (0, "comfyfarm-venv: 3.12.15 · torch 2.14.1+rocm7.2\n(null): No such file or directory")})
     out = hostcheck.Check(env, {"gpu": "amd", "paths": paths}, root=root, cmd=ok, user="comfyfarm").run()
-    assert next(x for x in out if x["name"] == "venv rocm-x")["level"] == "OK"
+    r = next(x for x in out if x["name"] == "venv rocm-x")
+    assert r["level"] == "OK" and "torch 2.14.1+rocm7.2" in r["detail"] and "(null)" not in r["detail"]
