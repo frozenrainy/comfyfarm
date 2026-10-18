@@ -70,3 +70,27 @@ async def test_router_flags_the_odd_worker_and_clears_after_refresh(dsn, fakes):
                 await asyncio.sleep(0.2)
             assert not any("differs" in x for x in ws["odd"]), ws["odd"]
             assert (await c.get("/api/health/dispatch")).json()["groups"][str(gid)]["inconsistent_workers"] == 0
+
+
+async def test_an_unanswered_inventory_is_not_asked_again_every_tick(dsn, fakes):
+    """/object_info is multi-MB and read serially with a 90 s timeout: a worker whose inventory fails must not be
+    re-polled every health tick — the attempt counts like an answer for inventory_period."""
+    from comfyfarm.app import Router
+    r = Router(fast_settings(dsn))
+    await r.start(loops=False)
+    try:
+        w = await fakes()
+        w.fake.object_info_ok = False                                 # a broken upgrade: /object_info answers 500
+        await add_worker(r, w.url)
+        calls = []
+        real = r.adapter.inventory
+
+        async def inventory(base_url):
+            calls.append(base_url)
+            return await real(base_url)
+        r.adapter.inventory = inventory
+        for _ in range(4):
+            await r.health.tick()
+        assert len(calls) == 1, calls
+    finally:
+        await r.stop()
