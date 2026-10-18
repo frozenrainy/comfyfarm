@@ -13,6 +13,7 @@ Platform: posix (contract §9.2: a render for another platform is refused).
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -65,7 +66,9 @@ OPTIONS: dict[str, tuple[object, bool]] = {
     "--enable-compress-response-body": (0, False), "--enable-assets": (0, False), "--disable-assets": (0, False),
     "--enable-asset-hashing": (0, False), "--feature-flag": (1, False),
 }
-# Environment keys a render may set (exact names or prefixes). Not PATH, PYTHONPATH, LD_*: those run other code.
+# Environment keys a render may set (exact names or prefixes). Not PATH, PYTHONPATH, LD_*: those run other code. The
+# prefixes also cover variables that name plugin libraries, tool binaries or compiled-kernel caches (HSA_TOOLS_LIB,
+# TRITON_PTXAS_PATH, MIOPEN_CUSTOM_CACHE_DIR, ...), so values are checked too (env_problem): no paths.
 ENV_PREFIXES = ("PYTORCH_", "TORCH_", "CUDA_", "HIP_", "HSA_", "ROCM_", "MIOPEN_", "AMD_", "TRITON_", "NCCL_",
                 "COMFYFARM_")        # the worker extension's own settings (COMFYFARM_ALLOW)
 ENV_KEYS = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "TOKENIZERS_PARALLELISM", "TZ"}
@@ -88,6 +91,34 @@ class Refused(Exception):
 
 def env_key_ok(key: str) -> bool:
     return key in ENV_KEYS or key.startswith(ENV_PREFIXES)
+
+
+TZ_NAME = re.compile(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$")       # IANA zone name (Asia/Seoul), not a file
+
+
+def env_problem(key: str, value) -> str | None:
+    """Why the render must not set `key=value`, or None. A value must not name a file or directory: no '/' or '\\',
+    and no part (split at whitespace , : ; =) starting with '~' or '.'. A bare word can only name something in the
+    working directory (the core copy) or be looked up in the system's own search paths, never where users write or
+    anywhere outside the artifacts. Two keys need a '/' and get a typed check instead: COMFYFARM_ALLOW (addresses and
+    CIDR blocks) and TZ (a zone name; other TZ values follow the general rule)."""
+    if not env_key_ok(key):
+        return f"environment key not allowed: {key!r}"
+    if not isinstance(value, str) or any(ord(ch) < 32 for ch in value):
+        return f"environment value of {key} must be one line of text"
+    if key == "COMFYFARM_ALLOW":
+        for item in value.replace(";", ",").split(","):
+            try:
+                if item.strip():
+                    ipaddress.ip_network(item.strip(), strict=False)
+            except ValueError:
+                return f"COMFYFARM_ALLOW: {item.strip()!r} is not an address or CIDR block"
+        return None
+    if key == "TZ" and TZ_NAME.match(value):
+        return None
+    if "/" in value or "\\" in value or any(t.startswith(("~", ".")) for t in re.split(r"[\s,:;=]+", value)):
+        return f"environment value of {key} names a path: {value!r}"
+    return None
 
 
 def _norm(path: str) -> str:
@@ -156,8 +187,8 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
     if not isinstance(env, dict):
         raise Refused("env must be an object")
     for k, v in env.items():
-        if not env_key_ok(k) or not isinstance(v, str) or "\0" in v:
-            raise Refused(f"environment key not allowed: {k!r}")
+        if why := env_problem(k, v):
+            raise Refused(why)
 
     synced: dict[str, list[str]] = {"core": [], "nodes": [], "frontend": []}
     for e in render.get("sync", []):

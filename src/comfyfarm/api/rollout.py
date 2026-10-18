@@ -90,8 +90,8 @@ def check_profile(p: dict) -> dict:
         raise HTTPException(400, f"set by the instance, not the profile: {bad}")
     if bad := [f for f in p.get("flags") or [] if f.startswith("--") and f not in launcher.OPTIONS]:
         raise HTTPException(400, f"options the launcher refuses: {bad}")
-    if bad := [k for k in (p.get("env") or {}) if not launcher.env_key_ok(k)]:
-        raise HTTPException(400, f"environment keys the launcher refuses: {bad}")
+    if bad := [why for k, v in (p.get("env") or {}).items() if (why := launcher.env_problem(k, v))]:
+        raise HTTPException(400, f"environment the launcher refuses: {'; '.join(bad)}")
     return p
 
 

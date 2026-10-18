@@ -244,3 +244,31 @@ def test_user_writable_dirs_stay_out_of_code(tmp_path):
     check_instance(InstanceIn(**{**win, "port": 8188}))
     with pytest.raises(HTTPException, match="overlaps"):
         check_instance(InstanceIn(**{**win, "paths": {**win["paths"], "input": "c:\\FARM\\local\\nodes\\x"}, "port": 8188}))
+
+
+def test_env_values_that_name_paths_are_refused(tmp_path):
+    """QA-2: the prefixes (TORCH_, TRITON_, HSA_, ...) also cover variables that load plugin libraries, tool binaries or
+    compiled kernels. Values that are paths are refused; what real profiles need still passes."""
+    from fastapi import HTTPException
+    from comfyfarm.api.rollout import check_profile
+    profile, inst = make_world(tmp_path)
+    needed = {"HSA_OVERRIDE_GFX_VERSION": "12.0.1", "HSA_TOOLS_DISABLE_REGISTER": "1", "HIP_VISIBLE_DEVICES": "0",
+              "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True,garbage_collection_threshold:0.6",
+              "CUDA_VISIBLE_DEVICES": "0,1", "MIOPEN_FIND_MODE": "FAST", "TORCH_CUDA_ARCH_LIST": "8.6;12.0+PTX",
+              "COMFYFARM_ALLOW": "10.0.0.1,10.0.0.2,10.0.1.0/24", "TZ": "Asia/Seoul", "OMP_NUM_THREADS": "8"}
+    good = dict(profile, env=needed)
+    validate(rd.build(good, inst), inst)                                     # positive control
+    rd.check(good, inst)
+    p = inst["paths"]
+    for k, v in [("HSA_TOOLS_LIB", f"{p['input']}/evil.so"), ("TRITON_PTXAS_PATH", "/tmp/ptxas"),
+                 ("MIOPEN_CUSTOM_CACHE_DIR", p["input"]), ("TRITON_CACHE_DIR", "../../run"), ("TORCH_EXTENSIONS_DIR", "~/ext"),
+                 ("NCCL_NET_PLUGIN", "x:./libevil.so"), ("ROCM_PATH", "C:\\rocm"), ("TZ", "/data/run/in/zone"),
+                 ("COMFYFARM_ALLOW", "10.0.0.1,/etc/x"), ("HIP_VISIBLE_DEVICES", "0\n1")]:
+        r = rd.build(dict(profile, env={k: v}), inst)
+        with pytest.raises(launcher.Refused, match=k):
+            validate(r, inst)
+        with pytest.raises(rd.BadProfile):
+            rd.check(dict(profile, env={k: v}), inst)
+        assert launcher.env_problem(k, v) and "\n" not in launcher.env_problem(k, v)
+        with pytest.raises(HTTPException, match="environment"):
+            check_profile(dict(profile, env={k: v}))
