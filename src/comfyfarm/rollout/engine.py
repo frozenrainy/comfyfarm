@@ -156,11 +156,13 @@ class Engine:
                     left = await c.fetchval("SELECT count(*) FROM rollout_steps WHERE rollout_id = $1 AND status = 'pending'", rid)
                 if stopping or not left:
                     break
+                await asyncio.sleep(1.0)              # nothing running, the next step waits for REFILL_DELAY
+                continue
             done, _ = await asyncio.wait(active, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
             for t in done:
                 active.pop(t)
                 ok = t.result() if not t.cancelled() and t.exception() is None else False
-                if t.exception() is not None:
+                if not t.cancelled() and t.exception() is not None:
                     log.error("rollout step crashed: %r", t.exception())
                 failed |= ok is False
                 last_return = time.monotonic()
@@ -269,7 +271,8 @@ class Engine:
                     if not w["maintenance"]:
                         await c.execute("UPDATE workers SET maintenance = true WHERE id = $1", w["id"])
                         await audit(c, actor, "maintenance on", w["name"])
-            await self.set_step(sid, "draining", "waiting for the running job")
+            if not changed:                # a resumed step keeps its status: an abort must not treat it as draining
+                await self.set_step(sid, "draining", "waiting for the running job")
             await asyncio.sleep(self.s.dispatch_period + 1.0)          # a claim in flight must land before we look
             while True:
                 await self.drain(w, opts, aborting)
@@ -277,7 +280,8 @@ class Engine:
                     # once more, right before the restart (an abort while queued on the lock counts too); a job that
                     # slipped in sends the step back to draining without holding the lock
                     if not await self.drain(w, opts, aborting, quick=True):
-                        await self.set_step(sid, "draining", "a job arrived right before the restart; waiting again")
+                        await self.set_step(sid, step["status"] if changed else "draining",
+                                            "a job arrived right before the restart; waiting again")
                         continue
                     target = rd.build(to, inst)
                     if await self.argv(w["base_url"]) == target["argv"][1:] and inst["profile_id"] == to["id"]:
