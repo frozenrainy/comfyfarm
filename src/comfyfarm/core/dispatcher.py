@@ -69,6 +69,7 @@ class Dispatcher:
         """Claim as many pairs as possible and POST them concurrently. Returns the number of claims."""
         async with self.db.conn() as c:
             candidates = [r["id"] for r in await c.fetch(IDLE_WORKERS)]
+            await self.prune_secrets(c)
         claimed = 0
         for wid in candidates:
             if not self.ready(wid):
@@ -83,6 +84,18 @@ class Dispatcher:
             self.inflight.add(t)
             t.add_done_callback(self.inflight.discard)
         return claimed
+
+    async def prune_secrets(self, c):
+        """Credentials (D-29) are kept until a worker has the job — through re-queues (unreachable, absent) — and
+        dropped once it has it or the job ended any other way (cancelled before dispatch, failed, deleted)."""
+        ids = list(self.secrets)
+        if not ids:
+            return
+        keep = {r["id"] for r in await c.fetch("SELECT id FROM jobs WHERE id = ANY($1) AND deleted_at IS NULL "
+                                               "AND status IN ('pending','paused','dispatching')", ids)}
+        for jid in ids:                       # only the ids asked about: a submit may have added one meanwhile
+            if jid not in keep:
+                self.secrets.pop(jid, None)
 
     async def claim(self, worker_id: int):
         async with self.db.conn() as c:
@@ -109,7 +122,7 @@ class Dispatcher:
     async def _deliver(self, job_id: int, prompt_id: str, worker: dict, prompt: dict, extra: dict):
         if self.s.preview_method and "preview_method" not in extra:
             extra["preview_method"] = self.s.preview_method                     # P16
-        extra.update(self.secrets.pop(job_id, {}))                              # D-29: never stored, only forwarded
+        extra.update(self.secrets.get(job_id, {}))      # D-29: never stored, only forwarded; kept until accepted
         out = await self.adapter.submit(worker["base_url"], prompt_id, prompt, extra,
                                         worker_client_id(self.s.instance, worker["id"]))
         orphan = cancel = False
@@ -126,11 +139,13 @@ class Dispatcher:
                     out = None
                 match out:
                     case Accepted():
+                        self.secrets.pop(job_id, None)
                         if not await transition(c, job_id, "running", ("dispatching",), "accepted", dispatch_ended_at="now()"):
                             await c.execute("UPDATE jobs SET dispatch_ended_at = now() WHERE id = $1", job_id)
                             # cancelled while the POST was in flight: the worker only knows the job now
                             cancel = row["status"] == "cancelling"
                     case Rejected():
+                        self.secrets.pop(job_id, None)
                         await transition(c, job_id, "failed", ("dispatching", "cancelling"), f"rejected {out.status}",
                                          dispatch_ended_at="now()",
                                          error=error_doc("rejected", out.error.get("message", "workflow rejected"),
@@ -141,6 +156,7 @@ class Dispatcher:
                                         "failure_kind = 'dead' WHERE id = $1", worker["id"])
                         attempt = await c.fetchval("UPDATE jobs SET attempt = attempt + 1 WHERE id = $1 RETURNING attempt", job_id)
                         if attempt >= self.s.max_connect_attempts:
+                            self.secrets.pop(job_id, None)
                             await transition(c, job_id, "failed", ("dispatching",), "unreachable", dispatch_ended_at="now()",
                                              error=error_doc("unreachable", out.reason, attempts=attempt))
                         else:

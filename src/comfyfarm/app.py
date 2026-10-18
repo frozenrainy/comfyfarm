@@ -90,8 +90,8 @@ class NoCacheStatic(StaticFiles):
         return r
 
 
-# Credentials the stock frontend puts into extra_data (Comfy.org API nodes). Kept in memory until dispatch, never
-# written to the ledger (D-29). A router restart before dispatch drops them: those API nodes then fail visibly.
+# Credentials the stock frontend puts into extra_data (Comfy.org API nodes). Kept in memory until a worker accepted the
+# job (Dispatcher.prune_secrets), never written to the ledger (D-29). A router restart before dispatch drops them: those API nodes then fail visibly.
 SECRET_EXTRA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
 
 

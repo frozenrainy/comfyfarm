@@ -403,3 +403,34 @@ async def test_post_has_an_overall_deadline(router_factory, monkeypatch):
         assert isinstance(out, comfy.Ambiguous), out
     finally:
         await runner.cleanup()
+
+
+async def test_credentials_survive_a_requeue(router_factory, fakes):
+    """D-29 credentials are forwarded in the POST that the worker accepts — not lost when the first attempt never
+    reached its worker and the job went back to pending — and forgotten once a worker has the job."""
+    r = await quiet(router_factory)
+    b = await fakes()
+    _, wa = await add_worker(r, "http://127.0.0.1:9", name="dead")
+    _, wb = await add_worker(r, b.url, name="b")
+    await set_worker(r, wa, state="online")
+    await set_worker(r, wb, state="online", maintenance=True)
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    r.dispatcher.secrets[job["id"]] = {"auth_token_comfy_org": "SECRET"}
+    assert await r.dispatcher.tick() == 1
+    await drain(r)
+    assert (await job_row(r, job["id"]))["status"] == "pending"           # Unreachable: back to the queue
+    await set_worker(r, wb, maintenance=False)
+    await set_worker(r, wa, maintenance=True)
+    assert await r.dispatcher.tick() == 1
+    await drain(r)
+    assert b.fake.post_extra[-1].get("auth_token_comfy_org") == "SECRET"
+    assert job["id"] not in r.dispatcher.secrets
+
+
+async def test_credentials_of_a_job_cancelled_before_dispatch_are_dropped(router_factory):
+    r = await quiet(router_factory)
+    job, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
+    r.dispatcher.secrets[job["id"]] = {"api_key_comfy_org": "SECRET"}
+    assert await jobsvc.request_cancel(r.db, r.adapter, job["id"]) == "cancelled"
+    await r.dispatcher.tick()
+    assert r.dispatcher.secrets == {}
