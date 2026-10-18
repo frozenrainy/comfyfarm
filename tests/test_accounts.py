@@ -139,7 +139,7 @@ async def test_groups_and_workers_admin(farm):
 async def test_prefs_and_password(farm):
     r, c = farm
     await user(c, "erin")
-    assert (await c.get("/api/farm/me", headers=H("erin"))).json()["prefs"] == {"theme": "light"}
+    assert (await c.get("/api/farm/me", headers=H("erin"))).json()["prefs"] == {"theme": "light", "lang": "auto"}
     assert (await c.put("/api/farm/me/prefs", json={"theme": "neon"}, headers=H("erin"))).status_code == 400
     await ok(await c.put("/api/farm/me/prefs", json={"theme": "dark"}, headers=H("erin")))
     assert (await c.get("/api/farm/me", headers=H("erin"))).json()["prefs"]["theme"] == "dark"
