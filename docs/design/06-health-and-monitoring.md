@@ -70,8 +70,8 @@ Rules learned the hard way:
 
 ## Logs
 
-- Implemented (`comfyfarm serve --log-dir`): stdout for the service manager, plus `comfyfarm.log` rotated by size
-  (20 MB × 5) and a separate `error.log` holding real failures only — a level split is a stronger filter than regular
+- Implemented (`comfyfarm serve --log-dir`): stdout for the service manager, plus `router.log` rotated by size
+  (20 MB × 5) and a separate `router-error.log` holding real failures only — a level split is a stronger filter than regular
   expressions in the monitoring system.
 - Implemented: every exception log line includes the exception **type** (`httpx` exceptions often have an empty
   `str()`); a drain that keeps waiting logs a heartbeat line every 4 minutes so external log-based suppression windows

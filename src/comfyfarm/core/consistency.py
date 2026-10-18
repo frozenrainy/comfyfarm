@@ -38,7 +38,10 @@ def report(workers: list[dict]) -> dict:
         eligible = [(w, inv) for w, inv in members if not w["maintenance"]] or members
         counts = Counter((inv["nodes_hash"], inv["models_hash"]) for _, inv in eligible)
         best = max(counts.values())
-        ref_key = min(k for k, v in counts.items() if v == best)
+        # a tie goes to the inventory of the lowest worker id (stable when hashes change, unlike the smallest hash)
+        ref_key = min(((inv["nodes_hash"], inv["models_hash"]) for w, inv in eligible
+                       if counts[(inv["nodes_hash"], inv["models_hash"])] == best), key=lambda k: min(
+            w["id"] for w, inv in eligible if (inv["nodes_hash"], inv["models_hash"]) == k))
         ref_w, ref_inv = min(((w, inv) for w, inv in eligible if (inv["nodes_hash"], inv["models_hash"]) == ref_key),
                              key=lambda x: x[0]["id"])
         entry = {"reference": ref_w["id"], "inconsistent": 0, "workers": {}}

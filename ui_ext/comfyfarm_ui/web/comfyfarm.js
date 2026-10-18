@@ -23,7 +23,8 @@ const origFetchApi = api.fetchApi.bind(api);
 
 api.fetchApi = async function (route, options = {}) {
   const g = storedGroup();
-  options.headers = { ...(options.headers || {}), ...(g ? { "X-ComfyFarm-Group": g.name } : {}) };
+  // the id, not the name: header values must be Latin-1, and a group may be called "렌더팀"
+  options.headers = { ...(options.headers || {}), ...(g ? { "X-ComfyFarm-Group": String(g.id) } : {}) };
   const isSubmit = (route === "/prompt" || route === "/api/prompt") && (options.method || "GET").toUpperCase() === "POST";
   if (!isSubmit) return origFetchApi(route, options);
 

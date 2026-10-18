@@ -14,6 +14,7 @@ from ..identity import hash_password
 from .account import password_problem
 from .context import Ctx
 
+ADMIN_SET_LOCK = 0x636F6D6661   # advisory lock: changes to who is an active admin ("comfa")
 USERNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
 # Site settings: key → (type, default, description). Unknown keys are refused.
 SETTINGS = {
@@ -302,6 +303,9 @@ def make_router(ctx: Ctx) -> APIRouter:
         await c.executemany("INSERT INTO user_groups(username, group_id) VALUES ($1, $2)", [(username, g) for g in sorted(known)])
 
     async def other_active_admins(c, username: str) -> int:
+        """Counted under a transaction lock: two admins demoting each other at once would otherwise both see the
+        other one still active and leave the farm with none."""
+        await c.execute("SELECT pg_advisory_xact_lock($1)", ADMIN_SET_LOCK)
         return await c.fetchval("SELECT count(*) FROM users WHERE 'admin' = ANY(roles) AND disabled_at IS NULL "
                                 "AND username <> $1", username)
 
@@ -354,7 +358,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 if body.groups is not None:
                     await set_groups(c, username, body.groups)
                 if bump:                                   # every session of the account ends (D-35)
-                    await c.execute("UPDATE users SET session_epoch = session_epoch + 1 WHERE username = $1", username)
+                    await c.execute("UPDATE users SET session_epoch = next_session_epoch(session_epoch) WHERE username = $1", username)
                 if body.admin is not None or body.groups is not None:
                     await access.restamp(c, username)      # queued jobs follow the new permissions now (D-34)
         router.dispatcher.wake.set()

@@ -34,6 +34,8 @@ def test_report_picks_the_majority_and_names_the_differences():
     # a tie between two workers: the lowest id is the reference, the other differs (no majority = still a finding)
     rep2 = consistency.report([w(1, 1, ["A"], {}), w(2, 1, ["B"], {})])
     assert rep2[1]["reference"] == 1 and rep2[1]["inconsistent"] == 1
+    rep3 = consistency.report([w(1, 1, ["B"], {}), w(2, 1, ["A"], {})])          # whichever hash sorts first
+    assert rep3[1]["reference"] == 1 and rep3[1]["workers"][1]["consistent"]
 
 
 async def test_router_flags_the_odd_worker_and_clears_after_refresh(dsn, fakes):

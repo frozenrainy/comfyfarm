@@ -55,7 +55,12 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
         ver = await conn.fetchval("SHOW server_version")
         server_major = int(await conn.fetchval("SHOW server_version_num")) // 10000
         ro = await conn.fetchval("SELECT pg_is_in_recovery()")
-        migs = await conn.fetchval("SELECT count(*) FROM schema_migrations")
+        try:
+            migs = await conn.fetchval("SELECT count(*) FROM schema_migrations")
+        except asyncpg.UndefinedTableError:
+            out.append((FAIL, "ledger", f"Postgres {ver}, but the ledger is empty — start the router once "
+                                        "(`comfyfarm serve`), it creates the tables"))
+            return out
         out.append((FAIL if ro else OK, "ledger", f"Postgres {ver}, {migs} migrations applied"
                     + (", READ-ONLY (standby?) — the router cannot work" if ro else "")))
         size = await conn.fetchval("SELECT pg_size_pretty(pg_database_size(current_database()))")

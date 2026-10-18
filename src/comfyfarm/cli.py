@@ -1,7 +1,8 @@
 """comfyfarm command line.
 
   comfyfarm serve [--host 0.0.0.0] [--port 8188] [--log-dir DIR]     run the router
-  comfyfarm add-user <name> [--admin] [--group NAME ...]              create/update a local account (password on stdin)
+  comfyfarm add-user <name> [--admin|--no-admin] [--group NAME ...]   create/update a local account (password on stdin;
+                                                                       an existing account keeps its role unless told)
   comfyfarm backup <dir> [--user-dir PATH] [--pg-bin DIR]              ledger dump + user data + artifact list
   comfyfarm restore <backup-dir> --yes [--user-dir PATH] [--pg-bin DIR]
   comfyfarm doctor [--ui URL]                                          health of ledger, workers, groups, storage, disk
@@ -22,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .core import access
@@ -45,7 +47,14 @@ def settings_from_env(env=None) -> Settings:
     return Settings(**kw)
 
 
-async def add_user(dsn: str, name: str, password: str, admin: bool, groups: list[str] = ()):
+async def add_user(dsn: str, name: str, password: str, admin: bool | None, groups: list[str] = ()):
+    """admin None keeps an existing account's role (a password reset must not quietly demote the last admin)."""
+    from .api.account import password_problem
+    from .api.admin import USERNAME
+    if not USERNAME.match(name):
+        raise SystemExit("user name: letters, digits and . _ @ - (max 64), starting with a letter or digit")
+    if problem := password_problem(password):
+        raise SystemExit(f"password: {problem}")
     db = Database(dsn, min_size=1, max_size=2)
     await db.start()
     try:
@@ -56,8 +65,11 @@ async def add_user(dsn: str, name: str, password: str, admin: bool, groups: list
                     raise SystemExit(f"unknown group(s): {[g for g, i in zip(groups, ids) if i is None]}")
                 await c.execute("INSERT INTO users(username, password_hash, roles) VALUES ($1, $2, $3) "
                                 "ON CONFLICT (username) DO UPDATE SET password_hash = excluded.password_hash, "
-                                "roles = excluded.roles, session_epoch = users.session_epoch + 1",
-                                name, hash_password(password), ["admin"] if admin else [])
+                                "roles = CASE WHEN $4::bool IS NULL THEN users.roles WHEN $4 THEN "
+                                "array(SELECT DISTINCT unnest(users.roles || '{admin}'::text[])) "
+                                "ELSE array_remove(users.roles, 'admin') END, "
+                                "session_epoch = next_session_epoch(users.session_epoch)",
+                                name, hash_password(password), ["admin"] if admin else [], admin)
                 await c.executemany("INSERT INTO user_groups(username, group_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                                     [(name, i) for i in ids])
                 await access.restamp(c, name)
@@ -126,23 +138,71 @@ def backup(dsn: str, out_dir: str, user_dir: str | None, artifacts_dir: str | No
     return dest
 
 
+PARKED = "comfyfarm_before_restore"
+
+
+def _sql(dsn: str, *statements: str) -> None:
+    """One transaction; run on its own thread so callers inside an event loop can use it too."""
+    import asyncpg
+    from concurrent.futures import ThreadPoolExecutor
+
+    async def go():
+        c = await asyncpg.connect(dsn)
+        try:
+            async with c.transaction():
+                for q in statements:
+                    await c.execute(q)
+        finally:
+            await c.close()
+    with ThreadPoolExecutor(1) as ex:
+        ex.submit(asyncio.run, go()).result()
+
+
 def restore(dsn: str, backup_dir: str, user_dir: str | None, pg_bin: str | None) -> None:
+    """The ledger is restored into an empty schema, not over the live one: `pg_restore --clean` drops only what the
+    dump holds, so tables of migrations newer than the backup would survive and the router could not start (or the
+    drop would fail on their foreign keys). The live schema is parked until the restore succeeded and put back if it
+    did not; the router applies the newer migrations to the restored ledger when it starts."""
     dump = os.path.join(backup_dir, "ledger.dump")
     if not os.path.isfile(dump):
         sys.exit(f"{backup_dir} holds no ledger.dump")
-    # --clean --if-exists: the live tables are dropped and recreated from the dump; stop the router first.
-    # --single-transaction: a restore that fails leaves the live ledger as it was
-    pg_run(pg_tool("pg_restore", pg_bin), ["--clean", "--if-exists", "--no-owner", "--no-privileges", "--single-transaction",
-                                           dump], dsn)
     tar = os.path.join(backup_dir, "userdata.tar.gz")
-    if user_dir and os.path.isfile(tar):
+    if user_dir and not os.path.isfile(tar):
+        sys.exit(f"{backup_dir} holds no userdata.tar.gz — leave out --user-dir to restore the ledger only")
+    try:
+        _sql(dsn, f"ALTER SCHEMA public RENAME TO {PARKED}", "CREATE SCHEMA public")
+    except Exception as e:                          # e.g. a parked schema left by an interrupted restore
+        sys.exit(f"cannot set the live ledger aside ({type(e).__name__}: {e}) — if a schema {PARKED} exists, an earlier "
+                 f"restore was interrupted: inspect it, then drop it or rename it back to public")
+    try:
+        pg_run(pg_tool("pg_restore", pg_bin), ["--no-owner", "--no-privileges", "--single-transaction", dump], dsn)
+    except SystemExit:
+        _sql(dsn, "DROP SCHEMA public CASCADE", f"ALTER SCHEMA {PARKED} RENAME TO public")
+        raise
+    _sql(dsn, f"DROP SCHEMA {PARKED} CASCADE")
+    if user_dir:
+        restore_user_dir(tar, user_dir)
+
+
+def restore_user_dir(tar: str, user_dir: str) -> None:
+    """Unpacked next to the target under a fresh name, then swapped in: the directory ends up exactly as in the
+    backup (not merged with what is there now), nothing else in the parent is touched, and the current content is
+    kept as <user_dir>.before-restore-<time> until someone deletes it."""
+    user_dir = os.path.abspath(user_dir.rstrip("/"))
+    parent = os.path.dirname(user_dir)
+    stage = tempfile.mkdtemp(prefix=".comfyfarm-restore-", dir=parent)
+    try:
         with tarfile.open(tar) as t:
-            t.extractall(os.path.dirname(user_dir.rstrip("/")) or ".", filter="data")
-        extracted = os.path.join(os.path.dirname(user_dir.rstrip("/")) or ".", "user")
-        if os.path.abspath(extracted) != os.path.abspath(user_dir):
-            if os.path.exists(user_dir):
-                shutil.rmtree(user_dir)
-            os.rename(extracted, user_dir)
+            t.extractall(stage, filter="data")
+        src = os.path.join(stage, "user")
+        if not os.path.isdir(src):
+            sys.exit(f"{tar} holds no user/ directory")
+        if os.path.exists(user_dir):
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            os.rename(user_dir, f"{user_dir}.before-restore-{stamp}")
+        os.rename(src, user_dir)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
 
 
 # ---- entry point --------------------------------------------------------------------------------------------------------
@@ -152,11 +212,13 @@ def main(argv=None):
     s = sub.add_parser("serve", help="run the router")
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8188)
-    s.add_argument("--log-dir", help="also write comfyfarm.log (rotated) and error.log here")
+    s.add_argument("--log-dir", help="also write router.log (rotated) and router-error.log here")
     s.add_argument("--log-level", default="INFO")
     a = sub.add_parser("add-user", help="create or update a local account (password read from stdin)")
     a.add_argument("name")
-    a.add_argument("--admin", action="store_true")
+    adm = a.add_mutually_exclusive_group()
+    adm.add_argument("--admin", action="store_true", default=None, help="make the account an administrator")
+    adm.add_argument("--no-admin", dest="admin", action="store_false", help="remove the administrator role")
     a.add_argument("--group", action="append", default=[], help="worker group the user may use (repeatable)")
     b = sub.add_parser("backup", help="ledger dump + user data + artifact list into <dir>/comfyfarm-backup-<time>/")
     b.add_argument("dir")
@@ -180,10 +242,13 @@ def main(argv=None):
         return
     if args.cmd == "serve":
         import uvicorn
+        if os.environ.get("COMFYFARM_DEV_IDENTITY") and args.host not in ("127.0.0.1", "::1", "localhost"):
+            sys.exit("COMFYFARM_DEV_IDENTITY makes every request that user: it is for a laptop, --host 127.0.0.1 only")
         from .app import create_app
         from .logs import setup
         setup(args.log_dir, args.log_level)
-        uvicorn.run(create_app(settings_from_env()), host=args.host, port=args.port, log_config=None)
+        # proxy_headers=False: the peer address stays the connection's own (X-Forwarded-For is client-written)
+        uvicorn.run(create_app(settings_from_env()), host=args.host, port=args.port, log_config=None, proxy_headers=False)
         return
     st = settings_from_env()
     if args.cmd == "add-user":

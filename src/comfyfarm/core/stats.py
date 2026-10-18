@@ -65,14 +65,14 @@ def _finish(b: dict) -> dict:
 async def compute(c, since: dt.datetime, until: dt.datetime, zone: ZoneInfo, *, owner: str | None = None,
                   groups: list[int] | None = None) -> dict:
     rows = await c.fetch(
-        "SELECT j.status, j.owner, j.worker_id, coalesce(w.group_id, j.group_id) AS gid, j.finished_at, "
+        "SELECT j.status, j.owner, j.worker_id, coalesce(j.ran_group_id, j.group_id) AS gid, j.finished_at, "
         "extract(epoch FROM j.finished_at - j.started_at) AS run, "
         "extract(epoch FROM j.finished_at - coalesce(j.dispatched_at, j.started_at)) AS occupied, "
         "extract(epoch FROM coalesce(j.dispatched_at, j.started_at) - j.created_at) AS wait "
-        "FROM jobs j LEFT JOIN workers w ON w.id = j.worker_id "
+        "FROM jobs j "
         "WHERE j.status IN ('completed','failed','cancelled') AND j.finished_at >= $1 AND j.finished_at < $2 "
         "AND ($3::text IS NULL OR j.owner = $3) "
-        "AND ($4::bigint[] IS NULL OR coalesce(w.group_id, j.group_id) = ANY($4))", since, until, owner, groups)
+        "AND ($4::bigint[] IS NULL OR coalesce(j.ran_group_id, j.group_id) = ANY($4))", since, until, owner, groups)
     total, by_group, by_user, by_worker, daily = _bucket(), {}, {}, {}, {}
     day = since.astimezone(zone).date()
     last = (until - dt.timedelta(microseconds=1)).astimezone(zone).date()

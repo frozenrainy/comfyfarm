@@ -80,7 +80,7 @@ async def farm(dsn, fakes):
     worker = await fakes(ws_fix=True)
     await add_worker(router_app.state.router, worker.url)
     await add_user(dsn, "alice", "pw-alice", admin=False, groups=["g1"])
-    await add_user(dsn, "root", "pw-root", admin=True)
+    await add_user(dsn, "root", "pw-root-1", admin=True)
     yield {"router": router_app.state.router, "router_url": f"http://127.0.0.1:{router_port}",
            "gw": f"http://127.0.0.1:{gw_port}", "ws": f"ws://127.0.0.1:{gw_port}/ws", "ui": ui, "worker": worker,
            "servers": started}
@@ -158,7 +158,7 @@ async def test_ws_through_gateway_and_temp_view_routing(farm):
         img = await c.get(f"{gw}/api/view", params={"filename": f["filename"], "subfolder": f["subfolder"], "type": "temp"})
         assert img.status_code == 200 and img.content.startswith(b"\x89PNG fake")   # served by the GPU worker
     async with httpx.AsyncClient() as c2:                                            # someone else cannot locate it
-        await login(c2, gw, "root", "pw-root")
+        await login(c2, gw, "root", "pw-root-1")
         other = await c2.get(f"{gw}/api/view", params={"filename": f["filename"], "subfolder": "", "type": "temp"})
         assert other.status_code != 200 or not other.content.startswith(b"\x89PNG fake")
 
@@ -205,7 +205,7 @@ async def test_dashboard_through_gateway(farm):
     async with httpx.AsyncClient() as c:
         r = await c.get(f"{gw}/comfyfarm/dashboard/")
         assert r.status_code == 303 and r.headers["location"] == "/comfyfarm/login?next=/comfyfarm/dashboard/"
-        r = await c.post(f"{gw}/comfyfarm/login", data={"username": "root", "password": "pw-root", "next": "/comfyfarm/dashboard/"})
+        r = await c.post(f"{gw}/comfyfarm/login", data={"username": "root", "password": "pw-root-1", "next": "/comfyfarm/dashboard/"})
         assert r.headers["location"] == "/comfyfarm/dashboard/"
         page = await c.get(f"{gw}/comfyfarm/dashboard/")
         assert page.status_code == 200 and "app.js" in page.text           # served by the router, not the UI worker
@@ -230,7 +230,7 @@ async def test_sessions_end_on_password_change_disable_and_demotion(farm, monkey
     monkeypatch.setattr(gwmod, "SESSION_TTL", 0.0)
     gw = farm["gw"]
     async with httpx.AsyncClient() as root, httpx.AsyncClient() as alice, httpx.AsyncClient() as alice2:
-        await login(root, gw, "root", "pw-root")
+        await login(root, gw, "root", "pw-root-1")
         await login(alice, gw, "alice", "pw-alice")
         await login(alice2, gw, "alice", "pw-alice")                  # a second device
         assert (await alice.get(f"{gw}/api/farm/me")).json()["user"] == "alice"
@@ -264,7 +264,7 @@ async def test_session_cache_window_and_router_outage(farm, monkeypatch):
     import comfyfarm.gateway as gwmod
     gw = farm["gw"]
     async with httpx.AsyncClient() as root, httpx.AsyncClient() as alice:
-        await login(root, gw, "root", "pw-root")
+        await login(root, gw, "root", "pw-root-1")
         await login(alice, gw, "alice", "pw-alice")
         assert (await alice.get(f"{gw}/api/farm/me")).status_code == 200    # confirmed and cached
         await root.patch(f"{gw}/api/admin/users/alice", json={"disabled": True})
@@ -288,7 +288,7 @@ async def test_login_lands_on_the_dashboard_and_optional_user_list(farm):
     assert "<input name=username" in page and "<select" not in page                     # off by default: no names
     assert "window.top !== window" in page                                             # breaks out of the Workflow iframe
     async with httpx.AsyncClient() as root:
-        await login(root, gw, "root", "pw-root")
+        await login(root, gw, "root", "pw-root-1")
         assert (await root.put(f"{gw}/api/admin/settings", json={"login_user_list": "yes"})).status_code == 400
         assert (await root.put(f"{gw}/api/admin/settings", json={"nope": True})).status_code == 400
         assert (await root.put(f"{gw}/api/admin/settings", json={"login_user_list": True})).status_code == 200
@@ -331,7 +331,7 @@ async def test_saved_output_falls_back_to_the_executing_worker(farm):
         assert farm["ui"].views and farm["ui"].views[-1]["filename"] == f["filename"]    # the UI worker was asked first
         assert (await c.get(f"{gw}/api/view", params={**f, "filename": "nope.png"})).status_code == 404
     async with httpx.AsyncClient() as other:                                           # not the owner: nothing
-        await login(other, gw, "root", "pw-root")
+        await login(other, gw, "root", "pw-root-1")
         assert (await other.get(f"{gw}/api/view", params=f)).status_code == 404
 
 
@@ -344,3 +344,85 @@ async def test_ui_worker_refusing_the_gateway_is_named_not_a_500(farm):
         assert r.status_code == 502 and "COMFYFARM_ALLOW" in r.json()["error"]
         farm["ui"].refuse = False                               # fixed on the worker: no restart of the gateway needed
         assert (await c.get(f"{gw}/")).text == "<html>stock frontend</html>"
+
+
+async def raw_request(gw: str, line: str, cookie: str = "", extra: str = "") -> tuple[int, bytes]:
+    """httpx normalises `..` before sending; a browser-made or hand-made request does not have to."""
+    host, port = gw.removeprefix("http://").split(":")
+    r, w = await asyncio.open_connection(host, int(port))
+    w.write(f"{line} HTTP/1.1\r\nHost: {host}:{port}\r\nCookie: {cookie}\r\nContent-Length: 2\r\n{extra}"
+            f"Connection: close\r\n\r\n{{}}".encode())
+    await w.drain()
+    data = await r.read()
+    w.close()
+    return int(data.split(b" ", 2)[1]), data
+
+
+async def test_dot_segments_cannot_reroute(farm):
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        cookie = f"comfyfarm_session={c.cookies['comfyfarm_session']}"
+    before = len(farm["ui"].seen)
+    for path in ("/x/../prompt", "/x/%2e%2e/api/prompt", "/api/farm/../worker_profile", "/x/./queue", "//api/users"):
+        status, _ = await raw_request(gw, f"POST {path}", cookie)
+        assert status == 400, path
+    assert len(farm["ui"].seen) == before                                    # nothing reached the UI worker
+
+
+async def test_view_refuses_repeated_file_parameters(farm):
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        r = await c.get(f"{gw}/api/view?filename=VICTIM.png&type=output&filename=MINE.png")
+        assert r.status_code == 400
+
+
+async def test_cross_site_page_load_is_let_through_but_not_writes(farm):
+    gw = farm["gw"]
+    nav = {"sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document"}
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        assert (await c.get(f"{gw}/", headers=nav)).status_code == 200
+        assert (await c.post(f"{gw}/api/prompt", json={}, headers=nav)).status_code == 403
+        assert (await c.get(f"{gw}/api/queue", headers={**nav, "sec-fetch-mode": "cors"})).status_code == 403
+
+
+async def test_bad_cookie_is_401_not_500(farm):
+    status, _ = await raw_request(farm["gw"], "GET /api/farm/me", "comfyfarm_session=a.\xe9")
+    assert status == 401
+
+
+async def test_open_websocket_ends_with_the_session(farm, monkeypatch):
+    import comfyfarm.gateway as gwmod
+    monkeypatch.setattr(gwmod, "SESSION_TTL", 0.3)
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as root, httpx.AsyncClient() as alice:
+        await login(root, gw, "root", "pw-root-1")
+        await login(alice, gw, "alice", "pw-alice")
+        async with websockets.connect(farm["ws"] + "?clientId=c1",
+                                      additional_headers={"Cookie": f"comfyfarm_session={alice.cookies['comfyfarm_session']}"}) as ws:
+            await root.patch(f"{gw}/api/admin/users/alice", json={"disabled": True})
+            with pytest.raises(websockets.ConnectionClosed) as e:
+                while True:
+                    await asyncio.wait_for(ws.recv(), 5)
+            assert e.value.rcvd.code == 4401
+
+
+async def test_router_outage_at_login_is_a_message_not_a_500(farm):
+    gw = farm["gw"]
+    server, task = farm["servers"][0]
+    server.should_exit = True
+    await task
+    async with httpx.AsyncClient() as c:
+        r = await c.post(f"{gw}/comfyfarm/login", data={"username": "alice", "password": "pw-alice"})
+        assert r.status_code == 303 and r.headers["location"].endswith("e=2")
+        assert "not answering" in (await c.get(f"{gw}{r.headers['location']}")).text
+
+
+def test_dev_provider_refuses_a_public_address(monkeypatch):
+    from comfyfarm.gateway import main
+    monkeypatch.setenv("COMFYFARM_GATEWAY_SECRET", "s")
+    monkeypatch.setenv("COMFYFARM_SESSION_KEY", "k" * 32)
+    with pytest.raises(SystemExit):
+        main(["--router", "http://r", "--ui", "http://u", "--provider", "dev", "--host", "0.0.0.0"])

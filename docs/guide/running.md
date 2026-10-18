@@ -10,10 +10,10 @@ comfyfarm serve --host 0.0.0.0 --port 8188 --log-dir /var/log/comfyfarm
 ```
 
 Migrations run at start (under an advisory lock, so two routers starting at once do not race). Logs go to stdout for
-the service manager; with `--log-dir` also to `comfyfarm.log` (rotated at 20 MB, 5 kept) and `error.log`, which holds
+the service manager; with `--log-dir` also to `router.log` (rotated at 20 MB, 5 kept) and `router-error.log`, which holds
 only real failures — point your alerting at that file.
 
-Environment: `COMFYFARM_DSN` (required), `COMFYFARM_INSTANCE` (name of this router; part of the worker event
+Environment: `COMFYFARM_DSN` (required; the password may instead be in `PGPASSWORD`), `COMFYFARM_INSTANCE` (name of this router; part of the worker event
 identity), `COMFYFARM_GATEWAY_SECRET`, `COMFYFARM_DEFAULT_GROUP`, `COMFYFARM_ARTIFACTS_DIR`,
 `COMFYFARM_DEV_IDENTITY` (development only, loopback: every request is this user).
 
@@ -27,8 +27,13 @@ export COMFYFARM_SESSION_KEY=…             # 32+ random bytes; signs login coo
 python -m comfyfarm.gateway --router http://127.0.0.1:8188 --ui http://ui-worker:8188 --port 8080
 ```
 
+With the systemd unit (`deploy/systemd/comfyfarm-gateway.service`) these go into `/etc/comfyfarm/gateway.env`
+together with `UI_WORKER_URL=http://ui-worker:8188`. With `--log-dir` it writes `gateway.log` and
+`gateway-error.log` (the router's files are `router.*`; the units create `/var/log/comfyfarm` themselves).
+
 Browsers talk only to the gateway. `--provider trusted-header` takes the identity from an authenticating reverse
-proxy in front of it instead of the login page (see [08](../design/08-gateway-and-identity.md)).
+proxy in front of it instead of the login page (see [08](../design/08-gateway-and-identity.md)). The proxy's
+address is what the gateway sees on the connection (`--trusted-proxy`); `X-Forwarded-For` is not read.
 
 ## Checking a farm
 

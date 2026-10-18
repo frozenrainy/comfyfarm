@@ -27,7 +27,10 @@ services:
       db:
         condition: service_healthy
     environment:
-      COMFYFARM_DSN: postgresql://comfyfarm:${DB_PASSWORD}@db/comfyfarm
+      # the password goes separately (libpq reads PGPASSWORD): in the URL, a / or # in it would break the DSN
+      COMFYFARM_DSN: postgresql://comfyfarm@db/comfyfarm
+      PGPASSWORD: ${DB_PASSWORD}
+      COMFYFARM_KEYS_DIR: /keys
       COMFYFARM_GATEWAY_SECRET: ${COMFYFARM_GATEWAY_SECRET:?run comfyfarm secrets and put the values in .env}
       COMFYFARM_INSTANCE: ${COMFYFARM_INSTANCE:-comfyfarm-1}
       COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}

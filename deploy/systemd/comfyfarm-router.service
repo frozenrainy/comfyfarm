@@ -6,6 +6,7 @@ Wants=network-online.target
 
 [Service]
 User=comfyfarm
+LogsDirectory=comfyfarm
 EnvironmentFile=/etc/comfyfarm/router.env
 ExecStart=/opt/comfyfarm/venv/bin/comfyfarm serve --host 0.0.0.0 --port 8188 --log-dir /var/log/comfyfarm
 Restart=on-failure

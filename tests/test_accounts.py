@@ -151,7 +151,7 @@ async def test_prefs_and_password(farm):
         before = await conn.fetchval("SELECT session_epoch FROM users WHERE username = 'erin'")
     assert (await ok(await c.post("/api/farm/me/password", json={"current": "password-1", "new": "password-2"}, headers=H("erin"))))["relogin"]
     async with r.db.conn() as conn:
-        assert await conn.fetchval("SELECT session_epoch FROM users WHERE username = 'erin'") == before + 1
+        assert await conn.fetchval("SELECT session_epoch FROM users WHERE username = 'erin'") > before                     # every session of erin ended
 
 
 # ---- statistics and history --------------------------------------------------------------------------------------
@@ -223,3 +223,48 @@ async def test_queue_badge_summary(farm):
         await submit(c, "admin", 40 + i)
     assert (await ok(await c.get("/api/farm/summary", headers=H("admin")))) == {"queued": 3, "running": 0}
     assert (await ok(await c.get("/api/farm/summary", headers=H("tester")))) == {"queued": 0, "running": 0}
+
+
+# ---- QA regressions ------------------------------------------------------------------------------------------
+async def test_two_admins_demoting_each_other_leave_one(dsn):
+    HA = lambda u: {"X-ComfyFarm-User": u, "X-ComfyFarm-Roles": "admin"}      # noqa: E731
+    app = create_app(fast_settings(dsn, gateway_secret="s" * 40))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            for i in range(5):
+                async with app.state.router.db.conn() as x:
+                    await x.execute("UPDATE users SET roles = '{}'")
+                a, b = f"a{i}", f"b{i}"
+                for u in (a, b):
+                    await ok(await c.post("/api/admin/users", json={"username": u, "password": "password-1", "admin": True},
+                                          headers=HA("root")))
+                r1, r2 = await asyncio.gather(c.patch(f"/api/admin/users/{b}", json={"admin": False}, headers=HA(a)),
+                                              c.patch(f"/api/admin/users/{a}", json={"admin": False}, headers=HA(b)))
+                assert sorted([r1.status_code, r2.status_code]) == [200, 409]
+                async with app.state.router.db.conn() as x:
+                    assert await x.fetchval("SELECT count(*) FROM users WHERE 'admin' = ANY(roles) AND disabled_at IS NULL") == 1
+
+
+async def test_recreated_account_does_not_revive_old_sessions(dsn):
+    G = {"x-comfyfarm-gateway-login": "s" * 40}
+    app = create_app(fast_settings(dsn, gateway_secret="s" * 40))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            await user(c, "eve")
+            ep = (await ok(await c.post("/api/internal/login", json={"username": "eve", "password": "password-1"}, headers=G)))["epoch"]
+            await ok(await c.delete("/api/admin/users/eve", headers=H("admin")))
+            await ok(await c.post("/api/admin/users", json={"username": "eve", "password": "other-pass-2"}, headers=H("admin")))
+            assert (await c.post("/api/internal/session", json={"user": "eve", "epoch": ep}, headers=G)).status_code == 401
+            ep2 = (await ok(await c.post("/api/internal/login", json={"username": "eve", "password": "other-pass-2"}, headers=G)))["epoch"]
+            assert ep2 > ep and (await c.post("/api/internal/session", json={"user": "eve", "epoch": ep2}, headers=G)).status_code == 200
+
+
+async def test_stats_keep_a_job_in_the_group_it_ran_in(farm):
+    r, c = farm
+    g1, wid = await add_worker(r, f"http://127.0.0.1:{free_port()}", group="g1", name="w1")
+    await finished_job(r, "ann", "completed", finished_ago_h=2, run_s=100, wait_s=10, worker_id=wid)
+    g2, _ = await add_worker(r, f"http://127.0.0.1:{free_port()}", group="g2", name="w2")
+    async with r.db.conn() as x:
+        await x.execute("UPDATE workers SET group_id = $1 WHERE id = $2", g2, wid)       # w1 moves to g2 later
+    s = await ok(await c.get("/api/admin/stats?days=7", headers=H("admin")))
+    assert [(g["name"], g["jobs"]) for g in s["groups"]] == [("g1", 1)]

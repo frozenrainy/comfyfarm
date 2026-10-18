@@ -1,5 +1,6 @@
 """Logging (docs/design/06 'Logs'): stdout for the service manager; with --log-dir also a size-rotated main log and
-a separate error.log holding real failures only — a level split is a stronger filter than regular expressions in a
+a separate <name>-error.log holding real failures only — one pair per program (router, gateway), since two processes
+rotating the same file rename it under each other — a level split is a stronger filter than regular expressions in a
 monitoring system."""
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ def teardown() -> None:
     _mine.clear()
 
 
-def setup(log_dir: str | None = None, level: str = "INFO") -> None:
+def setup(log_dir: str | None = None, level: str = "INFO", name: str = "router") -> None:
     teardown()
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
@@ -34,12 +35,12 @@ def setup(log_dir: str | None = None, level: str = "INFO") -> None:
     _mine.append(out)
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
-        main = logging.handlers.RotatingFileHandler(os.path.join(log_dir, "comfyfarm.log"), maxBytes=ROTATE_BYTES,
+        main = logging.handlers.RotatingFileHandler(os.path.join(log_dir, f"{name}.log"), maxBytes=ROTATE_BYTES,
                                                     backupCount=ROTATE_KEEP, encoding="utf-8")
         main.setFormatter(fmt)
         root.addHandler(main)
         _mine.append(main)
-        err = logging.handlers.RotatingFileHandler(os.path.join(log_dir, "error.log"), maxBytes=ROTATE_BYTES,
+        err = logging.handlers.RotatingFileHandler(os.path.join(log_dir, f"{name}-error.log"), maxBytes=ROTATE_BYTES,
                                                    backupCount=ROTATE_KEEP, encoding="utf-8")
         err.setFormatter(fmt)
         err.setLevel(logging.ERROR)

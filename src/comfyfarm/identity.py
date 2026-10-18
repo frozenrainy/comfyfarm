@@ -37,7 +37,8 @@ class TrustGatewayHeaders:
     async def __call__(self, scope, receive, send):
         if scope["type"] in ("http", "websocket"):
             headers = scope.get("headers", [])
-            vouched = self.dev or (self.secret is not None and any(
+            loopback = (scope.get("client") or ("",))[0] in ("127.0.0.1", "::1")
+            vouched = (self.dev and loopback) or (self.secret is not None and any(
                 k == GATEWAY_H and hmac.compare_digest(v, self.secret) for k, v in headers))
             if not vouched:
                 headers = [(k, v) for k, v in headers if k not in (USER_H, ROLES_H)]
@@ -83,7 +84,8 @@ def read_session(token: str | None, key: bytes) -> Identity | None:
     if not token or "." not in token:
         return None
     body, mac = token.rsplit(".", 1)
-    if not hmac.compare_digest(mac, hmac.new(key, body.encode(), hashlib.sha256).hexdigest()):
+    # bytes: compare_digest raises on non-ASCII str, and a cookie is whatever the client sent
+    if not hmac.compare_digest(mac.encode("utf-8", "replace"), hmac.new(key, body.encode("utf-8", "replace"), hashlib.sha256).hexdigest().encode()):
         return None
     try:
         d = json.loads(base64.urlsafe_b64decode(body.encode()))

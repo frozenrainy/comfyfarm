@@ -35,7 +35,7 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     def gateway_only(request: Request):
         s = ctx.settings.gateway_secret
-        if not s or not hmac.compare_digest(request.headers.get("x-comfyfarm-gateway-login", ""), s):
+        if not s or not hmac.compare_digest(request.headers.get("x-comfyfarm-gateway-login", "").encode("utf-8", "replace"), s.encode()):
             raise HTTPException(403, "gateway only")
 
     # ---- gateway ------------------------------------------------------------------------------------------------
@@ -118,7 +118,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 raise HTTPException(403, "current password is wrong")
             if problem := password_problem(body.new):
                 raise HTTPException(400, f"new password: {problem}")
-            await c.execute("UPDATE users SET password_hash = $2, session_epoch = session_epoch + 1 WHERE username = $1",
+            await c.execute("UPDATE users SET password_hash = $2, session_epoch = next_session_epoch(session_epoch) WHERE username = $1",
                             who, hash_password(body.new))
         return {"changed": True, "relogin": True}
 

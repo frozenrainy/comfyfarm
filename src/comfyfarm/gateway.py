@@ -79,6 +79,7 @@ HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authoriz
                "origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-user"}
 HASHED_ASSET = re.compile(r"^/assets/.+[-.][A-Za-z0-9_]{8,}\.(js|css|woff2?|svg|png|webp)$")
 COOKIE = "comfyfarm_session"
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 
 @dataclass
@@ -182,8 +183,11 @@ def create_gateway(s: GatewaySettings) -> Starlette:
 
     async def proxy(request: Request, base: str, headers: dict, cache_immutable: bool = False,
                     miss: int | None = None) -> Response | None:
-        """`miss`: an upstream status that means "try elsewhere" — the response is dropped and None returned."""
-        url = f"{base}{request.url.path}" + (f"?{request.url.query}" if request.url.query else "")
+        """`miss`: an upstream status that means "try elsewhere" — the response is dropped and None returned.
+        The path goes upstream as the browser sent it (raw): routing decided on the decoded path, and that path holds
+        no dot segments (plain_path), so the upstream cannot resolve it to anything else."""
+        raw = (request.scope.get("raw_path") or request.url.path.encode()).decode("latin-1")
+        url = f"{base}{raw}" + (f"?{request.url.query}" if request.url.query else "")
         body = request.stream() if request.method not in ("GET", "HEAD") else None
         req = http.build_request(request.method, url, headers=headers, content=body)
         try:
@@ -229,16 +233,22 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             user_field = f'<select name=username autofocus><option value="" disabled selected>User</option>{options}</select>'
         else:
             user_field = "<input name=username placeholder=User autocomplete=username autofocus>"
-        msg = ('<p class=bad>Login failed</p>' if err else '') + (f'<p class=note>{html.escape(note)}</p>' if note else '')
+        msg = ({"1": "<p class=bad>Login failed</p>", "2": "<p class=bad>The farm is not answering — try again shortly</p>"}
+               .get(err, "<p class=bad>Login failed</p>") if err else '') + (f'<p class=note>{html.escape(note)}</p>' if note else '')
         return HTMLResponse(LOGIN_PAGE.format(next=html.escape(nxt), user_field=user_field, msg=msg))
 
     async def login(request: Request):
         if not same_origin_ok(request):
             return Response(status_code=403)
         form = await request.form()
-        r = await http.post(f"{s.router_url}/api/internal/login", headers={"x-comfyfarm-gateway-login": s.secret},
-                            json={"username": form.get("username", ""), "password": form.get("password", "")})
         nxt = safe_next(form.get("next"))
+        try:
+            r = await http.post(f"{s.router_url}/api/internal/login", headers={"x-comfyfarm-gateway-login": s.secret},
+                                json={"username": form.get("username", ""), "password": form.get("password", "")})
+        except httpx.HTTPError:
+            return RedirectResponse(f"/comfyfarm/login?next={nxt}&e=2", status_code=303)
+        if r.status_code >= 500:
+            return RedirectResponse(f"/comfyfarm/login?next={nxt}&e=2", status_code=303)
         if r.status_code != 200:
             return RedirectResponse(f"/comfyfarm/login?next={nxt}&e=1", status_code=303)
         d = r.json()
@@ -254,9 +264,11 @@ def create_gateway(s: GatewaySettings) -> Starlette:
 
     def same_origin_ok(request) -> bool:
         """CSRF guard owned by the gateway (stock ComfyUI's Host/Origin check cannot work behind a proxy):
-        refuse cross-site fetches and any Origin that is not this gateway."""
+        refuse cross-site fetches and any Origin that is not this gateway. A cross-site top-level page load (a link
+        from an intranet page, the return from a single sign-on) is let through: GETs change nothing."""
         if request.headers.get("sec-fetch-site") == "cross-site":
-            return False
+            return (getattr(request, "method", None) in ("GET", "HEAD")
+                    and request.headers.get("sec-fetch-mode") == "navigate")
         origin = request.headers.get("origin")
         if origin:
             from urllib.parse import urlparse
@@ -264,9 +276,16 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         return True
 
     # ---- everything else ---------------------------------------------------------------------------------------
+    def plain_path(path: str) -> bool:
+        """Routing looks at the path; a `..` (also sent as %2e%2e) or `//` would let the upstream or the HTTP client
+        resolve it to a different one — /x/../prompt would reach the UI worker's own queue."""
+        return "//" not in path and not any(seg in (".", "..") for seg in path.split("/")) and "\\" not in path
+
     async def handle(request: Request):
         if not same_origin_ok(request):
             return Response(status_code=403)
+        if not plain_path(request.url.path):
+            return JSONResponse({"error": "bad path"}, status_code=400)
         try:
             ident = await identify(request)
         except Unavailable as e:
@@ -282,6 +301,10 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         if path.startswith(ROUTER_PREFIXES):
             return await proxy(request, s.router_url, router_headers(request, ident))
         base_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS | IDENTITY_HEADERS}
+        if path in ("/api/view", "/view") and any(len(request.query_params.getlist(k)) > 1
+                                                  for k in ("filename", "subfolder", "type")):
+            # the router's owner check and the worker would read different copies of a repeated parameter
+            return JSONResponse({"error": "repeated file parameter"}, status_code=400)
         if path in ("/api/view", "/view") and request.query_params.get("type") in ("temp", "output"):
             # temp files exist only on the executing worker; saved outputs normally sit on shared storage (01) and
             # are served by the UI worker — when it does not have one, the executing worker is asked (a site without
@@ -297,7 +320,11 @@ def create_gateway(s: GatewaySettings) -> Starlette:
                 if resp is not None:
                     return resp
             q = {k: request.query_params.get(k, "") for k in ("filename", "subfolder", "type")}
-            loc = await http.get(f"{s.router_url}/api/farm/locate?{urlencode(q)}", headers=router_headers(request, ident))
+            try:
+                loc = await http.get(f"{s.router_url}/api/farm/locate?{urlencode(q)}", headers=router_headers(request, ident))
+            except httpx.HTTPError as e:
+                return JSONResponse({"error": f"router unavailable ({type(e).__name__})"}, status_code=503,
+                                    headers={"Retry-After": "2"})
             if loc.status_code == 200:
                 return await proxy(request, loc.json()["base_url"], base_headers)
             if kind == "output":
@@ -313,7 +340,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         return await proxy(request, s.ui_url, base_headers, cache_immutable=bool(HASHED_ASSET.match(path)))
 
     async def ws_endpoint(ws: WebSocket):
-        if not same_origin_ok(ws):
+        if not same_origin_ok(ws) or not plain_path(ws.url.path):
             await ws.close(code=4403)
             return
         try:
@@ -347,11 +374,21 @@ def create_gateway(s: GatewaySettings) -> Starlette:
                             await up.send(m["text"])
                         elif m.get("bytes") is not None:
                             await up.send(m["bytes"])
-                tasks = [asyncio.create_task(down()), asyncio.create_task(upward())]
+                async def session_alive():
+                    """The session is re-confirmed while the socket is open: a disabled account or changed password
+                    ends it within SESSION_TTL, as for requests (D-35). A router outage does not — the upstream
+                    socket fails on its own then."""
+                    while True:
+                        await asyncio.sleep(SESSION_TTL)
+                        with contextlib.suppress(Unavailable):
+                            if await identify(ws) is None:
+                                return
+
+                tasks = [asyncio.create_task(down()), asyncio.create_task(upward()), asyncio.create_task(session_alive())]
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for t in pending:
                     t.cancel()
-                code = up.close_code or 1000
+                code = 4401 if tasks[2] in done else (up.close_code or 1000)
         except (websockets.ConnectionClosed, WebSocketDisconnect, OSError):
             code = 1011
         with contextlib.suppress(Exception):
@@ -395,10 +432,14 @@ def main(argv=None):
         ap.error("COMFYFARM_SESSION_KEY must be at least 32 characters (comfyfarm secrets)")
     if a.provider == "trusted-header" and not a.trusted_proxy:
         ap.error("--provider trusted-header needs --trusted-proxy <address>")
-    setup(a.log_dir)
+    if a.provider == "dev" and a.host not in LOOPBACK:
+        ap.error("--provider dev makes every local connection an administrator: it needs --host 127.0.0.1")
+    setup(a.log_dir, name="gateway")
     app = create_gateway(GatewaySettings(a.router.rstrip("/"), a.ui.rstrip("/"), secret, key, provider=a.provider,
                                          trusted_proxies=tuple(a.trusted_proxy), secure_cookie=a.secure_cookie))
-    uvicorn.run(app, host=a.host, port=a.port, log_config=None)
+    # proxy_headers=False: the peer address is the connection's own — uvicorn would otherwise replace it with
+    # X-Forwarded-For, which the browser can write, and trusted-header decides on that address
+    uvicorn.run(app, host=a.host, port=a.port, log_config=None, proxy_headers=False)
 
 
 if __name__ == "__main__":
