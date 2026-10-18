@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Source allow-list for a worker (docs/design/09): stock `--multi-user` ComfyUI has no authentication, so on a farm
 only the router and the gateway may talk to a worker. Anyone else on the network could otherwise list users, read
 their outputs and submit or interrupt jobs by going to the worker's port directly.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """ComfyFarm worker extension — three things a farm needs from a stock ComfyUI worker, without patching its core:
 a source allow-list (allow.py; the worker is otherwise open to everyone on the network), a validation endpoint, and
 a fix for the WebSocket reconnect race.
@@ -27,6 +28,8 @@ KNOWN_HANDLER_SOURCES = {
 }
 
 
+# Derived from ComfyUI's server.py websocket_handler (Copyright comfyanonymous and contributors, GPL-3.0);
+# the only change is the guarded cleanup in `finally`. Hence this extension is GPL-3.0 (see LICENSE here).
 def _guarded_handler(server, feature_flags):
     async def websocket_handler(request):
         ws = web.WebSocketResponse()

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """ComfyFarm frontend extension — install on the UI worker (a stock ComfyUI behind the ComfyFarm gateway).
 
 Adds, through the official frontend extension API only:

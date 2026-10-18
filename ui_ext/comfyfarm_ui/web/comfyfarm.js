@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // ComfyFarm frontend extension (see ../__init__.py). Official extension API only — no frontend fork.
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";

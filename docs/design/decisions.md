@@ -238,3 +238,10 @@ cancels its step tasks with itself (they were left running unattended), marks th
 start and leaves its workers in maintenance. *Resume* re-runs unfinished steps from the top (a worker already on the
 target is not restarted again); *Abort* returns draining workers to service and marks workers caught mid-restart
 failed for a person to check.
+
+**D-39 Two licences: Apache-2.0 for ComfyFarm, GPL-3.0 for what runs inside ComfyUI.** *(review)* — ComfyUI and
+its frontend are GPL-3.0. The worker extension runs in the ComfyUI process and carries a modified copy of its
+WebSocket handler; the UI extension extends the GPL frontend. Publishing them under Apache-2.0 would invite a licence
+violation. → `worker_ext/` and `ui_ext/` are GPL-3.0-or-later (LICENSE + SPDX headers in each, attribution for the
+derived handler); the router, gateway, dashboard and the worker-side tools under `src/` stay Apache-2.0 — they only
+speak HTTP/WebSocket to ComfyUI and never import the extensions. (Risk assessment by review, not legal advice.)

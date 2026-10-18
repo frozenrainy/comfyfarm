@@ -37,4 +37,11 @@ Start with [docs/design/00-overview.md](docs/design/00-overview.md) and the [dec
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+ComfyFarm is two licences, split along the line where code meets ComfyUI:
+
+| Part | Licence | Why |
+|---|---|---|
+| router, gateway, dashboard, launcher, agent, publisher — everything under `src/` | Apache-2.0 ([LICENSE](LICENSE)) | separate programs that talk to ComfyUI over HTTP/WebSocket |
+| `worker_ext/comfyfarm_worker` (runs inside ComfyUI, contains code derived from ComfyUI) and `ui_ext/comfyfarm_ui` (an extension of the ComfyUI frontend) | GPL-3.0-or-later (LICENSE in each directory) | they extend GPL-3.0 programs ([ComfyUI](https://github.com/comfyanonymous/ComfyUI), [ComfyUI_frontend](https://github.com/Comfy-Org/ComfyUI_frontend)) |
+
+The router never imports either extension; they are installed on the workers as ComfyUI custom nodes.
