@@ -23,3 +23,4 @@ class Settings:
     gateway_secret: str | None = None      # identity headers are trusted only with this secret (docs/design/09)
     artifacts_dir: str | None = None       # <ART> as the router sees it (optional): artifact lists + §9 checks
     inventory_period: float = 600.0        # re-read a worker's models/nodes this often (models change without a restart)
+    keys_dir: str = "/etc/comfyfarm/keys"   # restart backends: ssh keys, known_hosts and agent token files must lie here

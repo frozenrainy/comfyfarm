@@ -7,8 +7,10 @@
                                 [--pip-arg=--index-url=…] [--uv /path/to/uv]   (uv: same rules, its wheel cache)
 
 Rules kept: a name is never reused (an existing directory is refused); READY is written last, only after the copy or
-build and the checks; a venv is built at its final path (absolute paths are baked in) and must not reference anything
-outside itself (.pth files pointing elsewhere, editable installs). Standard library only.
+build and the checks, and the artifact is made read-only first; a venv is built at its final path (absolute paths are
+baked in) and must not reference anything outside itself (.pth files pointing elsewhere, editable installs); a core
+has no symlinks (the release archive as is) and a node or frontend symlink stays inside its artifact. Standard
+library only.
 """
 from __future__ import annotations
 
@@ -75,10 +77,45 @@ def publish_tree(art: str, kind: str, name: str, src: str) -> dict:
         raise Refused(str(e))
     tmp = f"{path}.tmp-{os.getpid()}"
     shutil.copytree(src, tmp, symlinks=True, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+    if bad := symlink_problems(tmp, kind):
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise Refused("; ".join(bad[:5]) + (f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""))
     os.rename(tmp, path)
     m = write_manifest(path, kind, name)
-    open(os.path.join(path, "READY"), "w").close()
+    seal(path)
     return m
+
+
+def symlink_problems(root: str, kind: str) -> list[str]:
+    """Contract §2: a core is the release archive as is — no symlinks. Elsewhere a symlink must stay inside the
+    artifact: relative, and resolving below its root (an absolute or escaping link reaches code nobody published)."""
+    bad, top = [], os.path.realpath(root)
+    for d, dirs, files in os.walk(root):
+        for n in dirs + files:
+            p = os.path.join(d, n)
+            if not os.path.islink(p):
+                continue
+            rel, target = os.path.relpath(p, root), os.readlink(p)
+            real = os.path.realpath(p)
+            if kind == "core":
+                bad.append(f"symlink in a core: {rel}")
+            elif os.path.isabs(target) or not (real == top or real.startswith(top + os.sep)):
+                bad.append(f"symlink points outside the artifact: {rel} -> {target}")
+    return bad
+
+
+def seal(path: str) -> None:
+    """Published artifacts are read-only (contract §2): everything below is made read-only, then READY is written and
+    the top directory locked too."""
+    for d, dirs, files in os.walk(path, topdown=False):
+        for n in dirs + files:
+            p = os.path.join(d, n)
+            if not os.path.islink(p):
+                os.chmod(p, os.lstat(p).st_mode & ~0o222)
+    ready = os.path.join(path, "READY")
+    open(ready, "w").close()
+    for p in (ready, path):
+        os.chmod(p, os.lstat(p).st_mode & ~0o222)
 
 
 def venv_escapes(path: str) -> list[str]:
@@ -90,8 +127,10 @@ def venv_escapes(path: str) -> list[str]:
                 with open(os.path.join(d, n), errors="replace") as f:
                     for line in f:
                         line = line.strip()
-                        if line and not line.startswith(("#", "import")) and os.path.isabs(line) and \
-                                not os.path.abspath(line).startswith(path + os.sep):
+                        if not line or line.startswith(("#", "import")):
+                            continue
+                        full = os.path.normpath(os.path.join(d, line))     # relative lines: from the .pth's directory
+                        if not full.startswith(os.path.normpath(path) + os.sep):
                             bad.append(f"{n}: {line}")
             if n == "direct_url.json":
                 with open(os.path.join(d, n)) as f:
@@ -131,7 +170,7 @@ def publish_venv(art: str, name: str, python: str, requirements: list[str], acce
     if arch:
         extra["arch"] = arch
     m = write_manifest(path, "venv", name, **extra)
-    open(os.path.join(path, "READY"), "w").close()
+    seal(path)
     return m
 
 

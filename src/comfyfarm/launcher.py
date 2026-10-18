@@ -13,6 +13,7 @@ Platform: posix (contract §9.2: a render for another platform is refused).
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -30,13 +31,14 @@ KEEP_LOCAL = 3
 # ComfyUI 0.41.0 options a render may use: arity (0 flag, 1 one value, "?" optional value, "*"/"+" list) and whether
 # the values are paths (then they must lie under the allowed prefixes). Left out on purpose: --base-directory (the
 # render sets every directory explicitly), --database-url (arbitrary target), --enable-manager* (installs code at
-# runtime), --windows-standalone-build, --quick-test-for-ci, --auto-launch.
+# runtime), --front-end-version (downloads a frontend at runtime; a frontend comes only as a published artifact via
+# --front-end-root), --windows-standalone-build, --quick-test-for-ci, --auto-launch.
 OPTIONS: dict[str, tuple[object, bool]] = {
     "--listen": ("?", False), "--port": (1, False), "--tls-keyfile": (1, True), "--tls-certfile": (1, True),
     "--enable-cors-header": ("?", False), "--max-upload-size": (1, False),
     "--extra-model-paths-config": ("+", True), "--output-directory": (1, True), "--temp-directory": (1, True),
     "--input-directory": (1, True), "--previews-directory": (1, True), "--user-directory": (1, True),
-    "--models-directory": (1, True), "--front-end-root": (1, True), "--front-end-version": (1, False),
+    "--models-directory": (1, True), "--front-end-root": (1, True),
     "--disable-auto-launch": (0, False), "--cuda-device": (1, False), "--default-device": (1, False),
     "--cuda-malloc": (0, False), "--disable-cuda-malloc": (0, False), "--force-fp32": (0, False), "--force-fp16": (0, False),
     "--fp32-unet": (0, False), "--fp64-unet": (0, False), "--bf16-unet": (0, False), "--fp16-unet": (0, False),
@@ -65,10 +67,16 @@ OPTIONS: dict[str, tuple[object, bool]] = {
     "--enable-compress-response-body": (0, False), "--enable-assets": (0, False), "--disable-assets": (0, False),
     "--enable-asset-hashing": (0, False), "--feature-flag": (1, False),
 }
-# Environment keys a render may set (exact names or prefixes). Not PATH, PYTHONPATH, LD_*: those run other code.
+# Environment keys a render may set (exact names or prefixes). Not PATH, PYTHONPATH, LD_*: those run other code. The
+# prefixes also cover variables that name plugin libraries, tool binaries or compiled-kernel caches (HSA_TOOLS_LIB,
+# TRITON_PTXAS_PATH, MIOPEN_CUSTOM_CACHE_DIR, ...), so values are checked too (env_problem): no paths.
 ENV_PREFIXES = ("PYTORCH_", "TORCH_", "CUDA_", "HIP_", "HSA_", "ROCM_", "MIOPEN_", "AMD_", "TRITON_", "NCCL_",
                 "COMFYFARM_")        # the worker extension's own settings (COMFYFARM_ALLOW)
 ENV_KEYS = {"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "TOKENIZERS_PARALLELISM", "TZ"}
+# Directories ComfyUI lets users write to (uploads, outputs, user files). They must not overlap <ART> or <LOCAL> in
+# either direction: <LOCAL> holds the core and node copies ComfyUI imports as code, and an upload's subfolder can reach
+# anything below the input directory.
+WRITABLE = ("--input-directory", "--output-directory", "--temp-directory", "--user-directory", "--previews-directory")
 
 
 def nodes_yaml(node_dirs: list[str]) -> str:
@@ -84,6 +92,34 @@ class Refused(Exception):
 
 def env_key_ok(key: str) -> bool:
     return key in ENV_KEYS or key.startswith(ENV_PREFIXES)
+
+
+TZ_NAME = re.compile(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$")       # IANA zone name (Asia/Seoul), not a file
+
+
+def env_problem(key: str, value) -> str | None:
+    """Why the render must not set `key=value`, or None. A value must not name a file or directory: no '/' or '\\',
+    and no part (split at whitespace , : ; =) starting with '~' or '.'. A bare word can only name something in the
+    working directory (the core copy) or be looked up in the system's own search paths, never where users write or
+    anywhere outside the artifacts. Two keys need a '/' and get a typed check instead: COMFYFARM_ALLOW (addresses and
+    CIDR blocks) and TZ (a zone name; other TZ values follow the general rule)."""
+    if not env_key_ok(key):
+        return f"environment key not allowed: {key!r}"
+    if not isinstance(value, str) or any(ord(ch) < 32 for ch in value):
+        return f"environment value of {key} must be one line of text"
+    if key == "COMFYFARM_ALLOW":
+        for item in value.replace(";", ",").split(","):
+            try:
+                if item.strip():
+                    ipaddress.ip_network(item.strip(), strict=False)
+            except ValueError:
+                return f"COMFYFARM_ALLOW: {item.strip()!r} is not an address or CIDR block"
+        return None
+    if key == "TZ" and TZ_NAME.match(value):
+        return None
+    if "/" in value or "\\" in value or any(t.startswith(("~", ".")) for t in re.split(r"[\s,:;=]+", value)):
+        return f"environment value of {key} names a path: {value!r}"
+    return None
 
 
 def _norm(path: str) -> str:
@@ -145,18 +181,25 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
         for v in values:
             if is_path and opt != "--front-end-root" and (not under(v, roots) or under(v, [art])):   # that one: below
                 raise Refused(f"{opt} {v!r} is outside the allowed prefixes")
+            if opt in WRITABLE and (under(v, [art, local]) or under(art, [v]) or under(local, [v])):
+                raise Refused(f"{opt} {v!r} must lie outside <ART> and <LOCAL> (users write there; code is imported from there)")
         opts.append((opt, values))
     env = render.get("env", {})
     if not isinstance(env, dict):
         raise Refused("env must be an object")
     for k, v in env.items():
-        if not env_key_ok(k) or not isinstance(v, str) or "\0" in v:
-            raise Refused(f"environment key not allowed: {k!r}")
+        if why := env_problem(k, v):
+            raise Refused(why)
 
+    for key, typ in (("sync", list), ("files", dict), ("mkdirs", list), ("require", list)):
+        if not isinstance(render.get(key, typ()), typ):
+            raise Refused(f"{key} must be {'a list' if typ is list else 'an object'}")
     synced: dict[str, list[str]] = {"core": [], "nodes": [], "frontend": []}
     for e in render.get("sync", []):
+        if not isinstance(e, dict):
+            raise Refused(f"bad sync entry {e!r}")
         kind, name = e.get("kind"), e.get("name", "")
-        if kind not in synced or not NAME.match(name):
+        if kind not in synced or not isinstance(name, str) or not NAME.match(name):
             raise Refused(f"bad sync entry {e!r}")
         if _norm(e.get("src", "")) != f"{art}/{kind}/{name}" or _norm(e.get("dst", "")) != f"{local}/{kind}/{name}":
             raise Refused(f"sync {kind}/{name} must copy <ART>/{kind}/{name} to <LOCAL>/{kind}/{name}")
@@ -177,7 +220,7 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
     for path, content in files.items():
         if not re.fullmatch(re.escape(run_dir) + r"/extra_model_paths\.[0-9a-f]{12}\.yaml", _norm(path)):
             raise Refused(f"files may only be {run_dir}/extra_model_paths.<rev>.yaml: {path!r}")
-        if content != nodes_yaml([f"{local}/nodes/{n}" for n in synced["nodes"]]):
+        if not isinstance(content, str) or content != nodes_yaml([f"{local}/nodes/{n}" for n in synced["nodes"]]):
             raise Refused("extra model paths content is not the synced node artifacts")
     for opt, vals in opts:
         if opt == "--front-end-root":
@@ -213,24 +256,33 @@ def _collect(root: str) -> list[bytes]:
     READY is created after it). A change-detection key: the launcher compares manifest values as opaque strings and
     never recomputes this."""
     items = []
+
+    def link(p: str, rel: str) -> str:
+        target = os.readlink(p)
+        if "\n" in target:                       # would end the line early: two trees could give the same text
+            raise ValueError(f"newline in a symlink target: {rel!r}")
+        return f"l {rel} {target}"
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames:
             p = os.path.join(dirpath, n)
             if os.path.islink(p):
-                items.append(f"l {os.path.relpath(p, root)} {os.readlink(p)}")
+                rel = os.path.relpath(p, root)
+                if "\n" in rel:
+                    raise ValueError(f"newline in a file name: {rel!r}")
+                items.append(link(p, rel))
         for n in filenames:
             p = os.path.join(dirpath, n)
             rel = os.path.relpath(p, root)
             if rel in ("READY", "manifest.json"):
                 continue
+            if "\n" in rel:
+                raise ValueError(f"newline in a file name: {rel!r}")
             if os.path.islink(p):
-                items.append(f"l {rel} {os.readlink(p)}")
+                items.append(link(p, rel))
             elif os.path.isfile(p):
                 items.append(f"f {rel} {os.path.getsize(p)}")
             else:
                 raise ValueError(f"not a regular file or symlink: {rel}")     # sockets, FIFOs, devices (contract §2)
-            if "\n" in rel:
-                raise ValueError(f"newline in a file name: {rel!r}")
     try:
         return sorted(x.encode("utf-8") for x in items)                      # full-line bytes, ascending
     except UnicodeEncodeError:                                                 # a name that is not valid UTF-8
@@ -254,34 +306,77 @@ def manifest_hash(path: str) -> str | None:
 
 
 def sync(entry: dict) -> None:
-    """Copy src → dst unless dst carries the same tree_sha256; via a temp dir and rename, never in place."""
+    """Copy src → dst unless dst carries the same tree_sha256; via a temp dir and rename, never in place. Either way
+    the copy's mtime is set to now: that is its last use for prune() (copytree would carry the publish time over)."""
     src, dst = entry["src"], entry["dst"]
     want = manifest_hash(src)
-    if want and manifest_hash(dst) == want:
-        return
-    tmp = f"{dst}.tmp-{os.getpid()}"
-    shutil.rmtree(tmp, ignore_errors=True)
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copytree(src, tmp, symlinks=True)
-    if os.path.exists(dst):
-        old = f"{dst}.old-{os.getpid()}"
-        os.rename(dst, old)
-        os.rename(tmp, dst)
-        shutil.rmtree(old, ignore_errors=True)
-    else:
-        os.rename(tmp, dst)
+    if not (want and manifest_hash(dst) == want):
+        tmp = f"{dst}.tmp-{os.getpid()}"
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copytree(src, tmp, symlinks=True)
+        owner_writable(tmp)        # published artifacts are read-only; the local copy must stay replaceable and prunable
+        if os.path.exists(dst):
+            old = f"{dst}.old-{os.getpid()}"
+            os.rename(dst, old)
+            os.rename(tmp, dst)
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            os.rename(tmp, dst)
+    os.utime(dst)
+
+
+def owner_writable(root: str) -> None:
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in [""] + dirnames + filenames:
+            p = os.path.join(dirpath, n) if n else dirpath
+            if not os.path.islink(p):
+                os.chmod(p, os.lstat(p).st_mode | 0o200)
+
+
+IN_FLIGHT = re.compile(r"\.(tmp|old)-\d+$")         # sync()'s work directories (maybe another launcher's, mid-copy)
+
+
+def referenced(local: str) -> dict[str, set[str]] | None:
+    """Artifact names in the current render of every instance under <LOCAL> (`run/<inst>/render.json`, saved by
+    fetch() before anything is synced): several instances may share one <LOCAL>. None if one cannot be read."""
+    out: dict[str, set[str]] = {k: set() for k in KINDS}
+    run = os.path.join(local, "run")
+    try:
+        names = os.listdir(run)
+    except FileNotFoundError:
+        return out
+    except OSError:
+        return None
+    for inst in names:
+        path = os.path.join(run, inst, "render.json")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                for e in json.load(f).get("sync") or []:
+                    out[e["kind"]].add(e["name"])
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            return None
+    return out
 
 
 def prune(local: str, kind: str, keep_names: set[str]) -> None:
-    """Keep the KEEP_LOCAL most recently used copies per kind (plus the ones in use)."""
+    """Keep the KEEP_LOCAL most recently used copies per kind (sync() stamps the use), plus every copy that any
+    instance under <LOCAL> currently runs. If an instance's run state cannot be read, nothing is removed."""
+    refs = referenced(local)
+    if refs is None:
+        return
+    keep = set(keep_names) | refs.get(kind, set())
     base = os.path.join(local, kind)
     try:
-        entries = [e for e in os.scandir(base) if e.is_dir() and NAME.match(e.name)]
+        entries = [e for e in os.scandir(base) if e.is_dir(follow_symlinks=False) and NAME.match(e.name)
+                   and not IN_FLIGHT.search(e.name)]
     except OSError:
         return
-    entries.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+    entries.sort(key=lambda e: e.stat(follow_symlinks=False).st_mtime, reverse=True)
     for e in entries[KEEP_LOCAL:]:
-        if e.name not in keep_names:
+        if e.name not in keep:
             shutil.rmtree(e.path, ignore_errors=True)
 
 
@@ -326,7 +421,10 @@ def main(argv: list[str] | None = None) -> int:
             raise Refused("bad instance name")
         prefixes = [p for p in env.get("COMFY_LAUNCH_PREFIXES", "").split(",") if p]
         render = fetch(cfg["router"], cfg["instance"], cfg["local"])
-        validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes)
+        try:
+            validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes)
+        except (TypeError, AttributeError, KeyError, ValueError) as e:     # any malformed render is a refusal, not a crash
+            raise Refused(f"malformed render ({type(e).__name__}: {e})".replace("\n", " "))
         if "--check" in args:
             print(f"ok {render['rev']}")
             return 0

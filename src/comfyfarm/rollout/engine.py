@@ -8,11 +8,14 @@ already running finish; the rest are skipped.
 
 State lives in the ledger (`rollouts`, `rollout_steps`), so the dashboard shows it and a router restart cannot lose
 it: a rollout found running at start is marked `interrupted` (its workers stay in maintenance) until an admin resumes
-or aborts it. Resuming re-runs unfinished steps from the top; a worker already running the target is not restarted.
+or aborts it — and so is a rollout whose driver fails (database busy or gone): it is never picked up again on its own.
+Resuming re-runs unfinished steps from the top; a worker already running the target is not restarted; a step caught
+while reverting finishes its revert (never forward), and a failure already recorded keeps new steps from starting.
 """
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 
@@ -30,6 +33,8 @@ FINAL = ("done", "failed", "reverted", "revert_failed", "skipped")
 REFILL_DELAY = 4.0             # after a worker returns, before the next leaves: capacity never dips below the window
 STATUS_EVERY = 5.0             # backend.status (an ssh call) at most this often per instance
 HEARTBEAT = 240.0              # log line while a drain waits (log-based suppression windows must not expire)
+QUICK_DRAIN = 10.0             # the re-check under the startup lock gives up this soon (and lets the lock go)
+BAD = ("failed", "reverted", "revert_failed")
 BROKEN_WORKFLOW = {"1": {"class_type": "ComfyFarmVerifyNoSuchNode", "inputs": {}}}
 SMOKE_WORKFLOW = {"1": {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}},
                   "2": {"class_type": "PreviewImage", "inputs": {"images": ["1", 0]}}}
@@ -56,7 +61,7 @@ class Engine:
     def __init__(self, router):
         self.r = router
         self.db, self.s = router.db, router.s
-        self.make_backend = be.make                      # tests replace it
+        self.make_backend = functools.partial(be.make, keys_dir=self.s.keys_dir)     # tests replace it
         self.poll = 1.0                                  # probe interval while watching a restart
         self.start_lock = asyncio.Lock()                 # startups are serialised (shared storage, D: docs/design/07)
         self.current: int | None = None
@@ -72,16 +77,35 @@ class Engine:
         if n.split()[-1] != "0":
             log.warning("rollout interrupted by a router restart; its workers stay in maintenance until resumed or aborted")
 
+    async def interrupt(self, rid: int, why: str):
+        async with self.db.conn() as c:
+            async with c.transaction():
+                n = await c.execute("UPDATE rollouts SET status = 'interrupted', error = $2 WHERE id = $1 AND "
+                                    "status IN ('running', 'aborting')", rid, why)
+                if n.split()[-1] != "0":
+                    await audit(c, "rollout engine", "rollout interrupted", f"rollout #{rid}", error=why)
+
     async def run(self):
         await self.interrupt_leftovers()
+        halted: dict[int, str] = {}     # drives that failed, not yet marked interrupted (the ledger may be what failed)
         while True:
             try:
+                for rid, why in list(halted.items()):
+                    await self.interrupt(rid, why)
+                    del halted[rid]
                 async with self.db.conn() as c:
                     rid = await c.fetchval("SELECT id FROM rollouts WHERE status IN ('running', 'aborting') ORDER BY id LIMIT 1")
                 if rid is not None:
                     self.current = rid
                     try:
                         await self.drive(rid)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        # like a router restart (D-38): the step tasks went with the driver; never drive it again on
+                        # our own — a step caught mid-restart has an unknown outcome and a person decides
+                        log.exception("rollout #%s: the engine failed; interrupted until resumed or aborted", rid)
+                        halted[rid] = f"engine error during the rollout: {type(e).__name__}: {e}"[:500]
                     finally:
                         self.current = None
             except asyncio.CancelledError:
@@ -112,14 +136,17 @@ class Engine:
             await asyncio.gather(*active, return_exceptions=True)
 
     async def _drive(self, rid: int, ro, opts: dict, actor: str, active: dict):
-        failed = False
+        async with self.db.conn() as c:         # a failure recorded before an interruption still stops new steps
+            failed = bool(await c.fetchval("SELECT count(*) FROM rollout_steps WHERE rollout_id = $1 AND status = ANY($2::text[])",
+                                           rid, list(BAD)))
         last_return = 0.0
         while True:
-            async with self.db.conn() as c:
-                status = await c.fetchval("SELECT status FROM rollouts WHERE id = $1", rid)
+            status = await self.status_of(rid)
             stopping = failed or status == "aborting"
-            if not stopping and len(active) < ro["window_size"] and time.monotonic() - last_return >= REFILL_DELAY:
-                step = await self.next_step(rid, set(active.values()))
+            if status != "aborting" and len(active) < ro["window_size"] and \
+                    (failed or time.monotonic() - last_return >= REFILL_DELAY):
+                # after a failure only steps an interruption left unfinished are driven to an end (canary stop)
+                step = await self.next_step(rid, set(active.values()), resumed_only=failed)
                 if step is not None:
                     t = asyncio.create_task(self.run_step(step, opts, actor, lambda: self.aborting(rid)))
                     active[t] = step["id"]
@@ -129,21 +156,26 @@ class Engine:
                     left = await c.fetchval("SELECT count(*) FROM rollout_steps WHERE rollout_id = $1 AND status = 'pending'", rid)
                 if stopping or not left:
                     break
+                await asyncio.sleep(1.0)              # nothing running, the next step waits for REFILL_DELAY
+                continue
             done, _ = await asyncio.wait(active, timeout=1.0, return_when=asyncio.FIRST_COMPLETED)
             for t in done:
                 active.pop(t)
                 ok = t.result() if not t.cancelled() and t.exception() is None else False
-                if t.exception() is not None:
+                if not t.cancelled() and t.exception() is not None:
                     log.error("rollout step crashed: %r", t.exception())
                 failed |= ok is False
                 last_return = time.monotonic()
         await self.finish(rid, actor)
 
-    async def aborting(self, rid: int) -> bool:
+    async def status_of(self, rid: int) -> str | None:
         async with self.db.conn() as c:
-            return await c.fetchval("SELECT status FROM rollouts WHERE id = $1", rid) == "aborting"
+            return await c.fetchval("SELECT status FROM rollouts WHERE id = $1", rid)
 
-    async def next_step(self, rid: int, running_ids: set[int]):
+    async def aborting(self, rid: int) -> bool:
+        return await self.status_of(rid) == "aborting"
+
+    async def next_step(self, rid: int, running_ids: set[int], resumed_only: bool = False):
         """Among pending steps: the worker whose running job finishes soonest (`elapsed × (100 − p) / p`), idle first."""
         async with self.db.conn() as c:
             rows = await c.fetch(
@@ -167,6 +199,8 @@ class Engine:
         resumed = [r for r in cands if r["status"] != "pending"]
         if resumed:
             return dict(resumed[0])
+        if resumed_only:
+            return None
         cands = sorted(cands, key=lambda r: (remaining(r), r["position"]))
         return dict(cands[0]) if cands else None
 
@@ -177,8 +211,8 @@ class Engine:
                 await c.execute("UPDATE rollout_steps SET status = 'skipped', finished_at = now(), "
                                 "detail = coalesce(detail, $2) WHERE rollout_id = $1 AND status = 'pending'",
                                 rid, "aborted" if aborting else "not started: an earlier step failed")
-                bad = await c.fetchval("SELECT count(*) FROM rollout_steps WHERE rollout_id = $1 AND status IN "
-                                       "('failed', 'reverted', 'revert_failed')", rid)
+                bad = await c.fetchval("SELECT count(*) FROM rollout_steps WHERE rollout_id = $1 AND status = ANY($2::text[])",
+                                       rid, list(BAD))
                 status = "aborted" if aborting else "failed" if bad else "succeeded"
                 await c.execute("UPDATE rollouts SET status = $2, finished_at = now() WHERE id = $1", rid, status)
                 await audit(c, actor, f"rollout {status}", f"rollout #{rid}")
@@ -220,7 +254,15 @@ class Engine:
             await self.set_step(sid, "failed", error=str(e))
             return False
         backend = self.make_backend(inst["restart_backend"], inst["restart_config"])
-        changed = False
+        if step["status"] == "reverting":          # interrupted mid-revert: finish the revert, never go forward (D-38)
+            await self.revert(sid, backend, inst, w, frm, opts, actor, step.get("error") or "interrupted while reverting")
+            return False
+        # interrupted after the drain: the assignment may have changed and a restart was under way — a failure reverts,
+        # and an abort lets it finish (as for any restart under way)
+        changed = step["status"] in ("restarting", "starting", "verifying")
+        if changed:
+            async def aborting():
+                return False
         try:
             async with self.db.conn() as c:
                 async with c.transaction():
@@ -229,21 +271,29 @@ class Engine:
                     if not w["maintenance"]:
                         await c.execute("UPDATE workers SET maintenance = true WHERE id = $1", w["id"])
                         await audit(c, actor, "maintenance on", w["name"])
-            await self.set_step(sid, "draining", "waiting for the running job")
+            if not changed:                # a resumed step keeps its status: an abort must not treat it as draining
+                await self.set_step(sid, "draining", "waiting for the running job")
             await asyncio.sleep(self.s.dispatch_period + 1.0)          # a claim in flight must land before we look
-            await self.drain(w, opts, aborting)
-            async with self.start_lock:                                # startups one at a time
-                await self.drain(w, opts, aborting, quick=True)        # once more, right before the restart
-                target = rd.build(to, inst)
-                if await self.argv(w["base_url"]) == target["argv"][1:] and inst["profile_id"] == to["id"]:
-                    await self.set_step(sid, "starting", "already running the target")
-                else:
-                    await self.set_step(sid, "restarting", f"via {inst['restart_backend']}")
-                    await self.assign(inst, to, actor)
-                    changed = True
-                    await self.restart(backend, inst, w, opts)
-                    await self.set_step(sid, "starting", "waiting for the new version")
-                    await self.wait_match(backend, inst, w, target, opts)
+            while True:
+                await self.drain(w, opts, aborting)
+                async with self.start_lock:                            # startups one at a time
+                    # once more, right before the restart (an abort while queued on the lock counts too); a job that
+                    # slipped in sends the step back to draining without holding the lock
+                    if not await self.drain(w, opts, aborting, quick=True):
+                        await self.set_step(sid, step["status"] if changed else "draining",
+                                            "a job arrived right before the restart; waiting again")
+                        continue
+                    target = rd.build(to, inst)
+                    if await self.argv(w["base_url"]) == target["argv"][1:] and inst["profile_id"] == to["id"]:
+                        await self.set_step(sid, "starting", "already running the target")
+                    else:
+                        await self.set_step(sid, "restarting", f"via {inst['restart_backend']}")
+                        await self.assign(inst, to, actor)
+                        changed = True
+                        await self.restart(backend, inst, w, opts)
+                        await self.set_step(sid, "starting", "waiting for the new version")
+                        await self.wait_match(backend, inst, w, target, opts)
+                break
             await self.set_step(sid, "verifying")
             await self.verify(w, opts)
             async with self.db.conn() as c:
@@ -268,16 +318,19 @@ class Engine:
                 await self.set_step(sid, "failed", error=str(e))
                 return False
             await self.set_step(sid, "reverting", f"back to {frm['name'] if frm else '?'}", error=str(e))
-            try:
-                if frm is None:
-                    raise StepFailed("no previous profile to return to")
-                await self.assign(inst, frm, actor)
-                await self.restart(backend, inst, w, opts)
-                await self.wait_match(backend, inst, w, rd.build(frm, inst), opts)
-                await self.set_step(sid, "reverted", f"back on {frm['name']}; left in maintenance")
-            except Exception as e2:
-                await self.set_step(sid, "revert_failed", "left in maintenance", error=f"{e} · revert: {type(e2).__name__}: {e2}")
+            await self.revert(sid, backend, inst, w, frm, opts, actor, str(e))
             return False
+
+    async def revert(self, sid: int, backend, inst: dict, w: dict, frm: dict | None, opts: dict, actor: str, why: str):
+        try:
+            if frm is None:
+                raise StepFailed("no previous profile to return to")
+            await self.assign(inst, frm, actor)
+            await self.restart(backend, inst, w, opts)
+            await self.wait_match(backend, inst, w, rd.build(frm, inst), opts)
+            await self.set_step(sid, "reverted", f"back on {frm['name']}; left in maintenance")
+        except Exception as e2:
+            await self.set_step(sid, "revert_failed", "left in maintenance", error=f"{why} · revert: {type(e2).__name__}: {e2}")
 
     async def undrain(self, w: dict, sid: int, actor: str):
         async with self.db.conn() as c:
@@ -296,12 +349,13 @@ class Engine:
         inst["profile_id"] = profile["id"]
 
     # ---- observations -----------------------------------------------------------------------------------------
-    async def drain(self, w: dict, opts: dict, aborting, quick: bool = False):
+    async def drain(self, w: dict, opts: dict, aborting, quick: bool = False) -> bool:
         """Ledger has no job on the worker AND the worker's own queue is empty — twice in a row (two signals with
-        different lag; a job arriving late must be seen)."""
+        different lag; a job arriving late must be seen). `quick` (under the startup lock): once, and False if that
+        is not seen within QUICK_DRAIN seconds — the lock is never held for a drain."""
         need, ok_streak, t0, beat = (1 if quick else 2), 0, time.monotonic(), time.monotonic()
         while True:
-            if await aborting() and not quick:
+            if await aborting():
                 raise Aborted()
             async with self.db.conn() as c:
                 busy = await c.fetchval("SELECT count(*) FROM jobs WHERE worker_id = $1 AND status IN "
@@ -309,7 +363,9 @@ class Engine:
             empty = await self.worker_queue_empty(w["base_url"])
             ok_streak = ok_streak + 1 if (not busy and empty is not False) else 0
             if ok_streak >= need:
-                return
+                return True
+            if quick and time.monotonic() - t0 > QUICK_DRAIN:
+                return False
             if opts["drain_timeout"] and time.monotonic() - t0 > opts["drain_timeout"]:
                 raise StepFailed(f"not drained after {opts['drain_timeout']} s")
             if time.monotonic() - beat > HEARTBEAT:

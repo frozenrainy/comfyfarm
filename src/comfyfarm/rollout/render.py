@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
+import posixpath
 
 from .. import launcher
 
 CONTRACT = launcher.CONTRACT
 REV_SLOT = "{rev}"
 PATH_KEYS = ("art", "local", "models", "input", "output", "user", "temp")
+WRITABLE_KEYS = ("input", "output", "user", "temp")     # users write here (launcher.WRITABLE)
 MANAGED = {"--listen", "--port", "--multi-user", "--models-directory", "--extra-model-paths-config", "--input-directory",
            "--output-directory", "--user-directory", "--temp-directory", "--front-end-root", "--base-directory"}
 
@@ -65,6 +68,19 @@ def build(profile: dict, inst: dict) -> dict:
     render["files"] = {real: render["files"][yaml_path]}
     render["rev"] = rev
     return render
+
+
+def path_problems(paths: dict, win: bool) -> list[str]:
+    """The launcher's rule for user-writable directories, for both platforms: never inside <ART> or <LOCAL>, and never
+    a parent of them (an upload's subfolder would reach the code below)."""
+    norm = (lambda p: ntpath.normcase(ntpath.normpath(p))) if win else posixpath.normpath     # noqa: E731
+    sep = "\\" if win else "/"
+
+    def inside(a: str, b: str) -> bool:
+        a, b = norm(a), norm(b)
+        return a == b or a.startswith(b.rstrip(sep) + sep)
+    return [f"paths.{k} overlaps paths.{c}" for k in WRITABLE_KEYS for c in ("art", "local")
+            if inside(paths[k], paths[c]) or inside(paths[c], paths[k])]
 
 
 def check(profile: dict, inst: dict) -> dict:

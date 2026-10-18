@@ -64,6 +64,8 @@ def test_router_refuses_profiles_the_launcher_would_refuse(tmp_path):
         rd.check(dict(profile, flags=["--output-directory", "/tmp"]), inst)
     with pytest.raises(rd.BadProfile, match="not allowed"):
         rd.check(dict(profile, flags=["--enable-manager"]), inst)
+    with pytest.raises(rd.BadProfile, match="not allowed"):                # QA-6: not a published artifact (D-37)
+        rd.check(dict(profile, flags=["--front-end-version", "Comfy-Org/ComfyUI_frontend@latest"]), inst)
     with pytest.raises(rd.BadProfile, match="environment"):
         rd.check(dict(profile, env={"LD_PRELOAD": "/tmp/x.so"}), inst)
 
@@ -99,6 +101,7 @@ def bad_cases(r, p):
         ("yaml loads nodes from the input dir", lambda x: x["files"].__setitem__(yaml_path(x), launcher.nodes_yaml([p["input"]]))),
         ("yaml outside the run dir", lambda x: x.update(files={f"{local}/evil.yaml": "comfyfarm: {}\n"})),
         ("frontend from anywhere", argv_add("--front-end-root", "/tmp/fe")),
+        ("frontend downloaded at runtime", argv_add("--front-end-version", "Comfy-Org/ComfyUI_frontend@latest")),
         ("LD_PRELOAD", lambda x: x["env"].update(LD_PRELOAD="/tmp/x.so")),
         ("PYTHONPATH", lambda x: x["env"].update(PYTHONPATH="/tmp")),
         ("sync from outside the store", lambda x: x["sync"][0].update(src="/tmp/core")),
@@ -112,6 +115,12 @@ def bad_cases(r, p):
         ("require odd path", lambda x: x["require"].append("/tmp/READY")),
         ("bad rev", lambda x: x.update(rev="xyz")),
         ("option without value", argv_add("--port")),
+        # QA-8: malformed, not merely wrong — must be a refusal (exit 2), never a crash (exit 1: restart loop)
+        ("sync entry not an object", lambda x: x["sync"].append("x")),
+        ("sync as an object", lambda x: x.update(sync={"core": x["sync"][0]})),
+        ("sync name not a string", lambda x: x["sync"][1].update(name=5)),
+        ("files as a list", lambda x: x.update(files=list(x["files"]))),
+        ("require as a string", lambda x: x.update(require=x["require"][0])),
     ]
 
 
@@ -200,6 +209,27 @@ def test_launcher_run(tmp_path, monkeypatch, capsys):
         fr.close()
 
 
+def test_launcher_malformed_render_exits_2(tmp_path, monkeypatch, capsys):
+    """QA-8: a malformed render from the router is a refusal (exit 2, one line), not an exception (exit 1)."""
+    profile, inst = make_world(tmp_path)
+    fr = FakeRouter()
+    p = inst["paths"]
+    for k, v in {"ROUTER": f"http://127.0.0.1:{fr.port}", "INSTANCE": "gpu-1", "ARTIFACTS": p["art"], "LOCAL": p["local"],
+                 "PREFIXES": ",".join(p[k] for k in ("models", "input", "output", "user", "temp"))}.items():
+        monkeypatch.setenv(f"COMFY_LAUNCH_{k}", v)
+    monkeypatch.setattr(os, "execve", lambda *a: pytest.fail("must not start"))
+    try:
+        for mutate in (lambda x: x["sync"].append("x"), lambda x: x.update(files=list(x["files"])), lambda x: x.update(env=[])):
+            bad = rd.build(profile, inst)
+            mutate(bad)
+            fr.body = json.dumps(bad).encode()
+            assert launcher.main(["--check"]) == 2
+            err = capsys.readouterr().err
+            assert "refused" in err and err.count("\n") == 1
+    finally:
+        fr.close()
+
+
 def test_sync_skips_current_copies_and_publish_hash(tmp_path):
     src, dst = tmp_path / "art/core/c1", tmp_path / "local/core/c1"
     src.mkdir(parents=True)
@@ -219,3 +249,95 @@ def test_sync_skips_current_copies_and_publish_hash(tmp_path):
     (src / "manifest.json").write_text(json.dumps({"tree_sha256": launcher.tree_sha256(str(src))}))
     launcher.sync({"src": str(src), "dst": str(dst)})
     assert not (dst / "marker").exists() and (dst / "a.py").read_text() == "changed!"
+
+
+def test_user_writable_dirs_stay_out_of_code(tmp_path):
+    """QA-1: uploads must never land where ComfyUI imports code — not inside <LOCAL> (core and node copies) or <ART>,
+    and not in a parent of them either (an upload's subfolder reaches everything below the input directory)."""
+    from fastapi import HTTPException
+    from comfyfarm.api.rollout import InstanceIn, check_instance
+    profile, inst = make_world(tmp_path)
+    p = inst["paths"]
+    every = [p[k] for k in ("models", "input", "output", "user", "temp")] + [str(tmp_path)]
+    validate(rd.build(profile, inst), inst, prefixes=every)                         # positive control
+    check_instance(InstanceIn(**{**inst, "port": 8188}))
+    for key, value in [("input", f"{p['local']}/core/{profile['core']}/custom_nodes"), ("user", f"{p['local']}/nodes/base-nodes"),
+                       ("input", p["local"]), ("temp", f"{p['local']}/run/gpu-1/tmp"), ("output", str(tmp_path))]:
+        bad = dict(inst, paths={**p, key: value})
+        with pytest.raises(launcher.Refused, match="outside <ART> and <LOCAL>"):
+            validate(rd.build(profile, bad), bad, prefixes=every)
+        with pytest.raises(rd.BadProfile, match="outside <ART> and <LOCAL>"):
+            rd.check(profile, bad)
+        with pytest.raises(HTTPException, match="overlaps"):
+            check_instance(InstanceIn(**{**bad, "port": 8188}))
+    win = dict(inst, platform="windows", paths={k: "C:\\farm\\" + k for k in p})
+    check_instance(InstanceIn(**{**win, "port": 8188}))
+    with pytest.raises(HTTPException, match="overlaps"):
+        check_instance(InstanceIn(**{**win, "paths": {**win["paths"], "input": "c:\\FARM\\local\\nodes\\x"}, "port": 8188}))
+
+
+def test_env_values_that_name_paths_are_refused(tmp_path):
+    """QA-2: the prefixes (TORCH_, TRITON_, HSA_, ...) also cover variables that load plugin libraries, tool binaries or
+    compiled kernels. Values that are paths are refused; what real profiles need still passes."""
+    from fastapi import HTTPException
+    from comfyfarm.api.rollout import check_profile
+    profile, inst = make_world(tmp_path)
+    needed = {"HSA_OVERRIDE_GFX_VERSION": "12.0.1", "HSA_TOOLS_DISABLE_REGISTER": "1", "HIP_VISIBLE_DEVICES": "0",
+              "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True,garbage_collection_threshold:0.6",
+              "CUDA_VISIBLE_DEVICES": "0,1", "MIOPEN_FIND_MODE": "FAST", "TORCH_CUDA_ARCH_LIST": "8.6;12.0+PTX",
+              "COMFYFARM_ALLOW": "10.0.0.1,10.0.0.2,10.0.1.0/24", "TZ": "Asia/Seoul", "OMP_NUM_THREADS": "8"}
+    good = dict(profile, env=needed)
+    validate(rd.build(good, inst), inst)                                     # positive control
+    rd.check(good, inst)
+    p = inst["paths"]
+    for k, v in [("HSA_TOOLS_LIB", f"{p['input']}/evil.so"), ("TRITON_PTXAS_PATH", "/tmp/ptxas"),
+                 ("MIOPEN_CUSTOM_CACHE_DIR", p["input"]), ("TRITON_CACHE_DIR", "../../run"), ("TORCH_EXTENSIONS_DIR", "~/ext"),
+                 ("NCCL_NET_PLUGIN", "x:./libevil.so"), ("ROCM_PATH", "C:\\rocm"), ("TZ", "/data/run/in/zone"),
+                 ("COMFYFARM_ALLOW", "10.0.0.1,/etc/x"), ("HIP_VISIBLE_DEVICES", "0\n1")]:
+        r = rd.build(dict(profile, env={k: v}), inst)
+        with pytest.raises(launcher.Refused, match=k):
+            validate(r, inst)
+        with pytest.raises(rd.BadProfile):
+            rd.check(dict(profile, env={k: v}), inst)
+        assert launcher.env_problem(k, v) and "\n" not in launcher.env_problem(k, v)
+        with pytest.raises(HTTPException, match="environment"):
+            check_profile(dict(profile, env={k: v}))
+
+
+def test_prune_keeps_what_any_instance_runs_and_orders_by_use(tmp_path):
+    """QA-5: with a shared <LOCAL>, one launcher must not delete what another instance runs; "most recently used" is
+    the launcher's own stamp, not the publish time that copytree carries over."""
+    import time
+    art, local = tmp_path / "art", tmp_path / "local"
+
+    def published(name, mtime):
+        d = art / "core" / name
+        d.mkdir(parents=True)
+        (d / "main.py").write_text(name)
+        (d / "manifest.json").write_text(json.dumps({"tree_sha256": "h-" + name}))
+        os.utime(d, (mtime, mtime))
+        return {"kind": "core", "name": name, "src": str(d), "dst": str(local / "core" / name)}
+    entries = {n: published(n, 1000 + i * 100) for i, n in enumerate(["c1", "c2", "c3", "c4", "c5"])}
+    for n in ["c5", "c4", "c3", "c2", "c1"]:                              # used newest-published first
+        launcher.sync(entries[n])
+        time.sleep(0.02)
+    launcher.prune(str(local), "core", set())
+    assert sorted(os.listdir(local / "core")) == ["c1", "c2", "c3"]       # the three used last, whatever their age
+
+    # another instance (gpu-2) on the same <LOCAL> runs c5: kept although it is the least recently used
+    launcher.sync(entries["c5"])
+    run2 = local / "run" / "gpu-2"
+    run2.mkdir(parents=True)
+    (run2 / "render.json").write_text(json.dumps({"sync": [entries["c5"]]}))
+    time.sleep(0.02)
+    for n in ["c4", "c3", "c2", "c1"]:
+        launcher.sync(entries[n])
+        time.sleep(0.02)
+    (local / "core" / "c9.tmp-4242").mkdir()                               # another launcher mid-copy
+    launcher.prune(str(local), "core", {"c1"})
+    assert sorted(os.listdir(local / "core")) == ["c1", "c2", "c3", "c5", "c9.tmp-4242"]
+    # an unreadable run state: nothing is removed (what it references is unknown)
+    (run2 / "render.json").write_text("{not json")
+    launcher.sync(entries["c4"])
+    launcher.prune(str(local), "core", {"c4"})
+    assert "c1" in os.listdir(local / "core") and "c5" in os.listdir(local / "core")

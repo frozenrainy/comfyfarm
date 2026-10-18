@@ -45,6 +45,11 @@ COMFY_LAUNCH_LOCAL=<LOCAL>                    # local copies of core/nodes + run
 COMFY_LAUNCH_PREFIXES=/data/models,/data/run  # every directory the render may name (models, input, output, user, temp)
 ```
 
+The directories users write to (input, output, user, temp) must lie outside `<ART>` and `<LOCAL>` and must not
+contain them either: `<LOCAL>` holds the core and node copies ComfyUI imports as code. The launcher refuses such a
+render, and the dashboard refuses such instance paths. Profile environment values must not be paths (`/`, `\`, or a
+part starting with `~` or `.`); `COMFYFARM_ALLOW` takes addresses and CIDR blocks.
+
 The launcher talks to the router directly, not through the gateway. Check a render without starting anything:
 `set -a; . <instance>.env; python3 launcher.py --check` → `ok <rev>` or `refused: <reason>` (exit 2).
 
@@ -60,12 +65,17 @@ command="COMFYFARM_AGENT_INSTANCES=<instance> COMFYFARM_AGENT_USER=1 /usr/bin/py
 ```
 
 HTTP flavour (no ssh, e.g. Windows hosts later): `python3 agent.py serve --port 8399 --token-file <file>` and the
-`http-agent` backend with `{"url": …, "token": …}`.
+`http-agent` backend with `{"url": "http://<host>:8399", "token_file": "<host>.token"}` (a copy of the token in the
+router's keys directory) or `{"url": …, "token_env": "COMFYFARM_AGENT_TOKEN_<HOST>"}` (a variable in the router's
+environment). The token value itself is refused: it would be stored in the ledger and its backups.
 
 ## 3. In the dashboard (System → Rollout)
 
 1. **Instance** of each worker: instance name, the host address(es) allowed to fetch its render, port, the seven
-   paths, restart backend and its configuration (`ssh`: `{"host", "user", "key"}`, the key file readable by the router).
+   paths, restart backend and its configuration (`ssh`: `{"host", "user", "key"}` plus optional `port` and
+   `known_hosts`). Key, `known_hosts` and agent token files must lie in the router's keys directory (`keys_dir`,
+   environment `COMFYFARM_KEYS_DIR`, default `/etc/comfyfarm/keys`; `/keys` in the compose deployment) — give them
+   as a file name there or as a path inside it; anything else is refused.
 2. **Profiles**: core, venv, node artifacts, extra flags, environment. A profile in use cannot be changed; copy it.
 3. First start: *Assign* the current profile (no restart), start the unit on the host, wait for the badge `match`.
 4. Upgrades: *Start rollout* — the worker is drained (its running job finishes), restarted through the backend, must be
@@ -80,10 +90,11 @@ The backend `manual` needs no agent: the dashboard tells an operator which insta
 Venvs are large; old ones are worth deleting once no profile that a worker might go back to uses them. Do not
 delete the directory itself — publish refuses only names that exist, and a name must never be reused. Keep it as a
 marker: remove `READY` first (the launcher refuses it from that moment), then everything but `manifest.json`, and
-leave a note:
+leave a note. `publish.py` makes artifacts read-only, so give the owner write access back first:
 
 ```sh
-V=<ART>/venv/<name>; rm "$V/READY" && find "$V" -mindepth 1 -maxdepth 1 ! -name manifest.json -exec rm -rf {} +
+V=<ART>/venv/<name>; chmod u+w "$V" && rm -f "$V/READY" && chmod -R u+w "$V" && \
+  find "$V" -mindepth 1 -maxdepth 1 ! -name manifest.json -exec rm -rf {} +
 echo "retired $(date +%F): <why>" > "$V/RETIRED"
 ```
 

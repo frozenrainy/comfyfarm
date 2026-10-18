@@ -221,7 +221,7 @@ agree. If the router cannot confirm, the gateway answers 503 instead of letting 
 
 **D-36 A profile in use is immutable.** *(new)* — Editing a profile that workers are assigned to would change what
 they run at their next restart — any restart, not a controlled one — and the badge would flip to `differs` on every
-worker at once. → Profiles assigned to an instance or targeted by an active rollout accept only note changes; a change
+worker at once. → Profiles assigned to an instance or part of an active rollout (its target, or the profile a step reverts to) accept only note changes; a change
 is a copy rolled out like any other (drained, verified, revertible). Unused profiles stay editable.
 
 **D-37 The launcher validates what the render *means*, not only its shape.** *(new)* — An allow-list of ComfyUI

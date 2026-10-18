@@ -186,3 +186,76 @@ def test_tree_refuses_non_utf8_names(tmp_path):
         pytest.skip("this filesystem refuses non-UTF-8 names (APFS does); the rule is exercised on ext4/xfs")
     with pytest.raises(ValueError, match="UTF-8"):
         launcher.tree_sha256(str(root))
+
+
+def test_tree_refuses_newlines_in_link_names_and_targets(tmp_path):
+    """QA-11: a newline in a directory-symlink name or in any symlink target would end its hash line early (contract §2:
+    newline names are refused; a target with one is refused for the same reason)."""
+    import os
+    for i, (name, target, is_dir) in enumerate([("bad\nlink", "lib", True), ("ok-link", "a\nb", False), ("ok-dir", "lib\nx", True)]):
+        root = tmp_path / f"t{i}"
+        (root / "lib").mkdir(parents=True)
+        os.symlink(target, root / name, target_is_directory=is_dir)
+        with pytest.raises(ValueError, match="newline"):
+            launcher.tree_sha256(str(root))
+        with pytest.raises(publish.Refused, match="newline"):
+            publish.publish_tree(str(tmp_path / "art"), "nodes", f"n{i}", str(root))
+
+
+def test_publish_symlink_rules(tmp_path):
+    """QA-11: no symlinks in a core (contract §2: the release archive as is); node symlinks must stay inside."""
+    import os
+    art = tmp_path / "art"
+    core = tmp_path / "core-src"
+    (core / "comfy").mkdir(parents=True)
+    (core / "main.py").write_text("x")
+    (core / "link.py").symlink_to("main.py")
+    with pytest.raises(publish.Refused, match="symlink in a core"):
+        publish.publish_tree(str(art), "core", "c1", str(core))
+    assert not (art / "core" / "c1").exists() and os.listdir(art / "core") == []     # nothing left, name not used
+    for i, target in enumerate(["../../outside", "/etc/passwd", "../.."]):
+        nodes = tmp_path / f"nodes{i}"
+        (nodes / "sub").mkdir(parents=True)
+        (nodes / "sub" / "evil").symlink_to(target)
+        with pytest.raises(publish.Refused, match="outside the artifact"):
+            publish.publish_tree(str(art), "nodes", f"n{i}", str(nodes))
+    ok = tmp_path / "nodes-ok"
+    (ok / "pkg" / "lib").mkdir(parents=True)
+    (ok / "pkg" / "lib64").symlink_to("lib")
+    (ok / "pkg" / "x.py").write_text("x")
+    (ok / "pkg" / "y.py").symlink_to("../pkg/x.py")
+    publish.publish_tree(str(art), "nodes", "ok", str(ok))                        # positive control
+
+
+def test_published_artifacts_are_read_only_and_local_copies_prunable(tmp_path):
+    """QA-11: READY appears only on a read-only artifact (contract §2); the launcher's local copy is its own again, so
+    it can be replaced and pruned."""
+    import os
+    import stat as st
+    art, local = tmp_path / "art", tmp_path / "local"
+    names = []
+    for i in range(5):
+        src = tmp_path / f"src{i}"
+        (src / "pkg").mkdir(parents=True)
+        (src / "pkg" / "n.py").write_text(str(i))
+        publish.publish_tree(str(art), "nodes", f"n{i}", str(src))
+        names.append(f"n{i}")
+    d = art / "nodes" / "n0"
+    for p in [d, d / "READY", d / "manifest.json", d / "pkg", d / "pkg" / "n.py"]:
+        assert not os.lstat(p).st_mode & (st.S_IWUSR | st.S_IWGRP | st.S_IWOTH), p
+    for n in names:
+        launcher.sync({"src": str(art / "nodes" / n), "dst": str(local / "nodes" / n)})
+    assert os.access(local / "nodes" / "n0" / "pkg" / "n.py", os.W_OK)
+    launcher.prune(str(local), "nodes", {"n4"})
+    assert sorted(os.listdir(local / "nodes")) == ["n2", "n3", "n4"]              # really removed, nothing left over
+
+
+def test_venv_escape_relative_pth(tmp_path):
+    """QA-11: a relative .pth line resolves from the .pth's directory — '..' can leave the venv."""
+    v = tmp_path / "venv"
+    site = v / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "ok.pth").write_text("sub\n./other\n")
+    assert publish.venv_escapes(str(v)) == []
+    (site / "up.pth").write_text("../../../../src/pkg\n")
+    assert any("up.pth" in b for b in publish.venv_escapes(str(v)))

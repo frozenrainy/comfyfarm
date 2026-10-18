@@ -9,11 +9,11 @@ The design this project learned from ran in a closed network and trusted it. A p
 | Anyone reaching the router submits jobs or reads queues | **Implemented.** Identity required on every API and WS (D-28); the `dev` provider only on loopback; sessions are confirmed with the router, not trusted from the cookie (D-35) |
 | Guessing another user's `clientId` to receive their previews | **Implemented.** A browser `clientId` is bound to the identity that opened it; events are relayed only to sockets of the job's owner |
 | Users bypass the router and talk to a worker directly (stock `--multi-user` has no authentication: list users, log in as anyone, interrupt others' jobs) | **Implemented.** The worker extension refuses every request (HTTP and WebSocket, all routes) whose TCP peer is not loopback or in `COMFYFARM_ALLOW` (router and gateway addresses/CIDRs); the decision never reads a header. It reports its state on `GET /comfyfarm/info`; the router records it and the dashboard warns about workers that are open, have a malformed list, or lack the extension. A firewall rule is a fine second layer, but not a substitute: the farm cannot see it |
-| A compromised router runs commands on workers via rollout | **Implemented.** The `comfy-upgrade/1` launcher validates every render — allowed binaries, options, path prefixes, env keys, and what the render *means* (D-37) — and refuses otherwise |
+| A compromised router runs commands on workers via rollout | **Implemented.** The `comfy-upgrade/1` launcher validates every render — allowed binaries, options, path prefixes, env keys, env values (no paths: a value with `/`, `\` or a part starting with `~`/`.` is refused, since several allowed prefixes name plugin libraries, tool binaries or kernel caches; `COMFYFARM_ALLOW` must be addresses/CIDRs, `TZ` may be a zone name), and what the render *means* (D-37) — and refuses otherwise. Residual: a bare name in such a variable is still resolved through the worker's own search paths (system libraries), which the router cannot write to |
 | Unauthenticated monitoring endpoint leaks data | **Implemented.** `/api/health/dispatch` and `/metrics` expose counts and seconds only — no users, paths, prompts |
 | CSRF / cross-origin abuse | **Implemented.** No `CORS: *`; the gateway owns the cross-site check (D-30); session cookies `HttpOnly`, `SameSite=Lax`, `Secure` when TLS |
 | Secrets in the repository | None committed; configuration via environment or a file outside the repo. *Planned:* CI secret scanning |
-| Secrets in the ledger | **Implemented.** Comfy.org credentials are never stored (D-29); restart backends store only references (`key` path, `token_file` path or `token_env` name) — a token value is refused at the API (a ledger backup or replica must not carry it) |
+| Secrets in the ledger | **Implemented.** Comfy.org credentials are never stored (D-29); restart backends store only references (`key` path, `token_file` path or `token_env` name) — a token value is refused at the API (a ledger backup or replica must not carry it). The references are confined: files must lie in the keys directory (`COMFYFARM_KEYS_DIR`), `token_env` must be named `COMFYFARM_AGENT_TOKEN…` (the token is sent to the agent's URL, so any other file or variable would be too); ssh `user`/`host` are checked and passed so ssh never reads them as options |
 
 ## Things we deliberately do not do
 
@@ -27,7 +27,7 @@ The design this project learned from ran in a closed network and trusted it. A p
 ## Worker allow-list — operation
 
 - Set `COMFYFARM_ALLOW=<router>,<gateway>[,<cidr>…]` in the worker's environment (with the launcher: in the profile's
-  `env`, which the launcher permits for the `COMFYFARM_` prefix). Loopback is always allowed for local administration.
+  `env`, which the launcher permits for the `COMFYFARM_` prefix — addresses and CIDR blocks only). Loopback is always allowed for local administration.
 - Unset or malformed → the worker stays **open** and says so; the dashboard shows *unsecured*. A malformed list is not
   partially applied: a typo must not look like protection.
 - Verified on ComfyUI 0.41.0: from a host outside the list `/system_stats`, `/api/userdata` and `/ws` answer 403

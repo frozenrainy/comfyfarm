@@ -90,12 +90,12 @@ def check_profile(p: dict) -> dict:
         raise HTTPException(400, f"set by the instance, not the profile: {bad}")
     if bad := [f for f in p.get("flags") or [] if f.startswith("--") and f not in launcher.OPTIONS]:
         raise HTTPException(400, f"options the launcher refuses: {bad}")
-    if bad := [k for k in (p.get("env") or {}) if not launcher.env_key_ok(k)]:
-        raise HTTPException(400, f"environment keys the launcher refuses: {bad}")
+    if bad := [why for k, v in (p.get("env") or {}).items() if (why := launcher.env_problem(k, v))]:
+        raise HTTPException(400, f"environment the launcher refuses: {'; '.join(bad)}")
     return p
 
 
-def check_instance(body: InstanceIn) -> dict:
+def check_instance(body: InstanceIn, keys_dir: str | None = None) -> dict:
     if not launcher.INSTANCE.match(body.instance):
         raise HTTPException(400, "instance: letters, digits and . _ - (max 63)")
     if body.role not in ("gpu", "ui") or body.platform not in ("posix", "windows"):
@@ -107,10 +107,13 @@ def check_instance(body: InstanceIn) -> dict:
         v = body.paths[k]
         if not (re.match(r"^[A-Za-z]:\\", v) if win else v.startswith("/")):
             raise HTTPException(400, f"paths.{k} must be absolute")
+    if bad := rd.path_problems(body.paths, win):
+        raise HTTPException(400, "; ".join(bad) + ": directories users write to must lie outside the artifact store "
+                                 "and the local copies (custom nodes are imported from there)")
     if not 1 <= body.port <= 65535:
         raise HTTPException(400, "port out of range")
     try:
-        be.make(body.restart_backend, body.restart_config)
+        be.make(body.restart_backend, body.restart_config, keys_dir=keys_dir)
     except be.BackendError as e:
         raise HTTPException(400, str(e))
     return body.model_dump()
@@ -207,7 +210,8 @@ def make_router(ctx: Ctx) -> APIRouter:
                     raise HTTPException(404, "not found")
                 in_use = await c.fetchval("SELECT count(*) FROM instances WHERE profile_id = $1", profile_id) or \
                     await c.fetchval("SELECT count(*) FROM rollout_steps s JOIN rollouts r ON r.id = s.rollout_id WHERE "
-                                     "s.to_profile_id = $1 AND r.status IN ('running','aborting','interrupted')", profile_id)
+                                     "$1 IN (s.to_profile_id, s.from_profile_id) AND r.status IN ('running','aborting','interrupted')",
+                                     profile_id)                     # the target, and the profile a step reverts to
                 if in_use and set(patch) - {"note"}:
                     raise HTTPException(409, "this profile is in use: copy it and roll the copy out (only the note can change)")
                 merged = check_profile({**{k: cur[k] for k in ("name", "core", "venv", "nodes", "frontend", "flags", "env", "note")},
@@ -276,7 +280,7 @@ def make_router(ctx: Ctx) -> APIRouter:
     @api.put("/api/admin/instances/{worker_id}")
     async def put_instance(worker_id: int, body: InstanceIn, x_comfyfarm_user: str | None = Header(default=None)):
         who = ctx.admin(x_comfyfarm_user)
-        v = check_instance(body)
+        v = check_instance(body, settings.keys_dir)
         async with db.conn() as c:
             async with c.transaction():
                 if not await c.fetchval("SELECT 1 FROM workers WHERE id = $1 AND deleted_at IS NULL", worker_id):
@@ -300,7 +304,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 except asyncpg.UniqueViolationError:
                     raise HTTPException(409, f"instance name {v['instance']!r} is taken")
                 await audit(c, who, "instance configured", v["instance"],       # restart_config holds references only
-                            config={k: v[k] for k in v if k != "restart_config"}, backend=v["restart_backend"])
+                            config=v, backend=v["restart_backend"])
         return {"saved": True}
 
     @api.delete("/api/admin/instances/{worker_id}")
@@ -479,6 +483,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                         if s["status"] == "draining":
                             if not s["was_maintenance"]:
                                 await c.execute("UPDATE workers SET maintenance = false WHERE id = $1", s["worker_id"])
+                                await audit(c, who, "maintenance off", s["name"], rollout=rid)
                             await c.execute("UPDATE rollout_steps SET status = 'skipped', detail = 'aborted', finished_at = now() "
                                             "WHERE id = $1", s["id"])
                         else:
