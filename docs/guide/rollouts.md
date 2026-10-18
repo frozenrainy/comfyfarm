@@ -75,7 +75,19 @@ HTTP flavour (no ssh, e.g. Windows hosts later): `python3 agent.py serve --port 
 
 The backend `manual` needs no agent: the dashboard tells an operator which instance to restart and waits for it.
 
-## 4. After a new venv: watch the idle worker
+## 4. Removing an artifact
+
+Venvs are large; old ones are worth deleting once no profile that a worker might go back to uses them. Do not
+delete the directory itself — publish refuses only names that exist, and a name must never be reused. Keep it as a
+marker: remove `READY` first (the launcher refuses it from that moment), then everything but `manifest.json`, and
+leave a note:
+
+```sh
+V=<ART>/venv/<name>; rm "$V/READY" && find "$V" -mindepth 1 -maxdepth 1 ! -name manifest.json -exec rm -rf {} +
+echo "retired $(date +%F): <why>" > "$V/RETIRED"
+```
+
+## 5. After a new venv: watch the idle worker
 
 The verification above proves the worker renders; it does not prove it idles. After the first real job on a new venv,
 leave the worker idle for a minute and look at its per-thread CPU (`top -H -p <pid>`): an idle ComfyUI uses

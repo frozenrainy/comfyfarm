@@ -73,7 +73,7 @@ directories on the NAS. Copy `ui_ext/comfyfarm_ui` into its `custom_nodes`. It n
 5. Lock the worker down: put `COMFYFARM_ALLOW=<control-plane address>` in the profile's environment (with containers
    the control plane talks from the host's address). Without it the dashboard shows the worker as **unsecured**.
 6. AMD with PyTorch ≥ 2.13 ROCm wheels: also put `HSA_TOOLS_DISABLE_REGISTER=1` into the profile's environment —
-   without it every worker burns one CPU core while idle ([rollouts.md](rollouts.md#4-after-a-new-venv-watch-the-idle-worker)).
+   without it every worker burns one CPU core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)).
 
 ## 4. In the dashboard
 
