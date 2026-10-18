@@ -1,5 +1,7 @@
 # ComfyFarm
 
+English · [한국어](README.ko.md)
+
 A job router for a farm of [ComfyUI](https://github.com/comfyanonymous/ComfyUI) GPU workers — CUDA and ROCm side by
 side. Users keep the stock ComfyUI frontend; ComfyFarm queues their jobs, hands each one to a suitable idle worker, and
 relays progress, previews and errors back to the browser that submitted it.
@@ -24,7 +26,7 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
   ([verified on ComfyUI 0.41.0](docs/design/04-worker-protocol.md#ws-reconnect-race)).
 - Busy-vs-dead worker health that tolerates multi-minute model loads.
 - Mixed CUDA/ROCm farms with capability-aware routing.
-- A web UI (dashboard, queue, history, administration; light/dark) with user accounts and per-user worker-group
+- A web UI (dashboard, queue, history, administration; light/dark; English/Korean) with user accounts and per-user worker-group
   permissions, and `/metrics` for Prometheus with stall numbers defined so that an unknown value never reads as healthy.
 - Rolling ComfyUI upgrades one worker at a time — drained, verified, reverted on failure — via the shared
   `comfy-upgrade/1` contract, with a stdlib-only launcher that refuses anything but published artifacts
