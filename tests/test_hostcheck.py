@@ -142,3 +142,17 @@ def test_cli_reads_the_instance_files(tmp_path, monkeypatch, capsys):
     (tmp_path / "gpu-1.check.json").write_text(json.dumps({"gpu": "none", "paths": {}}))
     assert hostcheck.main(["gpu-1", "--json"]) == 1                                  # router down, no store
     assert any(r["name"] == "router" for r in json.loads(capsys.readouterr().out))
+
+
+def test_a_venv_missing_a_system_library_names_the_package(tmp_path, router):
+    root, paths, art, local = host(tmp_path)
+    v = os.path.join(art, "venv", "rocm-x")
+    os.makedirs(os.path.join(v, "bin")); open(os.path.join(v, "READY"), "w").close()
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    err = (1, "Traceback …\nImportError: libatomic.so.1: cannot open shared object file: No such file or directory")
+    out = hostcheck.Check(env, {"gpu": "amd", "paths": paths}, root=root, cmd=fake_cmd({v: err}), user="comfyfarm").run()
+    r = next(x for x in out if x["name"] == "venv rocm-x")
+    assert r["level"] == "FAIL" and "libatomic.so.1" in r["detail"] and "libatomic1" in r["detail"]
+    ok = fake_cmd({v: (0, "3.12.15 · torch 2.14.1+rocm7.2")})
+    out = hostcheck.Check(env, {"gpu": "amd", "paths": paths}, root=root, cmd=ok, user="comfyfarm").run()
+    assert next(x for x in out if x["name"] == "venv rocm-x")["level"] == "OK"

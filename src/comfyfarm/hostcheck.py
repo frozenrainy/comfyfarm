@@ -26,6 +26,10 @@ ETC = "/etc/comfyfarm"
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 LOCAL_FREE_WARN = 30 * 2**30                # a core + node copies + run files; venvs stay on the store
 MIN_PYTHON = (3, 10)
+# shared libraries GPU wheels load from the system, and the Debian/Ubuntu package that has each
+SYSTEM_LIBS = {"libatomic.so.1": "libatomic1", "libgomp.so.1": "libgomp1", "libnuma.so.1": "libnuma1",
+               "libdrm.so.2": "libdrm2", "libdrm_amdgpu.so.1": "libdrm-amdgpu1", "libelf.so.1": "libelf1t64",
+               "libtinfo.so.6": "libtinfo6", "libstdc++.so.6": "libstdc++6", "libquadmath.so.0": "libquadmath0"}
 
 
 def read_env(path: str) -> dict:
@@ -165,17 +169,30 @@ class Check:
 
     # ---- venvs ----------------------------------------------------------------------------------------------------
     def venvs(self):
+        """Each published venv must not only start but import torch here: the wheels need system libraries the build
+        host had and a fresh host may lack (ROCm torch: libatomic.so.1)."""
         art = self.env.get("COMFY_LAUNCH_ARTIFACTS", "")
+        probe = ("import importlib.util, sys; v = '%d.%d.%d' % sys.version_info[:3]\n"
+                 "if importlib.util.find_spec('torch'):\n import torch; v += ' · torch ' + torch.__version__\n"
+                 "print(v)")
         for ready in sorted(glob.glob(os.path.join(art, "venv", "*", "READY"))) if art else []:
             v = os.path.dirname(ready)
             name = os.path.basename(v)
             py = os.path.join(v, "bin", "python")
-            code, out = self.cmd([py, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"])
+            code, out = self.cmd([py, "-c", probe], timeout=300)
             if code == 0:
-                self.add(OK, f"venv {name}", f"Python {out.strip()} runs here")
+                self.add(OK, f"venv {name}", f"Python {out.strip().splitlines()[-1]} runs here")
+                continue
+            lib = re.search(r"(lib[\w.+-]+\.so[.\d]*): cannot open shared object file", out)
+            if lib:
+                pkg = SYSTEM_LIBS.get(lib.group(1))
+                self.add(FAIL, f"venv {name}", f"a system library is missing on this host: {lib.group(1)}"
+                         + (f" — install {pkg} from your local mirror" if pkg else " — install the package that provides it"))
+            elif not os.path.exists(os.path.realpath(py)):
+                self.add(FAIL, f"venv {name}", f"its interpreter is not on this host ({os.path.realpath(py)}) — a venv "
+                         "built before D-42 points into the build host; publish it again")
             else:
-                self.add(FAIL, f"venv {name}", f"its interpreter does not run here ({os.path.realpath(py)}): {out[:160]} — "
-                         "a venv built before D-42 points into the build host; publish it again")
+                self.add(FAIL, f"venv {name}", f"does not run here: {out.strip()[-200:] or code}")
 
     # ---- time and network -----------------------------------------------------------------------------------------
     def time_and_network(self):
