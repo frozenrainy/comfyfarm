@@ -33,6 +33,7 @@ class UIStub:
 
     def __init__(self):
         self.users, self.seen = {}, []
+        self.refuse = False                                      # behave like a worker whose allow-list lacks the gateway
         self.app = web.Application()
         self.app.router.add_get("/", self.index)
         self.app.router.add_get("/api/users", self.get_users)
@@ -46,6 +47,8 @@ class UIStub:
         self.seen.append(dict(r.headers)); return web.Response(text="<html>stock frontend</html>", content_type="text/html")
 
     async def get_users(self, r):
+        if self.refuse:
+            return web.json_response({"error": "forbidden"}, status=403)
         return web.json_response({"storage": "server", "users": self.users})
 
     async def post_users(self, r):
@@ -330,3 +333,14 @@ async def test_saved_output_falls_back_to_the_executing_worker(farm):
     async with httpx.AsyncClient() as other:                                           # not the owner: nothing
         await login(other, gw, "root", "pw-root")
         assert (await other.get(f"{gw}/api/view", params=f)).status_code == 404
+
+
+async def test_ui_worker_refusing_the_gateway_is_named_not_a_500(farm):
+    gw = farm["gw"]
+    farm["ui"].refuse = True
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        r = await c.get(f"{gw}/")
+        assert r.status_code == 502 and "COMFYFARM_ALLOW" in r.json()["error"]
+        farm["ui"].refuse = False                               # fixed on the worker: no restart of the gateway needed
+        assert (await c.get(f"{gw}/")).text == "<html>stock frontend</html>"

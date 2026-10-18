@@ -20,6 +20,9 @@ export COMFYFARM_DSN=postgresql://…           # the router's connection string
 comfyfarm backup /backups --user-dir /srv/comfy/user     # --pg-bin <dir> if pg_dump is not on PATH
 ```
 
+With containers: `docker compose exec router comfyfarm backup /backups` — `/backups` is `COMFYFARM_BACKUP_DIR` on
+the host (default `deploy/compose/backups`).
+
 Writes `/backups/comfyfarm-backup-<UTC time>/` with `ledger.dump` (pg_dump, custom format), `userdata.tar.gz`,
 `artifacts.json` (names and manifests of everything published — enough to know what to re-publish) and
 `MANIFEST.json`. Run it from cron or a timer; the router keeps running. Keep several generations on another host.
@@ -31,8 +34,10 @@ a loss (publish keeps names unique, so a restored ledger's profiles point at the
 
 1. Stop the router (and the gateway).
 2. `comfyfarm restore /backups/comfyfarm-backup-<time> --yes --user-dir /srv/comfy/user` — the live tables are
-   dropped and recreated from the dump; the user directory is replaced.
-3. Start the router. Run `comfyfarm doctor`: workers come back online by themselves; a rollout that was running at
+   dropped and recreated from the dump in one transaction (a restore that fails changes nothing); the user directory
+   is replaced. With containers: `docker compose stop router gateway`, then
+   `docker compose run --rm --no-deps router comfyfarm restore /backups/comfyfarm-backup-<time> --yes`.
+3. Start the router (`docker compose start router gateway`). Run `comfyfarm doctor`: workers come back online by themselves; a rollout that was running at
    backup time shows as *interrupted* — abort it.
 
 Sessions survive a restore (the cookie's epoch is in the ledger); passwords changed after the backup are back to the

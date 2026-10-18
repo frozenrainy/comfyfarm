@@ -23,8 +23,9 @@ A ComfyFarm site has four kinds of machines. They can share hosts on a small far
 On a machine with internet access, build the image and carry it in:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml build
-docker save comfyfarm:latest postgres:16 | gzip > comfyfarm-images.tar.gz
+docker build -f deploy/Dockerfile -t comfyfarm:latest .
+docker pull postgres:17
+docker save comfyfarm:latest postgres:17 | gzip > comfyfarm-images.tar.gz
 ```
 
 On the control-plane host inside the network:
@@ -32,10 +33,15 @@ On the control-plane host inside the network:
 ```sh
 docker load < comfyfarm-images.tar.gz
 cd deploy/compose && cp env.example .env
-docker compose run --rm --no-deps router comfyfarm secrets >> .env   # then set DB_PASSWORD and UI_WORKER_URL
+docker run --rm comfyfarm:latest comfyfarm secrets >> .env    # then set DB_PASSWORD and UI_WORKER_URL in .env
+mkdir -p backups && sudo chown 10001 backups                  # the router writes backups here as its own user
 docker compose up -d
 docker compose exec router sh -c 'echo "<password>" | comfyfarm add-user <you> --admin'
 ```
+
+Not `docker compose build`/`run` for the first two steps: compose refuses to read its file until DB_PASSWORD and the
+two secrets are set. The database is PostgreSQL 17 because the image's `pg_dump` is 17 — a dump only restores into
+a server of the same major version (`comfyfarm doctor` checks this).
 
 Users open `http://<control-plane>:8080`. Port 8188 (router) is for the workers' launchers and for monitoring
 (`/metrics`); do not publish it to users.

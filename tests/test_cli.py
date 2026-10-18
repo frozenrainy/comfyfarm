@@ -81,3 +81,37 @@ def test_logging_split(tmp_path):
     main, err = (tmp_path / "comfyfarm.log").read_text(), (tmp_path / "error.log").read_text()
     assert "routine" in main and "real failure" in main
     assert "real failure" in err and "routine" not in err
+
+
+def fake_tool(tmp_path, name, body):
+    p = tmp_path / name
+    p.write_text("#!/bin/sh\n" + body + "\n")
+    p.chmod(0o755)
+    return str(p)
+
+
+def test_pg_tools_never_see_the_password_on_their_command_line(tmp_path, capsys):
+    from comfyfarm.cli import pg_run
+    log = tmp_path / "seen"
+    ok = fake_tool(tmp_path, "pg_dump", f'echo "$@" > {log}; echo "$PGPASSWORD" >> {log}')
+    pg_run(ok, ["--file", "x"], "postgresql://farm:p%40ss-w0rd@[::1]:5433/comfyfarm?sslmode=disable")
+    argv, pw = log.read_text().splitlines()
+    assert argv == "--file x --dbname postgresql://farm@[::1]:5433/comfyfarm?sslmode=disable" and pw == "p@ss-w0rd"
+    bad = fake_tool(tmp_path, "pg_restore", "exit 3")
+    with pytest.raises(SystemExit) as e:
+        pg_run(bad, [], "postgresql://farm:hunter2@db/comfyfarm")
+    assert "exit 3" in str(e.value) and "hunter2" not in str(e.value)
+
+
+@pytest.mark.parametrize("client,server,verdict", [(16, 16, "OK"), (17, 16, "WARN"), (15, 16, "FAIL")])
+def test_doctor_wants_the_client_tools_of_the_server_version(tmp_path, client, server, verdict):
+    from comfyfarm.doctor import backup_tooling
+    dump = fake_tool(tmp_path, "pg_dump", f'echo "pg_dump (PostgreSQL) {client}.2 (Debian {client}.2-1)"')
+    assert backup_tooling(dump, server)[0] == verdict
+
+
+def test_migrations_ignore_stray_files():
+    from types import SimpleNamespace as F
+    from comfyfarm.db import migration_files
+    names = ["0002_b.sql", "._0001_init.sql", "0001_init.sql", "0003_c.sql~", "README", "0010_j.sql"]
+    assert [f.name for f in migration_files(F(name=n) for n in names)] == ["0001_init.sql", "0002_b.sql", "0010_j.sql"]

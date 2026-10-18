@@ -5,12 +5,14 @@ from __future__ import annotations
 import contextlib
 import importlib.resources
 import logging
+import re
 
 import asyncpg
 
 log = logging.getLogger(__name__)
 ACQUIRE_TIMEOUT = 5.0
 MIGRATION_LOCK = 0x636F6D6679  # advisory lock id ("comfy")
+MIGRATION_NAME = re.compile(r"^\d{4}_[A-Za-z0-9_]+\.sql$")
 
 
 class Busy(Exception):
@@ -48,7 +50,7 @@ class Database:
             await self.pool.release(c)
 
     async def migrate(self):
-        files = sorted(f for f in importlib.resources.files("comfyfarm.migrations").iterdir() if f.name.endswith(".sql"))
+        files = migration_files(importlib.resources.files("comfyfarm.migrations").iterdir())
         async with self.conn(timeout=60) as c:
             await c.execute("SELECT pg_advisory_lock($1)", MIGRATION_LOCK)     # two routers starting at once
             try:
@@ -65,6 +67,12 @@ class Database:
                     log.info("applied migration %s", f.name)
             finally:
                 await c.execute("SELECT pg_advisory_unlock($1)", MIGRATION_LOCK)
+
+
+def migration_files(entries):
+    """Only `NNNN_name.sql`, in version order: a copied tree may carry `._0001_init.sql` (macOS), `0005_x.sql~` or
+    similar, and one such file must not stop the router from starting."""
+    return sorted((f for f in entries if MIGRATION_NAME.match(f.name)), key=lambda f: f.name)
 
 
 def _json_dumps(v):

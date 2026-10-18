@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .core import access
 from .core.settings import Settings
@@ -72,6 +73,21 @@ def pg_tool(name: str, pg_bin: str | None) -> str:
     return path
 
 
+def pg_run(tool: str, args: list[str], dsn: str) -> None:
+    """Run a PostgreSQL client tool against `dsn` without the password on its command line: it would show in `ps`
+    and in the error when the tool fails. The password goes through PGPASSWORD instead."""
+    env, u = dict(os.environ), urlsplit(dsn)
+    if u.scheme.startswith("postgres") and u.password is not None:
+        env["PGPASSWORD"] = unquote(u.password)
+        h = u.hostname or ""
+        host = (f"[{h}]" if ":" in h else h) + (f":{u.port}" if u.port else "")
+        user = f"{u.username}@" if u.username else ""
+        dsn = urlunsplit((u.scheme, user + host, u.path, u.query, u.fragment))
+    r = subprocess.run([tool, *args, "--dbname", dsn], env=env)
+    if r.returncode:
+        sys.exit(f"{os.path.basename(tool)} failed (exit {r.returncode}) — its message is above")
+
+
 def backup(dsn: str, out_dir: str, user_dir: str | None, artifacts_dir: str | None, pg_bin: str | None) -> str:
     """One directory per backup: the ledger (pg_dump custom format), the UI worker's user data (workflows,
     settings), the list of published artifacts, and a manifest. Secrets are deliberately not included: the gateway
@@ -82,7 +98,7 @@ def backup(dsn: str, out_dir: str, user_dir: str | None, artifacts_dir: str | No
     os.makedirs(dest)
     manifest = {"created": stamp, "contents": []}
     dump = os.path.join(dest, "ledger.dump")
-    subprocess.run([pg_tool("pg_dump", pg_bin), "--format=custom", "--no-owner", "--no-privileges", "--file", dump, dsn], check=True)
+    pg_run(pg_tool("pg_dump", pg_bin), ["--format=custom", "--no-owner", "--no-privileges", "--file", dump], dsn)
     manifest["contents"].append({"file": "ledger.dump", "what": "Postgres ledger (pg_dump -Fc)", "bytes": os.path.getsize(dump)})
     if user_dir:
         tar = os.path.join(dest, "userdata.tar.gz")
@@ -114,9 +130,10 @@ def restore(dsn: str, backup_dir: str, user_dir: str | None, pg_bin: str | None)
     dump = os.path.join(backup_dir, "ledger.dump")
     if not os.path.isfile(dump):
         sys.exit(f"{backup_dir} holds no ledger.dump")
-    # --clean --if-exists: the live tables are dropped and recreated from the dump; stop the router first
-    subprocess.run([pg_tool("pg_restore", pg_bin), "--clean", "--if-exists", "--no-owner", "--no-privileges",
-                    "--dbname", dsn, dump], check=True)
+    # --clean --if-exists: the live tables are dropped and recreated from the dump; stop the router first.
+    # --single-transaction: a restore that fails leaves the live ledger as it was
+    pg_run(pg_tool("pg_restore", pg_bin), ["--clean", "--if-exists", "--no-owner", "--no-privileges", "--single-transaction",
+                                           dump], dsn)
     tar = os.path.join(backup_dir, "userdata.tar.gz")
     if user_dir and os.path.isfile(tar):
         with tarfile.open(tar) as t:

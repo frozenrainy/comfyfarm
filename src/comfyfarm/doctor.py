@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import subprocess
 import time
 
 import asyncpg
@@ -24,6 +26,22 @@ TINY_PNG = bytes.fromhex("89504e470d0a1a0a0000000d494844520000000100000001080600
                          "9c6360000002000154a24f5d0000000049454e44ae426082")
 
 
+def backup_tooling(dump: str, server_major: int) -> tuple[str, str, str]:
+    """pg_dump refuses a newer server; a dump from a newer pg_dump carries settings an older server rejects on
+    restore (17 → 16: `SET transaction_timeout`). Same major version is the only pair that both backs up and restores."""
+    try:
+        m = re.search(r"(\d+)(?:\.\d+)?", subprocess.run([dump, "--version"], capture_output=True, text=True, timeout=10).stdout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return WARN, "backup tooling", f"{dump} does not run: {type(e).__name__}"
+    client = int(m.group(1)) if m else 0
+    if client < server_major:
+        return FAIL, "backup tooling", f"pg_dump {client} cannot dump PostgreSQL {server_major} — install the {server_major} client tools"
+    if client > server_major:
+        return WARN, "backup tooling", (f"pg_dump {client} with PostgreSQL {server_major}: its dumps do not restore into "
+                                        f"this server — use the {server_major} client tools (--pg-bin) or upgrade the server")
+    return OK, "backup tooling", f"pg_dump {client} matches the server ({dump})"
+
+
 async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     # ---- ledger -------------------------------------------------------------------------------------------------
@@ -35,6 +53,7 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
         return out
     try:
         ver = await conn.fetchval("SHOW server_version")
+        server_major = int(await conn.fetchval("SHOW server_version_num")) // 10000
         ro = await conn.fetchval("SELECT pg_is_in_recovery()")
         migs = await conn.fetchval("SELECT count(*) FROM schema_migrations")
         out.append((FAIL if ro else OK, "ledger", f"Postgres {ver}, {migs} migrations applied"
@@ -106,7 +125,9 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
                 r = await adapter.http.post(f"{ui_url.rstrip('/')}/upload/image", timeout=20,
                                             files={"image": (name, TINY_PNG, "image/png")}, data={"overwrite": "true"})
                 if r.status_code != 200:
-                    out.append((FAIL, "shared storage", f"upload to the UI worker answered {r.status_code}"))
+                    out.append((FAIL, "shared storage", f"upload to the UI worker answered {r.status_code}"
+                                + (" — if it runs with COMFYFARM_ALLOW, the control plane's address must be in it"
+                                   if r.status_code == 403 else "")))
                 else:
                     for w in workers:
                         if not w["enabled"] or w["state"] != "online" or w["base_url"].rstrip("/") == ui_url.rstrip("/"):
@@ -138,8 +159,9 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
             d = os.path.join(s.artifacts_dir, kind)
             counts[kind] = sum(1 for n in (os.listdir(d) if os.path.isdir(d) else []) if os.path.isfile(os.path.join(d, n, "READY")))
         out.append((OK, "artifacts", ", ".join(f"{v} {k}" for k, v in counts.items()) + " published"))
-    if pg_bin is not None or shutil.which("pg_dump"):
-        out.append((OK, "backup tooling", f"pg_dump found ({pg_bin or shutil.which('pg_dump')})"))
+    dump = os.path.join(pg_bin, "pg_dump") if pg_bin else shutil.which("pg_dump")
+    if dump and os.path.isfile(dump):
+        out.append(backup_tooling(dump, server_major))
     else:
         out.append((WARN, "backup tooling", "pg_dump not on PATH — `comfyfarm backup` needs it (--pg-bin <dir>)"))
     return out

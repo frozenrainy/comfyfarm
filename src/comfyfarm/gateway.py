@@ -37,6 +37,10 @@ SESSION_TTL = 30.0          # seconds a confirmed session is trusted before the 
 class Unavailable(Exception):
     """The router could not confirm a session: answer 503, never let the request through unconfirmed."""
 
+
+class UiUnavailable(Exception):
+    """The UI worker did not map the user to a ComfyUI user id: answer 502 with the reason."""
+
 ROUTER_PREFIXES = ("/api/prompt", "/api/jobs", "/api/queue", "/api/history", "/api/interrupt", "/api/object_info",
                    "/api/farm/", "/api/admin/", "/api/health/",
                    "/comfyfarm/dashboard", "/prompt", "/queue", "/history", "/interrupt", "/object_info")
@@ -157,13 +161,22 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         async with comfy_user_lock:
             if ident.user in s.comfy_users:
                 return s.comfy_users[ident.user]
-            users = (await http.get(f"{s.ui_url}/api/users")).json().get("users") or {}
-            uid = next((k for k, v in users.items() if v == ident.user), None)
-            if uid is None:
-                r = await http.post(f"{s.ui_url}/api/users", json={"username": ident.user})
-                uid = r.json() if r.status_code == 200 else None
-            if uid is None:
-                raise RuntimeError(f"cannot create UI user for {ident.user!r}")
+            try:
+                r = await http.get(f"{s.ui_url}/api/users")
+                if r.status_code == 200:
+                    users = r.json().get("users") or {}
+                    uid = next((k for k, v in users.items() if v == ident.user), None)
+                    if uid is None:
+                        r = await http.post(f"{s.ui_url}/api/users", json={"username": ident.user})
+                        uid = r.json() if r.status_code == 200 else None
+            except (httpx.HTTPError, ValueError, AttributeError) as e:
+                raise UiUnavailable(f"the UI worker at {s.ui_url} is unreachable or not ComfyUI ({type(e).__name__})")
+            if r.status_code == 403:
+                raise UiUnavailable(f"the UI worker at {s.ui_url} refused the gateway (403) — if it runs with "
+                                    "COMFYFARM_ALLOW, the gateway's address must be in it")
+            if r.status_code != 200 or not isinstance(uid, str):
+                raise UiUnavailable(f"the UI worker at {s.ui_url} answered {r.status_code} to /api/users — "
+                                    "is it started with --multi-user?")
             s.comfy_users[ident.user] = uid
             return uid
 
@@ -275,8 +288,12 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             # shared storage for outputs still works, slower)
             kind = request.query_params.get("type")
             if kind == "output":
-                base_headers["comfy-user"] = await comfy_user_id(ident)
-                resp = await proxy(request, s.ui_url, base_headers, miss=404)
+                try:
+                    base_headers["comfy-user"] = await comfy_user_id(ident)
+                    resp = await proxy(request, s.ui_url, base_headers, miss=404)
+                except UiUnavailable as e:                    # still try the executing worker below
+                    log.error("%s", e)
+                    resp = None
                 if resp is not None:
                     return resp
             q = {k: request.query_params.get(k, "") for k in ("filename", "subfolder", "type")}
@@ -288,7 +305,11 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         if path in ("/api/users", "/users") and request.method == "GET":
             # the stock frontend shows a user picker in multi-user mode; the gateway already knows who this is
             return JSONResponse({"storage": "server", "migrated": True})
-        base_headers["comfy-user"] = await comfy_user_id(ident)
+        try:
+            base_headers["comfy-user"] = await comfy_user_id(ident)
+        except UiUnavailable as e:
+            log.error("%s", e)
+            return JSONResponse({"error": str(e)}, status_code=502)
         return await proxy(request, s.ui_url, base_headers, cache_immutable=bool(HASHED_ASSET.match(path)))
 
     async def ws_endpoint(ws: WebSocket):

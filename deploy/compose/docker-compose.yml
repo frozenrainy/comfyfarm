@@ -4,7 +4,7 @@ name: comfyfarm
 
 services:
   db:
-    image: postgres:16
+    image: postgres:17                # the same major version as the client tools in the comfyfarm image (backups)
     restart: unless-stopped
     environment:
       POSTGRES_USER: comfyfarm
@@ -40,6 +40,7 @@ services:
       - logs:/var/log/comfyfarm
       - ${COMFYFARM_KEYS_DIR:-./keys}:/keys:ro                       # ssh keys / agent token files (restart backends)
       - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:/artifacts:ro   # optional: the artifact store, read-only
+      - ${COMFYFARM_BACKUP_DIR:-./backups}:/backups                    # comfyfarm backup /backups (owned by uid 10001)
 
   gateway:
     image: comfyfarm:${COMFYFARM_VERSION:-latest}
