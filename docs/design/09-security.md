@@ -20,6 +20,9 @@ The design this project learned from ran in a closed network and trusted it. A p
 - No arbitrary command execution features (no "run shell on worker").
 - No storage of user passwords except the `local` provider (scrypt, standard library).
 - No telemetry.
+- No server-side logout of a single browser. *Log out* removes the cookie from that browser; a copy of the cookie
+  stays valid until it expires (7 days) unless the account's sessions are ended — a password change, disabling the
+  account, or deleting it end every session within `SESSION_TTL` (D-35), open WebSockets included.
 
 ## Worker allow-list — operation
 
