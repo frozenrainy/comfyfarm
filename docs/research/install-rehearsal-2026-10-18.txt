@@ -1,0 +1,60 @@
+Install rehearsal — empty hosts, closed network, 1 router + 2 GPU workers (2026-10-18)
+
+Setup: one GPU host (Radeon AI PRO R9700, gfx1201) running Incus system containers on a bridge without NAT, without
+IPv6 and with no upstream DNS (checked: an outside name does not resolve, an outside address does not answer):
+  router  — Ubuntu 24.04, Docker from the local mirror; control plane per install.md §1 (docker load + compose),
+            UI worker per §2 (CPU venv)
+  gpu-1   — Ubuntu 24.04, the R9700 passed through (/dev/kfd, render node); setup by "run a command yourself",
+            NFS mount written by setup
+  gpu-2   — same GPU; setup by "let the router log in once" (admin account + password); shared storage mounted by the site
+  nas     — NFS server for input/output/user
+A separate "outside" builder (with internet) made the package bundle (55 .deb + apt lists = the local mirror) and the
+artifacts: core comfyui-0.41.0, nodes farm-ext-3 (comfyfarm_worker), venv rocm72-r (torch 2.14.1+rocm7.2, 17 GB),
+venv cpu-r (torch 2.14.1+cpu, 2 GB). The builder and its network were removed before the farm was set up.
+
+Result
+  control plane up from images and the release tarball, offline, following §1 as written
+  gpu-1: setup → host check FAIL (shared dirs not writable by the service uid; libatomic.so.1 missing) → the operator
+         fixed both as the messages said → same command again → all OK → added, assigned, started → match
+  gpu-2: setup over ssh (password via askpass/stdin; not in the log, the ledger or the audit) → FAIL libatomic → fixed
+         → run again over ssh → OK → added → match
+  a WAN 2.2 VACE job (14B fp8, 320×320, 9 frames, 6 steps) on gpu-1: 27.5 s; a saving job on gpu-2: files on the NAS
+  as the service uid, visible on gpu-1 through NFS and through the UI worker
+  idle CPU after the jobs: 0 on both (HSA_TOOLS_DISABLE_REGISTER=1 in the profile)
+  comfyfarm doctor --ui: every line OK — ledger, admin, both workers secured, the group agrees on nodes and models,
+  shared storage seen by both, host checks through the agents (17 OK each), disks, artifacts, backup tooling
+
+Found and fixed (product)
+  1. publish.py needs launcher.py next to it — now in rollouts.md §1.
+  2. The venvs were tied to the build host (bin/python into uv's store in the builder's home) — D-42: the interpreter
+     is carried inside the venv; verified: the venv built on the builder ran on both workers.
+  3. ROCm torch needs libatomic.so.1, absent on a fresh Ubuntu; the host check only ran `python --version` → it now
+     imports torch in every venv and names the package of a missing system library (libatomic1).
+  4. Setup created the instance directories before mounting NFS (they ended up under the mount point) → directories
+     after mounts.
+  5. Shared storage needs one uid for the service account on every host (useradd --system picks any) → setup takes a
+     fixed uid (default 47800; refuses an existing account with another uid); the host check names the uid.
+  6. The host check, run by setup through runuser, inherited root's working directory; ROCm aborts
+     (ghc::filesystem_error) when the account cannot read its cwd → as-user commands run from /, hostcheck chdir("/").
+  7. ROCm prints "(null): No such file or directory" on stderr; the host check showed it as the version → marked line.
+  8. The UI worker (§2) was a sentence; the published core is read-only, so "copy ui_ext into its custom_nodes" could
+     not be done as written → concrete steps (copy of the core, CPU venv, flags).
+  9. compose kept the router's state (keys/, backups/) and .env inside the release directory, and the guide had no
+     upgrade procedure — replacing the directory loses the agent key and the secrets (it happened here) → keys and
+     backups default to /srv/comfyfarm/…, and install.md says how to upgrade (unpack over, never delete).
+ 10. publish.py venv --python 3.12 (as the guide said) did not work: a version is now looked up (uv python find).
+ 11. Two ComfyUI instances on one GPU: the first keeps its models in VRAM and the second runs out of memory → install.md
+     says one instance per GPU. (Only the rehearsal shared a GPU.)
+ 12. The account's group gets a different gid per host; harmless (files are written by the fixed uid). Not changed.
+
+Rehearsal environment only (not ComfyFarm)
+  - Docker's FORWARD DROP on the host blocks container NAT: the builder's network needed a temporary DOCKER-USER rule,
+    removed with it. The same DROP is what keeps the farm's bridge closed.
+  - A kernel NFS server and client in containers need privileged containers with AppArmor unconfined; nfsd cannot
+    export an idmapped (shift=true) mount; a client-side AppArmor denial is reported by mount.nfs as
+    "access denied by server".
+  - incus init hung once right after force-deleting a privileged container that had an NFS mount.
+
+Mistakes made during the rehearsal (kept as lessons)
+  - Rebuilt the router image from a stale release tarball and "verified" it with a string the old code also contained.
+  - Deleted the release directory to refresh it — with .env, keys/ and backups/ inside (→ finding 9).

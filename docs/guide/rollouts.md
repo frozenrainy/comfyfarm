@@ -12,17 +12,24 @@ standard library only and never import router code.
 
 ## 1. Artifact store
 
-Choose a directory every worker can read (a local disk per host, or a shared mount): `<ART>`. Publish:
+Choose a directory every worker can read at the **same path** (a shared mount, or a copy per host): `<ART>`. Publish
+on a machine with internet access that mounts `<ART>` at that path — `publish.py` needs `launcher.py` next to it:
 
 ```sh
-git -C ComfyUI archive v0.41.2 | tar -x -C /tmp/core && python3 publish.py core <ART> comfyui-0.41.2 --from /tmp/core
-python3 publish.py nodes <ART> my-nodes-1 --from /path/to/a/custom_nodes/dir
-python3 publish.py venv  <ART> rocm72-a --uv ~/.local/bin/uv --python 3.12 -r requirements.txt \
-    --accelerator rocm --arch gfx1201 --pip-arg=--extra-index-url=https://download.pytorch.org/whl/rocm7.2
+git -C ComfyUI archive v0.41.0 | tar -x -C /tmp/core && python3 publish.py core <ART> comfyui-0.41.0 --from /tmp/core
+python3 publish.py nodes <ART> farm-nodes-1 --from /path/to/a/dir/holding/comfyfarm_worker   # plus your custom nodes
+uv python install 3.12
+python3 publish.py venv <ART> rocm72-a --uv "$(command -v uv)" --python 3.12 -r requirements.txt \
+    --accelerator rocm --arch gfx1201 --pip-arg=--index-url=https://download.pytorch.org/whl/rocm7.2 \
+    --pip-arg=--extra-index-url=https://pypi.org/simple --pip-arg=--index-strategy=unsafe-best-match
+python3 publish.py venv <ART> cpu-a --uv "$(command -v uv)" --python 3.12 -r requirements.txt --accelerator cpu \
+    --pip-arg=--index-url=https://download.pytorch.org/whl/cpu --pip-arg=--extra-index-url=https://pypi.org/simple \
+    --pip-arg=--index-strategy=unsafe-best-match          # for the UI worker (install.md §2)
 ```
 
-A venv is built at its final path and links to its base interpreter: every worker using it needs that interpreter at
-the same path. Give the router read access to `<ART>` (`artifacts_dir`) and it also checks READY files, platform and
+A venv is built at its final path and carries its interpreter (D-42): any host that mounts `<ART>` at the same path runs
+it. GPU wheels still load a few system libraries — the host check names any that a fresh host lacks (ROCm torch:
+`libatomic1`). Give the router read access to `<ART>` (`artifacts_dir`) and it also checks READY files, platform and
 accelerator before every assignment (contract §9); without it, those checks happen only on the worker.
 
 ## 2. Worker host

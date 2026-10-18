@@ -1,6 +1,6 @@
 # 14 — Setting up worker hosts
 
-Status: **implemented** (2026-10-18) — `worker_setup.py`, `hostcheck.py`, agent `check`, `api/setup.py`, dashboard *Set up a worker* / *Check host*, doctor host lines; end-to-end rehearsal on empty hosts pending. Goal: once the control plane runs, an operator turns an empty Linux host into a
+Status: **implemented** (2026-10-18) — `worker_setup.py`, `hostcheck.py`, agent `check`, `api/setup.py`, dashboard *Set up a worker* / *Check host*, doctor host lines; rehearsed end to end on empty hosts in a closed network, 1 router + 2 GPU workers (docs/research/install-rehearsal-2026-10-18.txt). Goal: once the control plane runs, an operator turns an empty Linux host into a
 working GPU worker from the dashboard — checked, secured and assigned — without reading the install guide line by line.
 
 ## What a worker host needs
@@ -48,13 +48,14 @@ setup finishes). The script embeds the worker tools of this router version and t
 (run it again to repair or upgrade) and has `--dry-run`.
 
 1. Preconditions: Linux with systemd, Python ≥ 3.10, root.
-2. Account `comfyfarm` (configurable): system user, home `/var/lib/comfyfarm`, groups `render` and `video` when present.
+2. Account `comfyfarm` (configurable) with a **fixed uid** (default 47800 — shared storage checks numbers, so every host
+   uses the same one): system user, home `/var/lib/comfyfarm`, groups `render` and `video` when present.
 3. Tools to `/opt/comfyfarm/worker/` (root, 0755/0644); unit to `/etc/systemd/user/`; instance environment and agent
    configuration to `/etc/comfyfarm/` (root, 0644 — no secrets in them).
-4. Directories: `<LOCAL>` (owned by the account), the instance's input/output/user/temp (created if missing — on shared
-   storage they normally exist).
-5. Optional mounts: `server:/export → mountpoint` lines become NFS entries in `/etc/fstab` (`_netdev,nofail`) and are
+4. Optional mounts: `server:/export → mountpoint` lines become NFS entries in `/etc/fstab` (`_netdev,nofail`) and are
    mounted now.
+5. Directories — after the mounts: `<LOCAL>` (owned by the account), the instance's input/output/user/temp
+   (created if missing; on shared storage they normally exist and must be writable by the account's uid).
 6. The router's agent public key into the account's `authorized_keys` (root-owned) with the forced command and every
    forwarding off.
 7. `loginctl enable-linger`; the unit is **not** started (nothing is assigned yet).
@@ -73,7 +74,8 @@ router:
   setup said a GPU is expected
 - paths: `<ART>` readable with published artifacts, `<LOCAL>` writable with free space, models readable,
   input/output/user/temp writable, the user-writable rule of contract §4 (shared code with the launcher)
-- venvs: every published venv's interpreter resolves inside its artifact and starts (`--version`) on this host
+- venvs: every published venv runs here and imports torch — a missing system library is named with its package
+  (rehearsal: ROCm torch needs `libatomic1`)
 - time: NTP synchronised (`timedatectl`), clock within a few seconds of the router's
 - network: the router answers (`/api/health/dispatch`), the instance port is free (or the instance owns it)
 - shared storage: writes a marker into the output directory; the router reads every host's markers and says which

@@ -292,3 +292,8 @@ def test_agent_reads_its_config_file_and_runs_the_host_check(fake_systemctl, tmp
     assert r.returncode == 2 and "not set up" in (r.stdout + r.stderr)
     assert run_ssh(env, "check gpu-1").returncode == 2
     assert run_ssh(env, "sh -c id").returncode == 2
+
+
+def test_publish_venv_takes_a_version_or_name_and_says_when_none_is_found(tmp_path):
+    with pytest.raises(publish.Refused, match="no Python 'python9.99' found"):
+        publish.publish_venv(str(tmp_path / "art"), "v", "python9.99", [], "cpu", [], [])

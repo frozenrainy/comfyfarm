@@ -176,6 +176,12 @@ def publish_venv(art: str, name: str, python: str, requirements: list[str], acce
     """Built at its final path, with its interpreter inside it (D-42), so every host that mounts the store at the same
     path can run it — not only the build host."""
     path = target(art, "venv", name)
+    if os.sep not in python:                     # a version (3.12) or a command name, not a path
+        found = (subprocess.run([uv, "python", "find", python], capture_output=True, text=True).stdout.strip() if uv
+                 else shutil.which(python))
+        if not found:
+            raise Refused(f"no Python {python!r} found" + (" (uv python install it first)" if uv else ""))
+        python = found
     py = os.path.join(path, "bin", "python")
     pip = [uv, "pip"] if uv else [py, "-m", "pip"]
     target_py = ["--python", py] if uv else []

@@ -34,10 +34,14 @@ On the control-plane host inside the network:
 docker load < comfyfarm-images.tar.gz
 cd deploy/compose && cp env.example .env
 docker run --rm comfyfarm:latest comfyfarm secrets >> .env    # then set DB_PASSWORD and UI_WORKER_URL in .env
-mkdir -p backups keys && sudo chown 10001 backups keys        # the router writes backups and its agent key here
-docker compose up -d
+sudo mkdir -p /srv/comfyfarm/keys /srv/comfyfarm/backups && sudo chown 10001 /srv/comfyfarm/keys /srv/comfyfarm/backups
+docker compose up -d                                          # (the router keeps its agent key and backups there)
 docker compose exec router sh -c 'echo "<password>" | comfyfarm add-user <you> --admin'
 ```
+
+**Upgrading the control plane**: `docker load` the new images, then unpack the new release **over** the old directory
+(`tar xzf comfyfarm-<version>.tar.gz`) — never delete it first: `.env` with the secrets lives there — and run
+`docker compose up -d`. Migrations run when the router starts; take a backup before (backup.md).
 
 Not `docker compose build`/`run` for the first two steps: compose refuses to read its file until DB_PASSWORD and the
 two secrets are set. The database is PostgreSQL 17 because the image's `pg_dump` is 17 — a dump only restores into
@@ -58,8 +62,19 @@ Without containers: `pip install` the package into `/opt/comfyfarm/venv`, put th
 
 ## 2. UI worker
 
-A stock ComfyUI on the shared storage, started with `--multi-user --listen <ip>` and the `--input/--output/--user`
-directories on the NAS. Copy `ui_ext/comfyfarm_ui` into its `custom_nodes`. It needs no GPU.
+A stock ComfyUI that serves the screen and the users' files — on the control-plane host or any host that is not busy
+with GPU jobs. It needs no GPU: publish a CPU venv (rollouts.md §1) and use the same core as the workers. The published
+core is read-only, so the UI worker runs from a copy with the `comfyfarm_ui` extension added:
+
+```sh
+cp -a <ART>/core/comfyui-0.41.0 /opt/comfyfarm-ui && chmod -R u+w /opt/comfyfarm-ui
+cp -a ui_ext/comfyfarm_ui /opt/comfyfarm-ui/custom_nodes/
+<ART>/venv/cpu-a/bin/python /opt/comfyfarm-ui/main.py --cpu --multi-user --listen <ip> --port 8189 \
+    --input-directory <shared>/input --output-directory <shared>/output --user-directory <shared>/user
+```
+
+Run it as a service (a systemd unit with that command). The gateway's `UI_WORKER_URL` is `http://<ip>:8189`; the input,
+output and user directories must be the same shared storage the GPU workers use.
 
 ## 3. GPU workers
 
@@ -90,6 +105,9 @@ Worker access control: put `COMFYFARM_ALLOW=<control-plane address>` in the prof
 the control plane talks from the host's address). Without it the dashboard shows the worker as **unsecured**. On AMD
 with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every worker burns one CPU
 core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)).
+
+One ComfyUI instance per GPU: ComfyUI keeps models in VRAM between jobs, so two instances sharing a GPU run each other
+out of memory.
 
 Without the dashboard (or to see what setup does): [rollouts.md](rollouts.md) §2 lists the same pieces by hand.
 
