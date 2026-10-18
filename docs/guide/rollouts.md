@@ -60,7 +60,9 @@ command="COMFYFARM_AGENT_INSTANCES=<instance> COMFYFARM_AGENT_USER=1 /usr/bin/py
 ```
 
 HTTP flavour (no ssh, e.g. Windows hosts later): `python3 agent.py serve --port 8399 --token-file <file>` and the
-`http-agent` backend with `{"url": …, "token": …}`.
+`http-agent` backend with `{"url": "http://<host>:8399", "token_file": "<host>.token"}` (a copy of the token in the
+router's keys directory) or `{"url": …, "token_env": "COMFYFARM_AGENT_TOKEN_<HOST>"}` (a variable in the router's
+environment). The token value itself is refused: it would be stored in the ledger and its backups.
 
 ## 3. In the dashboard (System → Rollout)
 
