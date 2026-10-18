@@ -43,6 +43,22 @@ function reqFrom(v) {
   if (v.min_vram_gb != null) req.min_vram_gb = v.min_vram_gb;
   return req;
 }
+// Worker warnings come from the router in English; the fixed ones (and the fixed start of the others) are translated,
+// node and model names after them stay as they are.
+function warnText(x) {
+  const whole = {
+    "worker extension not installed: open to everyone on the network, no reconnect fix":
+      t("worker extension not installed: open to everyone on the network, no reconnect fix"),
+    "reconnect fix not active on this ComfyUI version: events may stop after a reconnect":
+      t("reconnect fix not active on this ComfyUI version: events may stop after a reconnect"),
+  }[x];
+  if (whole) return whole;
+  const starts = [["unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway",
+                   t("unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway")],
+                  ["differs from its group: ", t("differs from its group: ")]];
+  for (const [en, here] of starts) if (x.startsWith(en)) return here + x.slice(en.length);
+  return x;
+}
 const head = (title, ...right) => h("div", { class: "section-head" }, h("h2", {}, title), ...right);
 
 // ---- workers ------------------------------------------------------------------------------------------------------
@@ -115,7 +131,7 @@ function workers(root, { refresh }) {
     const ws = w.warnings.join("\n");
     if (c.warnings.dataset.v !== ws) {
       c.warnings.dataset.v = ws;
-      c.warnings.replaceChildren(...(w.warnings.length ? [h("ul", { class: "warnings" }, ...w.warnings.map((x) => h("li", {}, x)))] : []));
+      c.warnings.replaceChildren(...(w.warnings.length ? [h("ul", { class: "warnings" }, ...w.warnings.map((x) => h("li", {}, warnText(x))))] : []));
     }
     syncNote(tr.note, w.note);
     setText(tr.maint, w.maintenance ? t("End maintenance") : t("Maintenance"));

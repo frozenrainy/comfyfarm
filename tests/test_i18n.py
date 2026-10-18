@@ -38,3 +38,12 @@ def test_korean_table_has_no_duplicate_keys():
     s = (DASH / "js" / "lang" / "ko.js").read_text()
     keys = re.findall(LITERAL + r"\s*:", s)
     assert len(keys) == len(set(keys)), sorted({k for k in keys if keys.count(k) > 1})
+
+
+def test_translated_worker_warnings_still_match_what_the_router_says():
+    """admin.js translates these router sentences by exact text: a reworded sentence would silently stay English."""
+    src = (DASH.parent / "api" / "admin.py").read_text() + (DASH.parent / "core" / "consistency.py").read_text()
+    js = (DASH / "js" / "pages" / "admin.js").read_text()
+    block = js[js.index("function warnText"):js.index("const head")]
+    for sentence in set(re.findall(r'\[?\s*"((?:[^"\\]|\\.)*)"\s*[:,]\s*\n?\s*t\(', block)):
+        assert sentence.rstrip(" :") in src.replace('"\n                   + (', ''), sentence

@@ -216,4 +216,13 @@ export default {
     "롤아웃 도중 라우터가 재시작되었습니다. 재개하거나 중단할 때까지 해당 워커는 점검 상태로 남습니다.",
   "Recent rollouts": "최근 롤아웃",
   "#{id} → {profile} · {done}/{steps} done · {when} · {who}": "#{id} → {profile} · {done}/{steps} 완료 · {when} · {who}",
+
+  // ---- worker warnings (sent by the router in English) ----
+  "worker extension not installed: open to everyone on the network, no reconnect fix":
+    "워커 확장이 설치되지 않음: 네트워크의 누구에게나 열려 있고, 재연결 보정도 없습니다",
+  "reconnect fix not active on this ComfyUI version: events may stop after a reconnect":
+    "이 ComfyUI 버전에서는 재연결 보정이 동작하지 않음: 재연결 뒤 이벤트가 끊길 수 있습니다",
+  "unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway":
+    "보호되지 않음: 어느 주소의 요청이든 받습니다 — COMFYFARM_ALLOW에 라우터와 게이트웨이 주소를 넣으세요",
+  "differs from its group: ": "그룹과 다름: ",
 };
