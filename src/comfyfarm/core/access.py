@@ -31,8 +31,32 @@ async def owner_allowed(c, owner: str, fallback):
     return sorted(r["group_id"] for r in await c.fetch("SELECT group_id FROM user_groups WHERE username = $1", owner))
 
 
+def refusal(allowed: list[int] | None, group_id: int | None, who: str = "you") -> str | None:
+    """Why a job with these permissions may not be queued, or None. A job nobody may take would wait forever, so
+    submit and retry refuse it instead of stamping `allowed_groups = '{}'`."""
+    if allowed is None:
+        return None
+    if not allowed:
+        return f"{who} may not use any worker group; ask an admin"
+    if group_id is not None and group_id not in allowed:
+        return f"{who} may not use this worker group"
+    return None
+
+
+OWNER_LOCK_SPACE = 0x63664F57   # first key of the per-owner advisory locks ("cfOW"); the second is hashtext(owner)
+
+
+async def lock_owner(c, owner: str, *, exclusive: bool = False):
+    """Inside the caller's transaction. Stamping a new job (shared) and re-stamping an owner's queued jobs (exclusive)
+    exclude each other: otherwise a job stamped from permissions read just before a change, and committed just after
+    restamp's UPDATE, would keep the old permissions for good."""
+    fn = "pg_advisory_xact_lock" if exclusive else "pg_advisory_xact_lock_shared"
+    await c.execute(f"SELECT {fn}($1, hashtext($2))", OWNER_LOCK_SPACE, owner)
+
+
 async def restamp(c, username: str) -> int:
     """After a change to `username`'s groups or admin role: queued jobs follow the new permissions immediately."""
+    await lock_owner(c, username, exclusive=True)
     allowed = await owner_allowed(c, username, None)
     return int((await c.execute("UPDATE jobs SET allowed_groups = $2 WHERE owner = $1 AND status IN ('pending','paused')",
                                 username, allowed)).split()[-1])

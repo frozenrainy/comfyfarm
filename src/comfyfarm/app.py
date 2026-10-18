@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .adapter.comfy import ComfyAdapter
+from .core import access
 from .core import jobs as jobsvc
 from .core.dispatcher import Dispatcher
 from .core.reconcile import Reconciler
@@ -148,6 +149,10 @@ def create_app(settings: Settings) -> FastAPI:
                 return verdict, body
         return "skipped", {}
 
+    def not_permitted(message: str):
+        return JSONResponse({"error": {"type": "group_not_permitted", "message": message, "details": "", "extra_info": {}},
+                             "node_errors": {}}, status_code=403)
+
     @app.post("/api/prompt")
     async def post_prompt(body: PromptIn, x_comfyfarm_user: str | None = Header(default=None)):
         owner = identity(x_comfyfarm_user)
@@ -162,11 +167,8 @@ def create_app(settings: Settings) -> FastAPI:
             group_id = body.comfyfarm_group
             if group_id is not None and not await c.fetchval("SELECT 1 FROM worker_groups WHERE id = $1", group_id):
                 group_id = None                                                  # unknown group: no group (D-22)
-        if allowed is not None and (not allowed or (group_id is not None and group_id not in allowed)):
-            msg = ("you may not use any worker group; ask an admin" if not allowed
-                   else "you may not use this worker group")                  # D-34
-            return JSONResponse({"error": {"type": "group_not_permitted", "message": msg, "details": "", "extra_info": {}},
-                                 "node_errors": {}}, status_code=403)
+        if why := access.refusal(allowed, group_id):                         # D-34; checked again at insert
+            return not_permitted(why)
         extra = dict(body.extra_data)
         secrets = {k: extra.pop(k) for k in SECRET_EXTRA_KEYS if k in extra}    # D-29: not persisted
         verdict, err = await validate_on_group(group_id, body.prompt, allowed)
@@ -176,7 +178,10 @@ def create_app(settings: Settings) -> FastAPI:
             job, _created = await jobsvc.submit(router.db, owner=owner, prompt=body.prompt, extra_data=extra,
                                                 group_id=group_id, idempotency_key=body.prompt_id,
                                                 browser_client_id=body.client_id, front=body.front,
-                                                requirements=body.comfyfarm_requirements, allowed_groups=allowed)
+                                                requirements=body.comfyfarm_requirements,
+                                                permissions=lambda c: ctx.allowed(c, owner))
+        except jobsvc.NotPermitted as e:              # revoked while the workflow was being validated
+            return not_permitted(str(e))
         except jobsvc.Conflict:
             raise HTTPException(409, "prompt_id conflict")
         except jobsvc.BadRequirements as e:

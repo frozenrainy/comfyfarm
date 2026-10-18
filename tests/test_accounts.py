@@ -223,3 +223,64 @@ async def test_queue_badge_summary(farm):
         await submit(c, "admin", 40 + i)
     assert (await ok(await c.get("/api/farm/summary", headers=H("admin")))) == {"queued": 3, "running": 0}
     assert (await ok(await c.get("/api/farm/summary", headers=H("tester")))) == {"queued": 0, "running": 0}
+
+
+async def test_retry_refuses_like_submit_when_the_owner_may_not_run_it(farm):
+    """A retried copy nobody may take would wait forever; /prompt answers 403 for the same permissions, so retry does."""
+    from comfyfarm.core import jobs as jobsvc
+    r, c = farm
+    g1 = await group(c, "g1")
+    g2 = await group(c, "g2")
+    await user(c, "carol")                                                    # no group at all
+    await user(c, "bob", [g2])                                                # may no longer use g1
+    for owner, gid in (("carol", None), ("bob", g1)):
+        job, _ = await jobsvc.submit(r.db, owner=owner, prompt=tiny(1), group_id=gid)
+        async with r.db.conn() as conn:
+            await conn.execute("UPDATE jobs SET status = 'failed', finished_at = now() WHERE id = $1", job["id"])
+        res = await c.post(f"/api/farm/jobs/{job['prompt_id']}/retry", headers=H("admin"))
+        assert res.status_code == 403, (owner, res.text)
+    async with r.db.conn() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM jobs WHERE retry_of IS NOT NULL") == 0
+
+
+async def test_revocation_during_validation_is_not_missed(farm):
+    """Permissions read before the (seconds-long) validation must not be stamped on the job if they were revoked in
+    between: the insert re-reads them in its own transaction, serialised with the re-stamp."""
+    from comfyfarm.core import access
+    r, c = farm
+    g1, _ = await add_worker(r, f"http://127.0.0.1:{free_port()}", group="g1", name="w")
+    async with r.db.conn() as conn:
+        await conn.execute("UPDATE workers SET state = 'online' WHERE name = 'w'")
+    await user(c, "bob", [g1])
+
+    async def validate(base_url, prompt):                                     # an admin revokes g1 meanwhile
+        async with r.db.conn() as conn:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM user_groups WHERE username = 'bob'")
+                await access.restamp(conn, "bob")
+        return "ok", {}
+    r.adapter.validate = validate
+    res = await submit(c, "bob", 1)
+    assert res.status_code == 403 and res.json()["error"]["type"] == "group_not_permitted", res.text
+    async with r.db.conn() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM jobs WHERE owner = 'bob'") == 0
+
+
+async def test_a_submit_waits_for_a_restamp_in_progress(farm):
+    """The race the re-read alone does not close: permissions read while a revocation is still uncommitted, job
+    committed after restamp's UPDATE ran. The per-owner lock makes the submit wait and see the new permissions."""
+    from comfyfarm.core import access
+    r, c = farm
+    g1 = await group(c, "g1")
+    await user(c, "bob", [g1])
+    async with r.db.conn() as conn:
+        tx = conn.transaction()
+        await tx.start()
+        await conn.execute("DELETE FROM user_groups WHERE username = 'bob'")
+        await access.restamp(conn, "bob")
+        pending = asyncio.create_task(submit(c, "bob", 2))
+        await asyncio.sleep(0.5)
+        assert not pending.done()
+        await tx.commit()
+    res = await pending
+    assert res.status_code == 403, res.text
