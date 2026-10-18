@@ -47,6 +47,19 @@ Found and fixed (product)
      says one instance per GPU. (Only the rehearsal shared a GPU.)
  12. The account's group gets a different gid per host; harmless (files are written by the fixed uid). Not changed.
 
+UI worker through setup (2026-10-19)
+  node set farm-ui-1 (comfyfarm_ui + comfyfarm_worker), profile ui-cpu (core comfyui-0.41.0, venv cpu-r, --cpu,
+  COMFYFARM_ALLOW) → Set up a worker → UI worker on the control-plane host, port 8189 → host check OK (15) → added as a
+  worker of kind ui → the gateway (UI_WORKER_URL=auto) found it → 403: on the compose host the gateway and the router
+  come from the compose network, not the host address — the gateway's 502 said to check COMFYFARM_ALLOW → a copied
+  profile allowing that subnet, rolled out to the UI worker (18 s, the UI worker goes through rollouts like any) →
+  the stock frontend through the gateway with the group picker; doctor: UI worker secured, shared storage seen.
+ 13. The host check tried every published venv: a ROCm venv on the CPU-only UI host failed → only the venvs the host
+     can use (manifest accelerator vs the expected GPU).
+ 14. UI worker on the compose host: allow the compose network in COMFYFARM_ALLOW → install.md says how to find it.
+ 15. doctor reported a failed upload to the UI worker only as "answered 500" (a probe file left by the earlier
+     root-run UI worker could not be overwritten) → it now points at the UI worker's log.
+
 Rehearsal environment only (not ComfyFarm)
   - Docker's FORWARD DROP on the host blocks container NAT: the builder's network needed a temporary DOCKER-USER rule,
     removed with it. The same DROP is what keeps the farm's bridge closed.

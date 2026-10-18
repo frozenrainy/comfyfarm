@@ -71,7 +71,9 @@ UI worker* — after publishing what it runs:
 - a CPU venv (rollouts.md §1);
 - a profile: the same core as the GPU workers, the CPU venv, nodes `farm-ui-1`, flag `--cpu`, environment
   `COMFYFARM_ALLOW=<gateway address>,<router address>` — stock `--multi-user` has no login of its own, so without the
-  allow-list anyone on the network could read every user's workflows.
+  allow-list anyone on the network could read every user's workflows. On the control-plane host with containers, the
+  gateway and the router reach it from the compose network, not the host's address: allow that subnet too
+  (`docker network inspect comfyfarm_default -f '{{(index .IPAM.Config 0).Subnet}}'`).
 
 The gateway finds the UI worker by itself (`UI_WORKER_URL=auto`, the default). As a worker row it is health-checked,
 host-checked and rolled out with the others, so its ComfyUI and frontend follow the GPU workers' version.
