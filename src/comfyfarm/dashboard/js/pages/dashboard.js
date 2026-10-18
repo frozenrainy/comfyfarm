@@ -1,6 +1,6 @@
 // Dashboard: only what the signed-in user needs — their jobs and place in line, the groups they may use, their own
 // usage, their last 10 jobs.
-import { TZ, api, dailyChart, h, qs, statCards } from "../core.js";
+import { TZ, api, dailyChart, h, qs, statCards, t } from "../core.js";
 import { groupCards, historyTable, queueTable } from "../jobs.js";
 
 export default {
@@ -10,16 +10,16 @@ export default {
     const mine = queueTable({ owner: false, reorder: false, refresh, list: () => data?.queue ?? [] });
     const recent = historyTable({ owner: false, refresh });
     const groups = h("div", { class: "cards" });
-    const empty = h("p", { class: "empty muted" }, "Nothing queued. Submit from ComfyUI.");
-    const recentEmpty = h("p", { class: "empty muted" }, "No finished jobs yet.");
+    const empty = h("p", { class: "empty muted" }, t("Nothing queued. Submit from ComfyUI."));
+    const recentEmpty = h("p", { class: "empty muted" }, t("No finished jobs yet."));
     const usage = h("div");
-    const segs = [[1, "24 h"], [7, "7 days"], [30, "30 days"]].map(([d, label]) =>
+    const segs = [[1, t("24 h")], [7, t("7 days")], [30, t("30 days")]].map(([d, label]) =>
       h("button", { type: "button", class: "seg", onclick: () => { days = d; localStorage.setItem("comfyfarm.dash.days", d); refresh(); } }, label));
     root.append(
-      h("section", {}, h("h2", {}, "My jobs"), mine.el, empty),
-      h("section", {}, h("h2", {}, "My groups"), groups),
-      h("section", {}, h("div", { class: "section-head" }, h("h2", {}, "My usage"), h("div", { class: "segs" }, ...segs)), usage),
-      h("section", {}, h("div", { class: "section-head" }, h("h2", {}, "Recent"), h("a", { href: "#/history" }, "All history →")),
+      h("section", {}, h("h2", {}, t("My jobs")), mine.el, empty),
+      h("section", {}, h("h2", {}, t("My groups")), groups),
+      h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("My usage")), h("div", { class: "segs" }, ...segs)), usage),
+      h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Recent")), h("a", { href: "#/history" }, t("All history →"))),
         recent.el, recentEmpty));
     let usageSig = "";
     return {

@@ -268,3 +268,12 @@ async def test_stats_keep_a_job_in_the_group_it_ran_in(farm):
         await x.execute("UPDATE workers SET group_id = $1 WHERE id = $2", g2, wid)       # w1 moves to g2 later
     s = await ok(await c.get("/api/admin/stats?days=7", headers=H("admin")))
     assert [(g["name"], g["jobs"]) for g in s["groups"]] == [("g1", 1)]
+
+
+async def test_language_preference(farm):
+    r, c = farm
+    assert (await ok(await c.get("/api/farm/me", headers=H("ann"))))["prefs"]["lang"] == "auto"
+    await ok(await c.put("/api/farm/me/prefs", json={"lang": "ko"}, headers=H("ann")))
+    me = await ok(await c.get("/api/farm/me", headers=H("ann")))
+    assert me["prefs"] == {"theme": "light", "lang": "ko"}                # theme untouched
+    assert (await c.put("/api/farm/me/prefs", json={"lang": "xx"}, headers=H("ann"))).status_code == 400

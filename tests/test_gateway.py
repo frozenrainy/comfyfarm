@@ -426,3 +426,13 @@ def test_dev_provider_refuses_a_public_address(monkeypatch):
     monkeypatch.setenv("COMFYFARM_SESSION_KEY", "k" * 32)
     with pytest.raises(SystemExit):
         main(["--router", "http://r", "--ui", "http://u", "--provider", "dev", "--host", "0.0.0.0"])
+
+
+async def test_login_page_speaks_the_chosen_language(farm):
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        assert ">Log in<" in (await c.get(f"{gw}/comfyfarm/login")).text
+        assert ">로그인<" in (await c.get(f"{gw}/comfyfarm/login", headers={"accept-language": "ko-KR,ko;q=0.9"})).text
+        c.cookies.set("comfyfarm_lang", "en")                     # the dashboard setting beats the browser
+        page = (await c.get(f"{gw}/comfyfarm/login?e=1", headers={"accept-language": "ko"})).text
+        assert ">Log in<" in page and "Login failed" in page

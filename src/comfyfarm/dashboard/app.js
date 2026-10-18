@@ -1,6 +1,7 @@
 // ComfyFarm web UI shell: hash routes → page modules (docs/design/13-web-ui.md). Each page mounts into <main> and
 // exposes refresh(); pages showing live state poll, the others refresh on demand.
 import { $, api, applyTheme, setText, state } from "./js/core.js";
+import { locale, setLang, t, translateStatic } from "./js/i18n.js";
 import dashboard from "./js/pages/dashboard.js";
 import queue from "./js/pages/queue.js";
 import history from "./js/pages/history.js";
@@ -14,8 +15,9 @@ let current = null, timer = null, lastOk = null, generation = 0, frame = null;
 async function loadMe() {
   state.me = await api("GET", "/api/farm/me");
   applyTheme(state.me.prefs.theme);
+  setLang(state.me.prefs.lang || "auto");          // the account's choice wins over this browser's last one
   document.body.classList.toggle("is-admin", state.me.admin);
-  setText($("#me"), state.me.admin ? `${state.me.user} (admin)` : state.me.user);
+  setText($("#me"), state.me.admin ? t("{user} (admin)", { user: state.me.user }) : state.me.user);
 }
 
 function showFreshness(err) {
@@ -23,9 +25,10 @@ function showFreshness(err) {
   if (err && err.status !== 401) {
     // keep the last data on screen, but never let it pass for current: an unreachable router is not an idle farm
     banner.hidden = false;
-    setText(banner, `Cannot load data (${err.message}).` + (lastOk ? ` Showing data from ${new Date(lastOk).toLocaleTimeString()}.` : ""));
+    setText(banner, t("Cannot load data ({error}).", { error: err.message })
+      + (lastOk ? " " + t("Showing data from {time}.", { time: new Date(lastOk).toLocaleTimeString(locale()) }) : ""));
   } else if (!err) banner.hidden = true;
-  setText($("#updated"), lastOk ? `updated ${new Date(lastOk).toLocaleTimeString()}` : "");
+  setText($("#updated"), lastOk ? t("updated {time}", { time: new Date(lastOk).toLocaleTimeString(locale()) }) : "");
 }
 
 async function tick() {
@@ -63,7 +66,7 @@ async function updateBadge() {
     b.hidden = n === 0;
     setText(b, String(n));
     b.classList.toggle("running", s.running > 0);
-    b.title = `${s.running} running · ${s.queued} waiting`;
+    b.title = t("{running} running · {queued} waiting", { running: s.running, queued: s.queued });
   } catch { /* the page's own refresh reports outages */ }
 }
 
@@ -93,7 +96,7 @@ function route() {
   const root = $("#page");
   root.replaceChildren();
   if (page.adminOnly && !state.me.admin) {
-    root.textContent = "Administrators only.";
+    root.textContent = t("Administrators only.");
     current = null;
     return;
   }
@@ -104,6 +107,7 @@ function route() {
 
 window.addEventListener("hashchange", () => { if (state.me) route(); });   // before loadMe: its .then(route) routes
 document.addEventListener("visibilitychange", () => { if (!document.hidden && current?.poll) tick(); });
+translateStatic();
 loadMe().then(route, (e) => showFreshness(e));
 updateBadge();
 setInterval(updateBadge, BADGE_EVERY);

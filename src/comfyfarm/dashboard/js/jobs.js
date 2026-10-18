@@ -1,17 +1,18 @@
 // Job tables shared by the dashboard, the queue page and the history page.
+import { locale } from "./i18n.js";
 import { act, ago, api, button, dur, h, namedRow, noteInput, progressOf, setBar, setPill, setText, syncNote, syncRows,
-         table, when } from "./core.js";
+         t, table, when } from "./core.js";
 
 const jobUrl = (pid, op) => `/api/farm/jobs/${pid}/${op}`;
-const groupLabel = (j) => j.group ?? (j.group_id == null ? "(any)" : `#${j.group_id}`);
+const groupLabel = (j) => j.group ?? (j.group_id == null ? t("(any)") : `#${j.group_id}`);
 
 // opts: { owner: show owner column, reorder: admin reorder buttons, refresh, list: () => current items }
 export function queueTable(opts) {
   const cols = ["place", "status", ...(opts.owner ? ["owner"] : []), "group", "worker", "progress", "time", "note", "actions"];
-  const head = { place: "#", status: "Status", owner: "Owner", group: "Group", worker: "Worker", progress: "Progress",
-                 time: "Waiting / running", note: "Note", actions: "" };
+  const head = { place: "#", status: t("Status"), owner: t("Owner"), group: t("Group"), worker: t("Worker"), progress: t("Progress"),
+                 time: t("Waiting / running"), note: t("Note"), actions: "" };
   const cls = { place: "num", time: "num", actions: "actions" };
-  const t = table(cols.map((c) => [head[c], cls[c]]));
+  const tbl = table(cols.map((c) => [head[c], cls[c]]));
 
   function move(tr, dir) {
     const queued = opts.list().filter((j) => j.place != null);
@@ -24,18 +25,18 @@ export function queueTable(opts) {
   function build() {
     const tr = namedRow(cols, cls);
     const pid = () => tr._item.prompt_id;
-    tr.note = noteInput((v) => act(() => api("PUT", jobUrl(pid(), "note"), { note: v }), "Note saved", opts.refresh));
+    tr.note = noteInput((v) => act(() => api("PUT", jobUrl(pid(), "note"), { note: v }), t("Note saved"), opts.refresh));
     tr.c.note.append(tr.note);
     const post = (op, body) => () => act(() => api("POST", jobUrl(pid(), op), body), null, opts.refresh);
     tr.btn = {
-      top: button("⤒", post("move", { to: "top" }), { title: "Run next" }),
-      up: button("↑", () => move(tr, -1), { title: "Move up" }),
-      down: button("↓", () => move(tr, +1), { title: "Move down" }),
-      bottom: button("⤓", post("move", { to: "bottom" }), { title: "Move to the end" }),
-      pause: button("Pause", post("pause"), { title: "Keep it in the queue but skip it" }),
-      resume: button("Resume", post("resume")),
-      cancel: button("Cancel", () => {
-        if (["dispatching", "running"].includes(tr._item.status) && !confirm("Interrupt this running job?")) return;
+      top: button("⤒", post("move", { to: "top" }), { title: t("Run next") }),
+      up: button("↑", () => move(tr, -1), { title: t("Move up") }),
+      down: button("↓", () => move(tr, +1), { title: t("Move down") }),
+      bottom: button("⤓", post("move", { to: "bottom" }), { title: t("Move to the end") }),
+      pause: button(t("Pause"), post("pause"), { title: t("Keep it in the queue but skip it") }),
+      resume: button(t("Resume"), post("resume")),
+      cancel: button(t("Cancel"), () => {
+        if (["dispatching", "running"].includes(tr._item.status) && !confirm(t("Interrupt this running job?"))) return;
         post("cancel")();
       }, { cls: "danger" }),
     };
@@ -45,9 +46,9 @@ export function queueTable(opts) {
   function update(tr, j) {
     const c = tr.c, queued = j.place != null;
     setText(c.place, queued ? j.place : "");
-    if (queued && j.runnable === false) setPill(c.status, "blocked", `${j.status} · blocked`);
+    if (queued && j.runnable === false) setPill(c.status, "blocked", `${t(j.status)} · ${t("blocked")}`);
     else setPill(c.status, j.status);
-    c.status.title = queued && j.runnable === false ? "No worker in a group you may use can run this job (requirements or permissions)." : "";
+    c.status.title = queued && j.runnable === false ? t("No worker in a group you may use can run this job (requirements or permissions).") : "";
     if (c.owner) setText(c.owner, j.owner);
     setText(c.group, groupLabel(j));
     setText(c.worker, j.worker || "");
@@ -59,58 +60,58 @@ export function queueTable(opts) {
     show("pause", j.status === "pending"); show("resume", j.status === "paused");
     show("cancel", j.status !== "cancelling");
   }
-  return { el: t.el, update: (items) => syncRows(t.tbody, items, (j) => j.key, build, update) };
+  return { el: tbl.el, update: (items) => syncRows(tbl.tbody, items, (j) => j.key, build, update) };
 }
 
 export function historyTable(opts) {
   const cols = ["finished", "status", ...(opts.owner ? ["owner"] : []), "group", "worker", "run", "error", "note", "actions"];
-  const head = { finished: "Finished", status: "Status", owner: "Owner", group: "Group", worker: "Worker", run: "Run time",
-                 error: "Error", note: "Note", actions: "" };
+  const head = { finished: t("Finished"), status: t("Status"), owner: t("Owner"), group: t("Group"), worker: t("Worker"),
+                 run: t("Run time"), error: t("Error"), note: t("Note"), actions: "" };
   const cls = { finished: "num", run: "num", error: "err", actions: "actions" };
-  const t = table(cols.map((c) => [head[c], cls[c]]));
+  const tbl = table(cols.map((c) => [head[c], cls[c]]));
   function build() {
     const tr = namedRow(cols, cls);
     const pid = () => tr._item.prompt_id;
-    tr.note = noteInput((v) => act(() => api("PUT", jobUrl(pid(), "note"), { note: v }), "Note saved", opts.refresh));
+    tr.note = noteInput((v) => act(() => api("PUT", jobUrl(pid(), "note"), { note: v }), t("Note saved"), opts.refresh));
     tr.c.note.append(tr.note);
-    tr.c.actions.append(button("Retry", () => act(() => api("POST", jobUrl(pid(), "retry")),
-      (r) => `Queued again as ${r.prompt_id.slice(0, 8)}`, opts.refresh), { title: "Queue a new job with the same workflow" }));
+    tr.c.actions.append(button(t("Retry"), () => act(() => api("POST", jobUrl(pid(), "retry")),
+      (r) => t("Queued again as {id}", { id: r.prompt_id.slice(0, 8) }), opts.refresh), { title: t("Queue a new job with the same workflow") }));
     return tr;
   }
   function update(tr, j) {
     const c = tr.c;
     setText(c.finished, when(j.finished_at));
-    c.finished.title = j.finished_at ? new Date(j.finished_at).toLocaleString() : "";
+    c.finished.title = j.finished_at ? new Date(j.finished_at).toLocaleString(locale()) : "";
     setPill(c.status, j.status);
     if (c.owner) setText(c.owner, j.owner);
     setText(c.group, groupLabel(j));
     setText(c.worker, j.worker || "");
     setText(c.run, dur(j.run_seconds));
     setText(c.error, j.error || "");
-    c.error.title = `job ${j.prompt_id}`;
+    c.error.title = t("job {id}", { id: j.prompt_id });
     syncNote(tr.note, j.note);
   }
-  return { el: t.el, update: (items) => syncRows(t.tbody, items, (j) => j.key, build, update) };
+  return { el: tbl.el, update: (items) => syncRows(tbl.tbody, items, (j) => j.key, build, update) };
 }
 
 // Group cards: health numbers of the groups the user may use.
 export function groupCards(groups) {
-  if (!groups.length) return [h("p", { class: "muted" }, "You may not use any worker group yet. Ask an administrator.")];
+  if (!groups.length) return [h("p", { class: "muted" }, t("You may not use any worker group yet. Ask an administrator."))];
   return groups.map((g) => {
     const hh = g.health || {};
     const stall = hh.dispatch_idle_seconds;
     const stallCls = stall == null ? "" : stall >= 300 ? "alert" : stall >= 60 ? "caution" : "";
     const row = (k, v, c = "") => [h("dt", {}, k), h("dd", { class: c }, v)];
     return h("div", { class: "card" },
-      h("h3", {}, h("span", {}, g.name), h("span", { class: "muted" }, `${g.online}/${g.workers} online`)),
+      h("h3", {}, h("span", {}, g.name), h("span", { class: "muted" }, t("{online}/{workers} online", g))),
       h("dl", {},
-        row("Idle workers", String(hh.idle_workers ?? "—")),
-        row("Waiting", String(hh.pending ?? "—")),
-        row("Running", String(hh.running ?? "—")),
-        row("Paused", String(hh.paused ?? "—")),
-        row("Dispatch stalled", stall == null ? "—" : dur(stall), stallCls),
-        row("Longest running", dur(hh.running_longest_seconds)),
-        hh.unsatisfiable_pending ? row("Cannot run", `${hh.unsatisfiable_pending} job(s)`, "alert") : null,
-        hh.inconsistent_workers ? row("Consistency", `${hh.inconsistent_workers} worker(s) differ`, "caution") : null));
+        row(t("Idle workers"), String(hh.idle_workers ?? "—")),
+        row(t("Waiting"), String(hh.pending ?? "—")),
+        row(t("Running"), String(hh.running ?? "—")),
+        row(t("Paused"), String(hh.paused ?? "—")),
+        row(t("Dispatch stalled"), stall == null ? "—" : dur(stall), stallCls),
+        row(t("Longest running"), dur(hh.running_longest_seconds)),
+        hh.unsatisfiable_pending ? row(t("Cannot run"), t("{n} job(s)", { n: hh.unsatisfiable_pending }), "alert") : null,
+        hh.inconsistent_workers ? row(t("Consistency"), t("{n} worker(s) differ", { n: hh.inconsistent_workers }), "caution") : null));
   });
 }

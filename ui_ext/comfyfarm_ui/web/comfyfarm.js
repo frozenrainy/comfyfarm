@@ -19,6 +19,19 @@ function storedGroup() {
   }
 }
 
+// The dashboard's language choice (comfyfarm.lang), else the browser's — same rule as the dashboard.
+const KO = {
+  "Worker group for Run": "실행할 워커 그룹", "Site default": "사이트 기본값",
+  "No worker group available to you.": "사용할 수 있는 워커 그룹이 없습니다.", "Group": "그룹", "default": "기본값",
+  "Worker group for Run — the node list follows it": "실행할 워커 그룹 — 노드 목록도 이 그룹을 따릅니다",
+};
+function lang() {
+  const pref = localStorage.getItem("comfyfarm.lang") || "auto";
+  if (pref !== "auto") return pref;
+  return (navigator.languages?.[0] || navigator.language || "en").toLowerCase().startsWith("ko") ? "ko" : "en";
+}
+const tr = (s) => (lang() === "ko" ? KO[s] ?? s : s);
+
 const origFetchApi = api.fetchApi.bind(api);
 
 api.fetchApi = async function (route, options = {}) {
@@ -76,7 +89,7 @@ function openPicker(ev) {
   box.style.left = `${Math.max(8, Math.min(anchor.left, window.innerWidth - 240))}px`;
   box.style.top = `${anchor.bottom + 6}px`;
   const title = document.createElement("div");
-  title.textContent = "Worker group for Run";
+  title.textContent = tr("Worker group for Run");
   title.style.cssText = "padding:4px 8px 6px;opacity:.65;font-size:12px";
   box.append(title);
   const pick = (g) => {
@@ -98,11 +111,11 @@ function openPicker(ev) {
     r.onclick = onclick;
     return r;
   };
-  box.append(row("Site default", "", !cur, () => pick(null)));
+  box.append(row(tr("Site default"), "", !cur, () => pick(null)));
   for (const g of groups) box.append(row(g.name, `${g.online} online`, cur?.id === g.id, () => pick(g)));
   if (!groups.length) {
     const none = document.createElement("div");
-    none.textContent = "No worker group available to you.";
+    none.textContent = tr("No worker group available to you.");
     none.style.cssText = "padding:6px 8px;opacity:.7";
     box.append(none);
   }
@@ -134,8 +147,8 @@ app.registerExtension({
       name: "comfyfarm.ui.group",
       actionBarButtons: [{
         icon: "icon-[lucide--server]",
-        label: `Group: ${cur ? cur.name : "default"}`,
-        tooltip: "Worker group for Run — the node list follows it",
+        label: `${tr("Group")}: ${cur ? cur.name : tr("default")}`,
+        tooltip: tr("Worker group for Run — the node list follows it"),
         onClick: openPicker,
       }],
     });

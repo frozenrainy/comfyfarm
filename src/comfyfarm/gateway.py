@@ -47,7 +47,7 @@ ROUTER_PREFIXES = ("/api/prompt", "/api/jobs", "/api/queue", "/api/history", "/a
 DASHBOARD = "/comfyfarm/dashboard/"
 AFTER_LOGIN = ("/", DASHBOARD)           # the dashboard is the landing page; "/" (bare ComfyUI) only when asked for
 # Same look as the dashboard; the theme the browser last used there (localStorage) before the first paint.
-LOGIN_PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
+LOGIN_PAGE = """<!doctype html><html lang={lang}><head><meta charset=utf-8><meta name=viewport content="width=device-width, initial-scale=1">
 <title>ComfyFarm</title>
 <script>
 if (window.top !== window) window.top.location.href = location.href;   // an expired session inside the Workflow tab
@@ -68,7 +68,7 @@ button {{ font:inherit; padding:.5rem; border:0; border-radius:6px; background:v
 p {{ margin:0 }} .bad {{ color:var(--bad) }} .note {{ color:var(--muted) }}
 </style></head><body>
 <form method=post action=/comfyfarm/login><h1>ComfyFarm</h1>{msg}<input type=hidden name=next value="{next}">
-{user_field}<input name=password type=password placeholder=Password autocomplete=current-password><button>Log in</button></form>
+{user_field}<input name=password type=password placeholder="{password}" autocomplete=current-password><button>{login}</button></form>
 </body></html>"""
 IDENTITY_HEADERS = {"x-comfyfarm-user", "x-comfyfarm-roles", "x-comfyfarm-gateway", "comfy-user",
                     "x-comfyfarm-gateway-login"}
@@ -79,6 +79,24 @@ HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authoriz
                "origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-user"}
 HASHED_ASSET = re.compile(r"^/assets/.+[-.][A-Za-z0-9_]{8,}\.(js|css|woff2?|svg|png|webp)$")
 COOKIE = "comfyfarm_session"
+# The login page in the language the dashboard was last set to (cookie comfyfarm_lang), else the browser's.
+LOGIN_TEXT = {
+    "en": {"user": "User", "password": "Password", "login": "Log in", "failed": "Login failed",
+           "down": "The farm is not answering — try again shortly", "pw": "Password changed. Log in again."},
+    "ko": {"user": "사용자", "password": "비밀번호", "login": "로그인", "failed": "로그인하지 못했습니다",
+           "down": "팜이 응답하지 않습니다 — 잠시 뒤 다시 시도하세요", "pw": "비밀번호를 바꿨습니다. 다시 로그인하세요."},
+}
+
+
+def login_lang(request) -> str:
+    pref = request.cookies.get("comfyfarm_lang", "auto")
+    if pref in LOGIN_TEXT:
+        return pref
+    for part in request.headers.get("accept-language", "").split(","):
+        base = part.split(";")[0].strip().lower().split("-")[0]
+        if base in LOGIN_TEXT:
+            return base
+    return "en"
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 
@@ -224,18 +242,21 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             return None
 
     async def login_page(request: Request):
+        lang = login_lang(request)
+        tx = LOGIN_TEXT[lang]
         err = request.query_params.get("e")
-        note = "Password changed. Log in again." if request.query_params.get("m") == "pw" else ""
+        note = tx["pw"] if request.query_params.get("m") == "pw" else ""
         nxt = safe_next(request.query_params.get("next"))
         users = await login_users() if s.provider == "local" else None
         if users:
             options = "".join(f"<option>{html.escape(u)}</option>" for u in users)
-            user_field = f'<select name=username autofocus><option value="" disabled selected>User</option>{options}</select>'
+            user_field = f'<select name=username autofocus><option value="" disabled selected>{tx["user"]}</option>{options}</select>'
         else:
-            user_field = "<input name=username placeholder=User autocomplete=username autofocus>"
-        msg = ({"1": "<p class=bad>Login failed</p>", "2": "<p class=bad>The farm is not answering — try again shortly</p>"}
-               .get(err, "<p class=bad>Login failed</p>") if err else '') + (f'<p class=note>{html.escape(note)}</p>' if note else '')
-        return HTMLResponse(LOGIN_PAGE.format(next=html.escape(nxt), user_field=user_field, msg=msg))
+            user_field = f'<input name=username placeholder="{tx["user"]}" autocomplete=username autofocus>'
+        msg = (f'<p class=bad>{tx["down"] if err == "2" else tx["failed"]}</p>' if err else "") \
+            + (f'<p class=note>{html.escape(note)}</p>' if note else "")
+        return HTMLResponse(LOGIN_PAGE.format(next=html.escape(nxt), user_field=user_field, msg=msg, lang=lang,
+                                              password=tx["password"], login=tx["login"]))
 
     async def login(request: Request):
         if not same_origin_ok(request):

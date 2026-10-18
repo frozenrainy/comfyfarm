@@ -12,10 +12,12 @@ from .context import Ctx
 
 THEMES = ("light", "dark", "auto")
 MIN_PASSWORD = 8
+LANGS = ("auto", "en", "ko")          # auto: the browser's language
 
 
 class PrefsIn(BaseModel):
     theme: str | None = None
+    lang: str | None = None
 
 
 class PasswordIn(BaseModel):
@@ -91,7 +93,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         prefs = dict(row["prefs"]) if row else {}
         return {"user": who, "admin": ctx.is_admin(who), "local": bool(row and row["local"]),
                 "groups": [{"id": g["id"], "name": g["name"]} for g in groups], "all_groups": allowed is None,
-                "prefs": {"theme": prefs.get("theme", "light")}}
+                "prefs": {"theme": prefs.get("theme", "light"), "lang": prefs.get("lang", "auto")}}
 
     @api.put("/api/farm/me/prefs")
     async def set_prefs(body: PrefsIn, x_comfyfarm_user: str | None = Header(default=None)):
@@ -101,6 +103,10 @@ def make_router(ctx: Ctx) -> APIRouter:
             if body.theme not in THEMES:
                 raise HTTPException(400, f"theme must be one of {', '.join(THEMES)}")
             patch["theme"] = body.theme
+        if body.lang is not None:
+            if body.lang not in LANGS:
+                raise HTTPException(400, f"lang must be one of {', '.join(LANGS)}")
+            patch["lang"] = body.lang
         async with db.conn() as c:     # the development identity may have no row yet
             await c.execute("INSERT INTO users(username, prefs) VALUES ($1, $2) "
                             "ON CONFLICT (username) DO UPDATE SET prefs = users.prefs || excluded.prefs", who, patch)

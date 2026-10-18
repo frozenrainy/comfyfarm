@@ -1,5 +1,5 @@
 // History: every finished job, searchable and paged. Not polled — a list that moves while one reads it is useless.
-import { TZ, api, button, h, qs, setText, state } from "../core.js";
+import { TZ, api, button, h, qs, setText, state, t } from "../core.js";
 import { historyTable } from "../jobs.js";
 import { groupSelect, searchBox } from "./queue.js";
 
@@ -20,19 +20,19 @@ export default {
     const scope = h("label", { class: "check", hidden: !admin },
       h("input", { type: "checkbox", checked: f.scope === "all", onchange: (e) => {
         f.scope = e.target.checked ? "all" : "mine"; localStorage.setItem("comfyfarm.scope", f.scope); f.offset = 0; rebuild(); refresh();
-      } }), " all users");
+      } }), " " + t("all users"));
     const pageInfo = h("span", { class: "muted" });
-    const prev = button("← Newer", () => { f.offset = Math.max(0, f.offset - PAGE); refresh(); });
-    const next = button("Older →", () => { f.offset += PAGE; refresh(); });
-    const holder = h("div"), empty = h("p", { class: "empty muted" }, "No matching jobs.");
+    const prev = button(t("← Newer"), () => { f.offset = Math.max(0, f.offset - PAGE); refresh(); });
+    const next = button(t("Older →"), () => { f.offset += PAGE; refresh(); });
+    const holder = h("div"), empty = h("p", { class: "empty muted" }, t("No matching jobs."));
     let tbl;
     function rebuild() { tbl = historyTable({ owner: f.scope === "all", refresh }); holder.replaceChildren(tbl.el); }
     rebuild();
     root.append(h("section", {},
-      h("div", { class: "section-head" }, h("h2", {}, "History"), button("Refresh", () => refresh())),
+      h("div", { class: "section-head" }, h("h2", {}, t("History")), button(t("Refresh"), () => refresh())),
       h("div", { class: "filters" },
-        searchBox(admin ? "search id, note, error, owner" : "search id, note or error", set("q")),
-        h("select", { onchange: (e) => set("status")(e.target.value) }, ...STATUS.map(([v, l]) => h("option", { value: v }, l))),
+        searchBox(admin ? t("search id, note, error, owner") : t("search id, note or error"), set("q")),
+        h("select", { onchange: (e) => set("status")(e.target.value) }, ...STATUS.map(([v, l]) => h("option", { value: v }, t(l)))),
         groupSel.el, h("span", { class: "dates" }, from, " – ", to), scope),
       holder, empty, h("div", { class: "pager" }, prev, pageInfo, next)));
     return {
@@ -46,7 +46,7 @@ export default {
         tbl.update(d.jobs);
         empty.hidden = d.jobs.length > 0;
         tbl.el.hidden = !d.jobs.length;
-        setText(pageInfo, d.total ? `${d.offset + 1}–${d.offset + d.jobs.length} of ${d.total}` : "");
+        setText(pageInfo, d.total ? t("{from}–{to} of {total}", { from: d.offset + 1, to: d.offset + d.jobs.length, total: d.total }) : "");
         prev.disabled = d.offset === 0;
         next.disabled = d.offset + d.jobs.length >= d.total;
       },

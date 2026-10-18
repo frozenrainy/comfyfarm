@@ -1,11 +1,11 @@
 // Queue: unfinished jobs with search and filters. Admins see everybody's jobs and may reorder them (D-32).
-import { api, h, qs, setText, state } from "../core.js";
+import { api, h, qs, setText, state, t } from "../core.js";
 import { queueTable } from "../jobs.js";
 
 const STATUS = [["", "all unfinished"], ["pending", "waiting"], ["paused", "paused"],
-                ["dispatching,running,cancelling", "running"]];
+                ["dispatching,running,cancelling", "running"]];         // [value, English label]
 
-export function groupSelect(onchange, allLabel = "all groups") {
+export function groupSelect(onchange, allLabel = t("all groups")) {
   const sel = h("select", { onchange: () => onchange(sel.value) }, h("option", { value: "" }, allLabel));
   return {
     el: sel,
@@ -17,8 +17,8 @@ export function groupSelect(onchange, allLabel = "all groups") {
 }
 
 export function searchBox(placeholder, onchange) {
-  let t;
-  const inp = h("input", { type: "search", class: "search", placeholder, oninput: () => { clearTimeout(t); t = setTimeout(() => onchange(inp.value), 300); } });
+  let timer;
+  const inp = h("input", { type: "search", class: "search", placeholder, oninput: () => { clearTimeout(timer); timer = setTimeout(() => onchange(inp.value), 300); } });
   return inp;
 }
 
@@ -34,10 +34,10 @@ export default {
     const scope = h("label", { class: "check", hidden: !admin },
       h("input", { type: "checkbox", checked: f.scope === "all", onchange: (e) => {
         f.scope = e.target.checked ? "all" : "mine"; localStorage.setItem("comfyfarm.scope", f.scope); rebuild(); refresh();
-      } }), " all users");
+      } }), " " + t("all users"));
     const summary = h("span", { class: "muted" });
     const tableHolder = h("div");
-    const empty = h("p", { class: "empty muted" }, "No matching jobs.");
+    const empty = h("p", { class: "empty muted" }, t("No matching jobs."));
     let tbl;
     function rebuild() {
       tbl = queueTable({ owner: f.scope === "all", reorder: admin, refresh, list: () => data?.jobs ?? [] });
@@ -45,20 +45,20 @@ export default {
     }
     rebuild();
     root.append(h("section", {},
-      h("div", { class: "section-head" }, h("h2", {}, "Queue"), summary),
+      h("div", { class: "section-head" }, h("h2", {}, t("Queue")), summary),
       h("div", { class: "filters" },
-        searchBox(admin ? "search id, note, owner" : "search id or note", set("q")),
-        h("select", { onchange: (e) => set("status")(e.target.value) }, ...STATUS.map(([v, l]) => h("option", { value: v }, l))),
+        searchBox(admin ? t("search id, note, owner") : t("search id or note"), set("q")),
+        h("select", { onchange: (e) => set("status")(e.target.value) }, ...STATUS.map(([v, l]) => h("option", { value: v }, t(l)))),
         groupSel.el, scope),
       tableHolder, empty,
-      admin ? h("p", { class: "muted small" }, "⤒ run next · ↑↓ move past the neighbour shown · ⤓ to the end. One order is shared by all groups.") : null));
+      admin ? h("p", { class: "muted small" }, t("⤒ run next · ↑↓ move past the neighbour shown · ⤓ to the end. One order is shared by all groups.")) : null));
     return {
       async refresh() {
         data = await api("GET", `/api/farm/queue?${qs(f)}`);
         tbl.update(data.jobs);
         empty.hidden = data.jobs.length > 0;
         tbl.el.hidden = !data.jobs.length;
-        setText(summary, `farm: ${data.farm.queued} waiting · ${data.farm.running} running`);
+        setText(summary, t("farm: {queued} waiting · {running} running", data.farm));
       },
     };
   },

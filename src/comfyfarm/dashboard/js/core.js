@@ -1,4 +1,7 @@
 // Shared helpers for the web UI pages. No framework, no build step (D-32).
+import { locale, t } from "./i18n.js";
+export { t };
+const translate = t;           // for functions whose own parameter is called t
 export const $ = (s, root = document) => root.querySelector(s);
 export const LOGIN = "/comfyfarm/login?next=/comfyfarm/dashboard/";
 export const state = { me: null, clockSkew: 0 };
@@ -17,7 +20,7 @@ export function h(tag, props = {}, ...children) {
   return el;
 }
 export function setText(el, text) { text = text ?? ""; if (el.textContent !== String(text)) el.textContent = text; }
-export function pill(state_, label) { return h("span", { class: `pill s-${state_}` }, label ?? state_.replace("_", " ")); }
+export function pill(state_, label) { return h("span", { class: `pill s-${state_}` }, label ?? t(state_.replace("_", " "))); }
 export function setPill(el, st, label) {
   const sig = `${st}|${label ?? ""}`;
   if (el.dataset.v !== sig) { el.dataset.v = sig; el.replaceChildren(pill(st, label)); }
@@ -29,17 +32,18 @@ export function ago(iso) { return iso ? (now() - Date.parse(iso)) / 1000 : null;
 export function dur(s) {
   if (s == null || !isFinite(s)) return "—";
   s = Math.max(0, Math.round(s));
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+  const u = (n, unit) => `${n}${t(unit)}`;                     // "s" → "초" …
+  if (s < 60) return u(s, "s");
+  if (s < 3600) return `${u(Math.floor(s / 60), "m")} ${u(s % 60, "s")}`;
+  if (s < 86400) return `${u(Math.floor(s / 3600), "h")} ${u(Math.floor((s % 3600) / 60), "m")}`;
+  return `${u(Math.floor(s / 86400), "d")} ${u(Math.floor((s % 86400) / 3600), "h")}`;
 }
-export function hours(s) { return s == null ? "—" : s < 3600 ? dur(s) : `${(s / 3600).toFixed(1)} h`; }
+export function hours(s) { return s == null ? "—" : s < 3600 ? dur(s) : `${(s / 3600).toFixed(1)} ${t("h")}`; }
 export function when(iso) {
   if (!iso) return "";
   const d = new Date(iso), a = ago(iso);
-  if (a != null && a < 86400) return `${dur(a)} ago`;
-  return d.toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  if (a != null && a < 86400) return t("{time} ago", { time: dur(a) });
+  return d.toLocaleString(locale() ?? [], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 export const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
@@ -81,8 +85,8 @@ export async function api(method, path, body) {
       headers: body !== undefined ? { "Content-Type": "application/json" } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-  } catch (e) { throw new ApiError(`cannot reach the server (${e.message})`, 0); }
-  if (r.status === 401) { location.href = LOGIN; throw new ApiError("not logged in", 401); }
+  } catch (e) { throw new ApiError(t("cannot reach the server ({error})", { error: e.message }), 0); }
+  if (r.status === 401) { location.href = LOGIN; throw new ApiError(t("not logged in"), 401); }
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try {
@@ -142,7 +146,7 @@ export function table(headers, classes = {}) {
 }
 
 export function noteInput(save) {
-  const inp = h("input", { class: "note", placeholder: "note", maxlength: "500" });
+  const inp = h("input", { class: "note", placeholder: t("note"), maxlength: "500" });
   inp.addEventListener("keydown", (e) => {
     if (e.key === "Enter") inp.blur();
     if (e.key === "Escape") { inp.value = inp.dataset.saved || ""; inp.blur(); }
@@ -160,7 +164,7 @@ export function button(label, onclick, opts = {}) {
 
 // ---- dialogs ---------------------------------------------------------------------------------------------------
 // fields: [{name, label, type: text|password|number|checkbox|checkboxes|select, value, options:[{value,label}], hint}]
-export function formDialog(title, fields, submitLabel = "Save", { wide = false, noSubmit = false } = {}) {
+export function formDialog(title, fields, submitLabel = t("Save"), { wide = false, noSubmit = false } = {}) {
   return new Promise((resolve) => {
     const inputs = {};
     const rows = fields.map((f) => {
@@ -171,7 +175,7 @@ export function formDialog(title, fields, submitLabel = "Save", { wide = false, 
           return { cb, el: h("label", { class: "check" }, cb, ` ${o.label}`) };
         });
         inputs[f.name] = () => boxes.filter((b) => b.cb.checked).map((b) => b.cb.value);
-        control = h("div", { class: "checks" }, ...boxes.map((b) => b.el), boxes.length ? null : h("span", { class: "muted" }, "none available"));
+        control = h("div", { class: "checks" }, ...boxes.map((b) => b.el), boxes.length ? null : h("span", { class: "muted" }, t("none available")));
       } else if (f.type === "checkbox") {
         const cb = h("input", { type: "checkbox", checked: f.value });
         inputs[f.name] = () => cb.checked;
@@ -203,7 +207,7 @@ export function formDialog(title, fields, submitLabel = "Save", { wide = false, 
       e.preventDefault();
       done(Object.fromEntries(Object.entries(inputs).map(([k, get]) => [k, get()])));
     } }, h("h3", {}, title), ...rows,
-      h("div", { class: "dialog-actions" }, button(noSubmit ? "Close" : "Cancel", () => done(null)),
+      h("div", { class: "dialog-actions" }, button(noSubmit ? t("Close") : t("Cancel"), () => done(null)),
         noSubmit ? null : h("button", { type: "submit", class: "primary" }, submitLabel)));
     dlg.append(form);
     dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(null); });
@@ -226,43 +230,44 @@ export function dailyChart(daily) {
   const cols = daily.map((d) => {
     const total = d.completed + d.failed + d.cancelled;
     const seg = (n, cls) => { const s = h("i", { class: cls }); s.style.height = `${(n / max) * 100}%`; return s; };
-    return h("div", { class: "col", title: `${d.date}: ${d.completed} done, ${d.failed} failed, ${d.cancelled} cancelled` },
+    return h("div", { class: "col", title: t("{date}: {completed} done, {failed} failed, {cancelled} cancelled", d) },
       h("div", { class: "stack" }, seg(d.cancelled, "c"), seg(d.failed, "f"), seg(d.completed, "ok")),
       h("div", { class: "x" }, daily.length <= 10 || total ? d.date.slice(5) : ""));
   });
   return h("div", { class: "chart" }, ...cols);
 }
-export function statCards(t) {
+export function statCards(t) {               // (t: the totals; tr: translate)
+  const tr = (s) => translate(s);
   const card = (label, value, cls = "") => h("div", { class: `stat ${cls}` }, h("div", { class: "v" }, value), h("div", { class: "k" }, label));
   return h("div", { class: "stats" },
-    card("jobs finished", String(t.jobs)),
-    card("completed", String(t.completed), "ok"),
-    card("failed", String(t.failed), t.failed ? "bad" : ""),
-    card("cancelled", String(t.cancelled)),
-    card("GPU time", hours(t.gpu_seconds)),
-    card("avg wait", dur(t.avg_wait_seconds)),
-    card("avg run", dur(t.avg_run_seconds)));
+    card(tr("jobs finished"), String(t.jobs)),
+    card(tr("completed"), String(t.completed), "ok"),
+    card(tr("failed"), String(t.failed), t.failed ? "bad" : ""),
+    card(tr("cancelled"), String(t.cancelled)),
+    card(tr("GPU time"), hours(t.gpu_seconds)),
+    card(tr("avg wait"), dur(t.avg_wait_seconds)),
+    card(tr("avg run"), dur(t.avg_run_seconds)));
 }
 // Period picker: presets + custom dates, at most 30 days (the server enforces the same limit).
 export function periodPicker(initial, onchange) {
   const MAX = 30;
   let cur = { ...initial };
   const today = new Date().toLocaleDateString("sv");           // YYYY-MM-DD in local time
-  const presets = [["24 h", 1], ["7 days", 7], ["30 days", 30]].map(([label, days]) =>
+  const presets = [[t("24 h"), 1], [t("7 days"), 7], [t("30 days"), 30]].map(([label, days]) =>
     h("button", { type: "button", class: "seg", onclick: () => { cur = { days }; sync(); onchange(cur); } }, label));
   const from = h("input", { type: "date", max: today }), to = h("input", { type: "date", max: today });
   const apply = h("button", { type: "button", onclick: () => {
-    if (!from.value || !to.value) return toast("pick both dates", true);
+    if (!from.value || !to.value) return toast(t("pick both dates"), true);
     const span = (Date.parse(to.value) - Date.parse(from.value)) / 86400000 + 1;
-    if (span < 1) return toast("end is before start", true);
-    if (span > MAX) return toast(`at most ${MAX} days`, true);
+    if (span < 1) return toast(t("end is before start"), true);
+    if (span > MAX) return toast(t("at most {n} days", { n: MAX }), true);
     cur = { start: from.value, end: to.value }; sync(); onchange(cur);
-  } }, "Apply");
+  } }, t("Apply"));
   function sync() {
     presets.forEach((b, i) => b.classList.toggle("on", cur.days === [1, 7, 30][i]));
     if (cur.start) { from.value = cur.start; to.value = cur.end; }
   }
   sync();
   return h("div", { class: "period" }, h("div", { class: "segs" }, ...presets),
-    h("span", { class: "custom" }, from, " – ", to, apply, h("span", { class: "muted" }, ` max ${MAX} days`)));
+    h("span", { class: "custom" }, from, " – ", to, apply, h("span", { class: "muted" }, " " + t("max {n} days", { n: MAX }))));
 }
