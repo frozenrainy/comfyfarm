@@ -54,3 +54,28 @@ async def test_stock_endpoints_per_user(dsn, fakes):
                 assert await conn.fetchval("SELECT node_count FROM object_info_snapshots") == len(oi)
             await w.stop()                                                     # stale-if-error: snapshot still served
             assert "EmptyImage" in (await c.get("/api/object_info/EmptyImage", headers=me)).json()
+
+
+async def test_object_info_group_header_takes_an_id(dsn):
+    """Header values must be Latin-1: the extension sends the picked group's id, not its (possibly Korean) name. An
+    ASCII name still works; an unknown id or name falls back as before."""
+    import gzip
+    import json
+    app = create_app(fast_settings(dsn))
+    async with app.router.lifespan_context(app):
+        r = app.state.router
+        ids = {}
+        async with r.db.conn() as conn:
+            for name in ("alpha", "영상팀"):
+                ids[name] = await conn.fetchval("INSERT INTO worker_groups(name) VALUES ($1) RETURNING id", name)
+                await conn.execute("INSERT INTO object_info_snapshots(group_id, data, node_count, source, fetched_at) "
+                                   "VALUES ($1, $2, 1, 'test', now())", ids[name],
+                                   gzip.compress(json.dumps({f"Node_{ids[name]}": {}}).encode()))
+        me = {"X-ComfyFarm-User": "tester"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            async def nodes(group):
+                return list((await c.get("/api/object_info", headers={**me, "X-ComfyFarm-Group": group})).json())
+            assert await nodes(str(ids["영상팀"])) == [f"Node_{ids['영상팀']}"]
+            assert await nodes("alpha") == [f"Node_{ids['alpha']}"]                    # older extensions
+            assert await nodes("999999") == [f"Node_{ids['alpha']}"]                   # unknown: the first group
+            assert await nodes("99999999999999999999999") == [f"Node_{ids['alpha']}"]  # beyond bigint: no 500

@@ -209,10 +209,16 @@ def make_router(ctx) -> APIRouter:
         """The group whose node definitions this user sees: the one picked in the frontend, else the site default,
         else the first — always among the groups the user may use (D-34)."""
         allowed = await ctx.allowed(c, who)
-        for name in (header_group, router.s.default_group):
-            if name:
-                g = await c.fetchrow("SELECT id, name FROM worker_groups WHERE name = $1 AND "
-                                     "($2::bigint[] IS NULL OR id = ANY($2))", name, allowed)
+        # The extension sends the group's id: header values must be Latin-1, so a name like "영상팀" broke every
+        # request. A plain (ASCII) name is still accepted from older extensions; unknown ids and names fall through.
+        tries = []
+        if header_group and header_group.isascii() and header_group.isdigit() and len(header_group) <= 18:
+            tries.append(("id", int(header_group)))
+        tries += [("name", header_group), ("name", router.s.default_group)]
+        for col, value in tries:
+            if value:
+                g = await c.fetchrow(f"SELECT id, name FROM worker_groups WHERE {col} = $1 AND "
+                                     "($2::bigint[] IS NULL OR id = ANY($2))", value, allowed)
                 if g:
                     return g
         return await c.fetchrow("SELECT id, name FROM worker_groups WHERE $1::bigint[] IS NULL OR id = ANY($1) "
