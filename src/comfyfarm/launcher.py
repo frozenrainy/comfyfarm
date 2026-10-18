@@ -256,24 +256,33 @@ def _collect(root: str) -> list[bytes]:
     READY is created after it). A change-detection key: the launcher compares manifest values as opaque strings and
     never recomputes this."""
     items = []
+
+    def link(p: str, rel: str) -> str:
+        target = os.readlink(p)
+        if "\n" in target:                       # would end the line early: two trees could give the same text
+            raise ValueError(f"newline in a symlink target: {rel!r}")
+        return f"l {rel} {target}"
     for dirpath, dirnames, filenames in os.walk(root):
         for n in dirnames:
             p = os.path.join(dirpath, n)
             if os.path.islink(p):
-                items.append(f"l {os.path.relpath(p, root)} {os.readlink(p)}")
+                rel = os.path.relpath(p, root)
+                if "\n" in rel:
+                    raise ValueError(f"newline in a file name: {rel!r}")
+                items.append(link(p, rel))
         for n in filenames:
             p = os.path.join(dirpath, n)
             rel = os.path.relpath(p, root)
             if rel in ("READY", "manifest.json"):
                 continue
+            if "\n" in rel:
+                raise ValueError(f"newline in a file name: {rel!r}")
             if os.path.islink(p):
-                items.append(f"l {rel} {os.readlink(p)}")
+                items.append(link(p, rel))
             elif os.path.isfile(p):
                 items.append(f"f {rel} {os.path.getsize(p)}")
             else:
                 raise ValueError(f"not a regular file or symlink: {rel}")     # sockets, FIFOs, devices (contract §2)
-            if "\n" in rel:
-                raise ValueError(f"newline in a file name: {rel!r}")
     try:
         return sorted(x.encode("utf-8") for x in items)                      # full-line bytes, ascending
     except UnicodeEncodeError:                                                 # a name that is not valid UTF-8
@@ -306,6 +315,7 @@ def sync(entry: dict) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copytree(src, tmp, symlinks=True)
+        owner_writable(tmp)        # published artifacts are read-only; the local copy must stay replaceable and prunable
         if os.path.exists(dst):
             old = f"{dst}.old-{os.getpid()}"
             os.rename(dst, old)
@@ -314,6 +324,14 @@ def sync(entry: dict) -> None:
         else:
             os.rename(tmp, dst)
     os.utime(dst)
+
+
+def owner_writable(root: str) -> None:
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in [""] + dirnames + filenames:
+            p = os.path.join(dirpath, n) if n else dirpath
+            if not os.path.islink(p):
+                os.chmod(p, os.lstat(p).st_mode | 0o200)
 
 
 IN_FLIGHT = re.compile(r"\.(tmp|old)-\d+$")         # sync()'s work directories (maybe another launcher's, mid-copy)

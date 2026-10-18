@@ -80,10 +80,11 @@ The backend `manual` needs no agent: the dashboard tells an operator which insta
 Venvs are large; old ones are worth deleting once no profile that a worker might go back to uses them. Do not
 delete the directory itself — publish refuses only names that exist, and a name must never be reused. Keep it as a
 marker: remove `READY` first (the launcher refuses it from that moment), then everything but `manifest.json`, and
-leave a note:
+leave a note. `publish.py` makes artifacts read-only, so give the owner write access back first:
 
 ```sh
-V=<ART>/venv/<name>; rm "$V/READY" && find "$V" -mindepth 1 -maxdepth 1 ! -name manifest.json -exec rm -rf {} +
+V=<ART>/venv/<name>; chmod u+w "$V" && rm -f "$V/READY" && chmod -R u+w "$V" && \
+  find "$V" -mindepth 1 -maxdepth 1 ! -name manifest.json -exec rm -rf {} +
 echo "retired $(date +%F): <why>" > "$V/RETIRED"
 ```
 
