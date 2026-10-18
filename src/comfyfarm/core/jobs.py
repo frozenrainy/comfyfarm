@@ -122,7 +122,9 @@ async def request_cancel(db: Database, adapter, job_id: int) -> str:
 
 # ---- queue operations (docs/design/03 'Pause / reorder'): pure ledger operations ---------------------------------
 QUEUED = ("pending", "paused")
-_PRIORITY_LOCK = 0x636F6D6679   # advisory lock serialising every priority assignment (submit, retry, move)
+# advisory lock serialising every priority assignment (submit, retry, move). Its own key: it once shared db.MIGRATION_LOCK's,
+# and every Database.start (each router and each CLI command) migrates under that lock — live submits waited behind it.
+_PRIORITY_LOCK = 0x636F6D6670   # "comfp"
 
 
 async def queue_end(c, front: bool) -> int:

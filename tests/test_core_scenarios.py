@@ -480,3 +480,17 @@ async def test_outputs_missed_in_a_websocket_gap_are_completed_from_history(rout
     row = await job_row(r, job["id"])
     assert row["status"] == "completed" and set(row["outputs"]) == {"2", "3"}, row
     assert row["outputs"]["3"]["images"][0]["type"] == "output"
+
+
+async def test_migrations_do_not_block_submits(router_factory):
+    """Every Database.start (a second router, any CLI command) takes the migration lock; submits must not wait on it."""
+    import asyncpg
+    from comfyfarm.db import MIGRATION_LOCK
+    r = await quiet(router_factory)
+    other = await asyncpg.connect(r.s.dsn)
+    try:
+        await other.execute("SELECT pg_advisory_lock($1)", MIGRATION_LOCK)          # a migration in progress
+        job, created = await asyncio.wait_for(jobsvc.submit(r.db, owner="tester", prompt=tiny()), 3)
+        assert created
+    finally:
+        await other.close()
