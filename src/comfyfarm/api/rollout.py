@@ -304,7 +304,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 except asyncpg.UniqueViolationError:
                     raise HTTPException(409, f"instance name {v['instance']!r} is taken")
                 await audit(c, who, "instance configured", v["instance"],       # restart_config holds references only
-                            config={k: v[k] for k in v if k != "restart_config"}, backend=v["restart_backend"])
+                            config=v, backend=v["restart_backend"])
         return {"saved": True}
 
     @api.delete("/api/admin/instances/{worker_id}")
@@ -483,6 +483,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                         if s["status"] == "draining":
                             if not s["was_maintenance"]:
                                 await c.execute("UPDATE workers SET maintenance = false WHERE id = $1", s["worker_id"])
+                                await audit(c, who, "maintenance off", s["name"], rollout=rid)
                             await c.execute("UPDATE rollout_steps SET status = 'skipped', detail = 'aborted', finished_at = now() "
                                             "WHERE id = $1", s["id"])
                         else:

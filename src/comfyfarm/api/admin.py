@@ -241,7 +241,7 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.patch("/api/admin/workers/{worker_id}")
     async def patch_worker(worker_id: int, body: WorkerPatch, x_comfyfarm_user: str | None = Header(default=None)):
-        ctx.admin(x_comfyfarm_user)
+        who = ctx.admin(x_comfyfarm_user)
         sets, args = [], [worker_id]
 
         def put(col, v):
@@ -261,10 +261,24 @@ def make_router(ctx: Ctx) -> APIRouter:
                 put("group_id", await group_id_of(c, body.group))
             if not sets:
                 return {"changed": False}
-            try:
-                done = await c.fetchval(f"UPDATE workers SET {', '.join(sets)} WHERE id = $1 AND deleted_at IS NULL RETURNING id", *args)
-            except asyncpg.UniqueViolationError:
-                raise HTTPException(409, "a worker with this name or URL exists")
+            async with c.transaction():
+                await c.execute("SELECT 1 FROM workers WHERE id = $1 FOR UPDATE", worker_id)   # vs. a step starting now
+                # a rollout step owns the worker's maintenance flag and address: turning maintenance off mid-step lets a
+                # job be dispatched that the restart kills; a new address makes the step watch another machine
+                if (body.maintenance is not None or body.base_url is not None) and await c.fetchval(
+                        "SELECT 1 FROM rollout_steps s JOIN rollouts r ON r.id = s.rollout_id WHERE s.worker_id = $1 "
+                        "AND r.status IN ('running','aborting','interrupted') AND (s.status IN ('draining','restarting',"
+                        "'starting','verifying','reverting') OR (s.status = 'pending' AND s.was_maintenance IS NOT NULL))",
+                        worker_id):
+                    raise HTTPException(409, "the worker is in a rollout step: wait for it, or abort the rollout")
+                try:
+                    done = await c.fetchval(f"UPDATE workers SET {', '.join(sets)} WHERE id = $1 AND deleted_at IS NULL "
+                                            "RETURNING name", *args)
+                except asyncpg.UniqueViolationError:
+                    raise HTTPException(409, "a worker with this name or URL exists")
+                if done is not None:
+                    await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ($1, 'worker changed', $2, $3)",
+                                    who, done, {k: v for k, v in body.model_dump().items() if v is not None})
         if done is None:
             raise HTTPException(404, "not found")
         router.dispatcher.wake.set()

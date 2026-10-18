@@ -511,3 +511,33 @@ async def test_revert_target_is_in_use_during_a_rollout(farm):
     res = await api.patch(f"/api/admin/profiles/{p_old}", json={"venv": "v1"}, headers=H)
     assert res.status_code == 409, res.text
     assert (await api.patch(f"/api/admin/profiles/{p_old}", json={"note": "revert target"}, headers=H)).status_code == 200
+
+
+async def test_worker_changes_mid_step_are_refused_and_everything_is_audited(farm):
+    """QA-10: a rollout step owns its worker's maintenance flag and address (409); worker changes, instance
+    configurations (incl. restart_config: references only) and the abort of an interrupted rollout are audited."""
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    w1, w2 = hosts["w1"], hosts["w2"]
+    async with r.db.conn() as c:
+        rid = await c.fetchval("INSERT INTO rollouts(target_profile_id, created_by, status) VALUES ($1, 'x', 'interrupted') "
+                               "RETURNING id", farm["p2"])
+        await c.execute("UPDATE workers SET maintenance = true")
+        await c.execute("INSERT INTO rollout_steps(rollout_id, worker_id, position, to_profile_id, status, was_maintenance) VALUES "
+                        "($1, $2, 0, $4, 'starting', false), ($1, $3, 1, $4, 'draining', false)", rid, w1.wid, w2.wid, farm["p2"])
+    for change in ({"maintenance": False}, {"base_url": "http://127.0.0.1:1"}):
+        res = await api.patch(f"/api/admin/workers/{w1.wid}", json=change, headers=H)
+        assert res.status_code == 409, (change, res.text)
+    assert (await api.patch(f"/api/admin/workers/{w1.wid}", json={"note": "flaky fan"}, headers=H)).status_code == 200
+    assert (await api.patch(f"/api/admin/workers/{w1.wid}", json={"enabled": False}, headers=H)).status_code == 200
+    assert (await api.post(f"/api/admin/rollouts/{rid}/abort", headers=H)).json()["status"] == "aborted"
+    assert (await api.patch(f"/api/admin/workers/{w1.wid}", json={"maintenance": False, "enabled": True}, headers=H)).status_code == 200
+    cfg = (await instances(api))["w2"]["instance"]
+    assert (await api.put(f"/api/admin/instances/{w2.wid}", headers=H,
+                          json={**cfg, "restart_config": {"timeout": 77}})).status_code == 200
+    log = (await api.get("/api/admin/audit", headers=H)).json()
+    changed = [a for a in log if a["action"] == "worker changed" and a["target"] == "w1"]
+    assert {"note": "flaky fan"} in [a["detail"] for a in changed] and {"enabled": False} in [a["detail"] for a in changed]
+    assert {"maintenance": False, "enabled": True} in [a["detail"] for a in changed]
+    assert any(a["action"] == "maintenance off" and a["target"] == "w2" for a in log)        # the abort put w2 back
+    conf = next(a for a in log if a["action"] == "instance configured" and a["target"] == "w2")
+    assert conf["detail"]["config"]["restart_config"] == {"timeout": 77}
