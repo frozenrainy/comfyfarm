@@ -64,7 +64,7 @@ function workers(root, { refresh }) {
       "Delete keeps the worker's history.")));
 
   function build() {
-    const tr = namedRow(cols, { actions: "actions" });
+    const tr = namedRow(cols, { name: "nowrap", actions: "actions" });
     const id = () => tr._item.id;
     tr.sel = h("select", { onchange: () => patch(id(), { group: tr.sel.value }, "Group changed") });
     tr.c.group.append(tr.sel);
