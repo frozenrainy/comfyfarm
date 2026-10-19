@@ -60,7 +60,7 @@ is the dashboard.
 3. **Check** — `comfyfarm doctor` tells you, line by line, what is not right yet.
 
 Guides: [install](docs/guide/install.md) · [running](docs/guide/running.md) · [rolling upgrades](docs/guide/rollouts.md) ·
-[backup](docs/guide/backup.md) · security reports: [SECURITY.md](SECURITY.md)
+[custom nodes](docs/guide/custom-nodes.md) · [backup](docs/guide/backup.md) · security reports: [SECURITY.md](SECURITY.md)
 
 ## Documents
 

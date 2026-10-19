@@ -57,7 +57,7 @@ ComfyFarm은 콘텐츠를 조직 네트워크 밖으로 내보낼 수 없는 곳
 3. **점검** — `comfyfarm doctor`가 아직 맞지 않은 것을 한 줄씩 알려 줍니다.
 
 안내서(영문): [설치](docs/guide/install.md) · [운영](docs/guide/running.md) · [롤링 업그레이드](docs/guide/rollouts.md) ·
-[백업](docs/guide/backup.md) · 보안 신고: [SECURITY.md](SECURITY.md)
+[커스텀 노드](docs/guide/custom-nodes.md) · [백업](docs/guide/backup.md) · 보안 신고: [SECURITY.md](SECURITY.md)
 
 화면 언어는 개인 설정에서 고릅니다(자동 = 브라우저 언어). 서버가 돌려주는 오류 문구는 로그·문서와 맞추려고 영어로 둡니다.
 

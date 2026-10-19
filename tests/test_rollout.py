@@ -250,6 +250,14 @@ async def test_profiles_instances_and_render_endpoint(farm):
                 {"venv": "../../bin"}):
         res = await api.post("/api/admin/profiles", json={"name": "bad", "core": "c1", "venv": "v1", **bad}, headers=H)
         assert res.status_code == 400, bad
+    # a custom node's setting is not a profile key: the refusal says where it goes instead; an allowed key with a bad
+    # value does not get that hint
+    res = await api.post("/api/admin/profiles", json={"name": "bad", "core": "c1", "venv": "v1",
+                                                      "env": {"VHS_STRICT_PATHS": "1"}}, headers=H)
+    assert res.status_code == 400 and "custom-nodes.md" in res.json()["detail"]
+    res = await api.post("/api/admin/profiles", json={"name": "bad", "core": "c1", "venv": "v1",
+                                                      "env": {"HSA_TOOLS_LIB": "/opt/x.so"}}, headers=H)
+    assert res.status_code == 400 and "custom-nodes.md" not in res.json()["detail"]
     # render: only the instance's host; nothing for unknown or unassigned instances
     assert (await api.get("/api/worker_profile", params={"instance": "w1"})).json()["rev"]
     wid = hosts["w1"].wid

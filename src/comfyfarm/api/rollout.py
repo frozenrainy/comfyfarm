@@ -91,7 +91,10 @@ def check_profile(p: dict) -> dict:
     if bad := [f for f in p.get("flags") or [] if f.startswith("--") and f not in launcher.OPTIONS]:
         raise HTTPException(400, f"options the launcher refuses: {bad}")
     if bad := [why for k, v in (p.get("env") or {}).items() if (why := launcher.env_problem(k, v))]:
-        raise HTTPException(400, f"environment the launcher refuses: {'; '.join(bad)}")
+        hint = (" — a custom node's own setting is not a profile's: root sets it on the worker host "
+                "(docs/guide/custom-nodes.md, \"Settings of a custom node\")"
+                if any(not launcher.env_key_ok(k) for k in p.get("env") or {}) else "")
+        raise HTTPException(400, f"environment the launcher refuses: {'; '.join(bad)}{hint}")
     return p
 
 

@@ -3,7 +3,8 @@
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-client postgresql-client \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --system --create-home --uid 10001 comfyfarm
+ && groupadd --system --gid 10001 comfyfarm \
+ && useradd --system --create-home --uid 10001 --gid 10001 comfyfarm   # a fixed gid too: 999 is a host group
 WORKDIR /opt/comfyfarm
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src

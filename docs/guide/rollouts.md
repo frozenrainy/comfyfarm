@@ -17,7 +17,7 @@ on a machine with internet access that mounts `<ART>` at that path — `publish.
 
 ```sh
 git -C ComfyUI archive v0.41.0 | tar -x -C /tmp/core && python3 publish.py core <ART> comfyui-0.41.0 --from /tmp/core
-python3 publish.py nodes <ART> farm-nodes-1 --from /path/to/a/dir/holding/comfyfarm_worker   # plus your custom nodes
+python3 publish.py nodes <ART> farm-nodes-1 --from /path/to/a/dir/holding/comfyfarm_worker   # plus your custom nodes (custom-nodes.md)
 uv python install 3.12
 python3 publish.py venv <ART> rocm72-a --uv "$(command -v uv)" --python 3.12 -r requirements.txt \
     --accelerator rocm --arch gfx1201 --pip-arg=--index-url=https://download.pytorch.org/whl/rocm7.2 \
