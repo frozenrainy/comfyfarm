@@ -89,7 +89,7 @@ environment). The token value itself is refused: it would be stored in the ledge
 3. First start: *Assign* the current profile (no restart), start the unit on the host, wait for the badge `match`.
 4. Upgrades: *Start rollout* — the worker is drained (its running job finishes), restarted through the backend, must be
    seen going down, must come back with exactly the new argv (badge `match`), is verified (node list, a broken
-   workflow is refused, optionally a smoke workflow), and returns to service. If anything fails, that worker goes back
+   workflow is refused, every custom node imported, optionally a smoke workflow), and returns to service. If anything fails, that worker goes back
    to its previous profile and stays in maintenance; the remaining workers are skipped.
 
 The backend `manual` needs no agent: the dashboard tells an operator which instance to restart and waits for it.

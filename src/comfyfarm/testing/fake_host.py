@@ -42,8 +42,11 @@ class FakeHost:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
-    async def start(self, object_info_ok: bool = True):
-        self.worker = FakeWorker(ws_fix=True, backend=self.backend, version=self.version)
+    async def start(self, object_info_ok: bool = True, failed_nodes: list[str] | None = None):
+        # failed_nodes: the worker extension's report of custom nodes that did not import (it needs /comfyfarm/info)
+        self.worker = FakeWorker(ws_fix=True, backend=self.backend, version=self.version,
+                                 secured=True if failed_nodes else None)
+        self.worker.failed_nodes = list(failed_nodes or [])
         self.worker.argv = list(self.argv)
         self.worker.object_info_ok = object_info_ok
         self.runner = web.AppRunner(self.worker.app, shutdown_timeout=0.5)
@@ -81,7 +84,8 @@ class FakeHost:
         if mode != "wrong_argv":
             self.argv = render["argv"][1:]
             self.version = render["argv"][1].split("/core/")[1].split("/")[0] + "-fake"   # "<core name>-fake"
-        await self.start(object_info_ok=mode != "broken")
+        await self.start(object_info_ok=mode != "broken",
+                         failed_nodes=["ComfyUI-Broken"] if mode == "node_import_failed" else None)
         self.status = {"ActiveState": "active", "ExecMainStatus": "0", "NRestarts": self.status["NRestarts"] + 1}
 
 

@@ -452,6 +452,12 @@ class Engine:
             r = await self.http.post(f"{base}/prompt", json={"prompt": BROKEN_WORKFLOW}, timeout=t)
             if r.status_code != 400:
                 raise StepFailed(f"a broken workflow was answered {r.status_code}, not 400")
+            # a custom node that fails to import does not stop ComfyUI: the worker runs, its node list is just shorter.
+            # The worker extension (0.3+) names them; without it (404) or without the field there is nothing to read.
+            r = await self.http.get(f"{base}/comfyfarm/info", timeout=t)
+            info = r.json() if r.status_code == 200 else {}
+            if failed := ((info if isinstance(info, dict) else {}).get("custom_nodes") or {}).get("failed"):
+                raise StepFailed(f"custom nodes failed to import: {', '.join(failed)}")
         except httpx.HTTPError as e:
             raise StepFailed(f"verify: {type(e).__name__}")
         if opts["smoke"]:

@@ -163,6 +163,7 @@ async def test_launcher_refusal_reverts_and_stops_the_rollout(farm):
     (["broken"], "reverted", "object_info"),
     (["wrong_argv"], "reverted", "different argv"),
     (["never_up"], "reverted", "never came back"),
+    (["node_import_failed"], "reverted", "custom nodes failed to import: ComfyUI-Broken"),   # runs, a node is missing
 ])
 async def test_failed_restarts_are_detected(farm, modes, expect, why):
     api, h = farm["api"], farm["hosts"]["w1"]

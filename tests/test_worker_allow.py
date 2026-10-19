@@ -68,3 +68,36 @@ async def test_router_warns_about_open_workers(dsn, fakes):
     assert any("extension not installed" in x for x in ws["plain"])
     assert any("unsecured" in x for x in ws["open"]) and not any("reconnect" in x for x in ws["open"])
     assert not any("unsecured" in x or "extension" in x for x in ws["locked"]), ws["locked"]
+
+
+def test_extension_names_custom_nodes_that_did_not_import(tmp_path, monkeypatch):
+    """ComfyUI keeps only the loaded nodes; the extension reports the rest (a failed import leaves the worker running
+    with a shorter node list — the rollout must not call that a success)."""
+    import sys
+    pkg = ROOT / "worker_ext" / "comfyfarm_worker"
+    spec = importlib.util.spec_from_file_location("comfyfarm_worker_under_test", pkg / "__init__.py",
+                                                  submodule_search_locations=[str(pkg)])
+    ext = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, ext)
+    spec.loader.exec_module(ext)                     # outside ComfyUI its installs log and skip
+    a, b = tmp_path / "set-a", tmp_path / "set-b"
+    for d in ("GoodNode", "BrokenNode", "__pycache__", "Off.disabled"):
+        (a / d).mkdir(parents=True)
+    (a / "README.md").write_text("")
+    b.mkdir()
+    (b / "single.py").write_text("")
+    (b / "single_bad.py").write_text("")
+    monkeypatch.setitem(sys.modules, "nodes", types.SimpleNamespace(
+        LOADED_MODULE_DIRS={"GoodNode": str(a / "GoodNode"), str(b / "single"): str(b)}))   # ComfyUI's own keys
+    monkeypatch.setitem(sys.modules, "folder_paths", types.SimpleNamespace(
+        get_folder_paths=lambda kind: [str(a), str(b), str(tmp_path / "gone")]))
+    assert ext.custom_node_status() == {"loaded": ["GoodNode", "single.py"], "failed": ["BrokenNode", "single_bad.py"]}
+
+
+def test_failed_custom_nodes_are_a_worker_warning():
+    from comfyfarm.api.admin import CUSTOM_NODES_FAILED, security_warnings
+    ext = {"installed": True, "secured": True, "ws_fix": True}
+    assert security_warnings({"extension": {**ext, "custom_nodes": {"loaded": ["a"], "failed": ["X", "Y"]}}}) == \
+        [CUSTOM_NODES_FAILED + "X, Y"]
+    for quiet in ({"loaded": ["a"], "failed": []}, None):                 # none failed / an older extension
+        assert security_warnings({"extension": {**ext, "custom_nodes": quiet}}) == []

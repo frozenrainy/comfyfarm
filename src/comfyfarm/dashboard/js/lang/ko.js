@@ -225,6 +225,8 @@ export default {
   "unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway":
     "보호되지 않음: 어느 주소의 요청이든 받습니다 — COMFYFARM_ALLOW에 라우터와 게이트웨이 주소를 넣으세요",
   "differs from its group: ": "그룹과 다름: ",
+  "custom nodes failed to import (missing on this worker, see its log): ":
+    "커스텀 노드를 불러오지 못함 (이 워커에는 없음, 워커 로그 참고): ",
 
   // ---- worker setup (docs/design/14) ----
   "Set up a worker": "워커 설치", "Set up {name}": "{name} 설치",

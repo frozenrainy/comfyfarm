@@ -74,6 +74,9 @@ def iso(t):
     return t.isoformat() if t else None
 
 
+CUSTOM_NODES_FAILED = "custom nodes failed to import (missing on this worker, see its log): "
+
+
 def security_warnings(caps: dict) -> list[str]:
     """docs/design/09: a worker is 'secured' only when the comfyfarm_worker extension enforces a source allow-list.
     Unknown (worker never probed) says nothing rather than crying wolf."""
@@ -88,6 +91,8 @@ def security_warnings(caps: dict) -> list[str]:
                    + (f" (invalid entries: {ext['invalid']})" if ext.get("invalid") else ""))
     if not ext.get("ws_fix"):
         out.append("reconnect fix not active on this ComfyUI version: events may stop after a reconnect")
+    if failed := (ext.get("custom_nodes") or {}).get("failed"):
+        out.append(CUSTOM_NODES_FAILED + ", ".join(failed))
     return out
 
 

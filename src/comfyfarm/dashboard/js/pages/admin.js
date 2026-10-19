@@ -56,7 +56,9 @@ function warnText(x) {
   if (whole) return whole;
   const starts = [["unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway",
                    t("unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway")],
-                  ["differs from its group: ", t("differs from its group: ")]];
+                  ["differs from its group: ", t("differs from its group: ")],
+                  ["custom nodes failed to import (missing on this worker, see its log): ",
+                   t("custom nodes failed to import (missing on this worker, see its log): ")]];
   for (const [en, here] of starts) if (x.startsWith(en)) return here + x.slice(en.length);
   return x;
 }

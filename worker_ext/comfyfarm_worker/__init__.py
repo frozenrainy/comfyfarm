@@ -10,14 +10,14 @@ module swaps the /ws route for a copy whose cleanup only removes its own socket.
 
 The swap happens only if the original handler's source matches a known version; otherwise the original is kept and a
 warning is logged (a silently wrong copy would be worse than the known bug)."""
-import hashlib, inspect, json, logging, uuid
+import hashlib, inspect, json, logging, os, uuid
 
 import aiohttp
 from aiohttp import web
 
 from .allow import from_env, make_middleware
 
-EXT_VERSION = "0.2"
+EXT_VERSION = "0.3"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")
@@ -112,6 +112,29 @@ def _install_validate():
     log.info("comfyfarm: /comfyfarm/validate installed")
 
 
+def custom_node_status() -> dict:
+    """The custom node directories ComfyUI tried to load, and those that did not load. ComfyUI remembers only the
+    loaded ones (nodes.LOADED_MODULE_DIRS); a failed import is logged as IMPORT FAILED and otherwise forgotten, and the
+    worker runs on without that node. Same walk as nodes.init_external_custom_nodes; asked at request time, after every
+    custom node has had its turn."""
+    import folder_paths, nodes
+    loaded_dirs = {os.path.realpath(d) for d in nodes.LOADED_MODULE_DIRS.values()}
+    loaded, failed = [], []
+    for base in folder_paths.get_folder_paths("custom_nodes"):
+        try:
+            entries = sorted(os.listdir(os.path.realpath(base)))
+        except OSError:
+            continue
+        for name in entries:
+            path = os.path.join(base, name)
+            if name == "__pycache__" or name.endswith(".disabled") or (os.path.isfile(path) and not name.endswith(".py")):
+                continue
+            ok = (os.path.realpath(path) in loaded_dirs if os.path.isdir(path)
+                  else os.path.splitext(path)[0] in nodes.LOADED_MODULE_DIRS)          # a single-file node: keyed by path
+            (loaded if ok else failed).append(name)
+    return {"loaded": loaded, "failed": failed}
+
+
 def _install_allow():
     """Refuse requests from anyone but the router/gateway (COMFYFARM_ALLOW) and report the state on
     GET /comfyfarm/info. The middleware is appended before the app starts (custom nodes import first), so it covers
@@ -132,8 +155,13 @@ def _install_allow():
 
     @server.routes.get("/comfyfarm/info")
     async def comfyfarm_info(request):
+        try:
+            nodes_state = custom_node_status()
+        except Exception as e:                                   # never let the report break the info route
+            log.warning("comfyfarm: custom node status unavailable: %r", e)
+            nodes_state = None
         return web.json_response({"extension": EXT_VERSION, "comfyui": comfyui_version.__version__, "ws_fix": ws_fix,
-                                  **policy.describe()})
+                                  "custom_nodes": nodes_state, **policy.describe()})
 
 
 for _step, _fn in (("reconnect fix", _install), ("validate endpoint", _install_validate), ("allow-list", _install_allow)):

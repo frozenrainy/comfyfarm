@@ -111,6 +111,7 @@ class FakeWorker:
         if validate_endpoint:                                   # the comfyfarm_worker extension's endpoint
             r.add_post("/comfyfarm/validate", self.validate_only)
         self.secured = secured
+        self.failed_nodes: list[str] = []                              # custom nodes that "did not import"
         self.models = models or {"checkpoints": [], "loras": []}       # /models, /models/{folder}
         self.nodes_extra = list(nodes_extra or [])                     # extra class names in /object_info
         for p in ("", "/api"):
@@ -356,7 +357,8 @@ class FakeWorker:
         return web.json_response(self.models.get(f, []))
 
     async def info(self, request):
-        return web.json_response({"extension": "0.2-fake", "comfyui": self.version, "ws_fix": self.ws_fix,
+        return web.json_response({"extension": "0.3-fake", "comfyui": self.version, "ws_fix": self.ws_fix,
+                                  "custom_nodes": {"loaded": ["comfyfarm_worker"], "failed": self.failed_nodes},
                                   "secured": self.secured, "allow": ["10.0.0.1/32"] if self.secured else [], "invalid": []})
 
     async def get_system_stats(self, request):
