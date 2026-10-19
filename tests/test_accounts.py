@@ -139,7 +139,7 @@ async def test_groups_and_workers_admin(farm):
 async def test_prefs_and_password(farm):
     r, c = farm
     await user(c, "erin")
-    assert (await c.get("/api/farm/me", headers=H("erin"))).json()["prefs"] == {"theme": "light", "lang": "auto"}
+    assert (await c.get("/api/farm/me", headers=H("erin"))).json()["prefs"] == {"theme": "auto", "lang": "auto"}
     assert (await c.put("/api/farm/me/prefs", json={"theme": "neon"}, headers=H("erin"))).status_code == 400
     await ok(await c.put("/api/farm/me/prefs", json={"theme": "dark"}, headers=H("erin")))
     assert (await c.get("/api/farm/me", headers=H("erin"))).json()["prefs"]["theme"] == "dark"
@@ -275,7 +275,7 @@ async def test_language_preference(farm):
     assert (await ok(await c.get("/api/farm/me", headers=H("ann"))))["prefs"]["lang"] == "auto"
     await ok(await c.put("/api/farm/me/prefs", json={"lang": "ko"}, headers=H("ann")))
     me = await ok(await c.get("/api/farm/me", headers=H("ann")))
-    assert me["prefs"] == {"theme": "light", "lang": "ko"}                # theme untouched
+    assert me["prefs"] == {"theme": "auto", "lang": "ko"}                # theme untouched
     assert (await c.put("/api/farm/me/prefs", json={"lang": "xx"}, headers=H("ann"))).status_code == 400
 
 

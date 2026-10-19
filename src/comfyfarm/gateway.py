@@ -51,7 +51,7 @@ LOGIN_PAGE = """<!doctype html><html lang={lang}><head><meta charset=utf-8><meta
 <title>ComfyFarm</title>
 <script>
 if (window.top !== window) window.top.location.href = location.href;   // an expired session inside the Workflow tab
-document.documentElement.dataset.theme = localStorage.getItem("comfyfarm.theme") || "light";
+document.documentElement.dataset.theme = localStorage.getItem("comfyfarm.theme") || "auto";
 </script>
 <style>
 :root {{ --bg:#f7f7f5; --panel:#fff; --line:#e3e3df; --text:#1f2328; --muted:#6a6f76; --accent:#0b5cad; --bad:#c62828; color-scheme:light }}

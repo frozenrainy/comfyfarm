@@ -104,7 +104,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         prefs = dict(row["prefs"]) if row else {}
         return {"user": who, "admin": ctx.is_admin(who), "local": bool(row and row["local"]),
                 "groups": [{"id": g["id"], "name": g["name"]} for g in groups], "all_groups": allowed is None,
-                "prefs": {"theme": prefs.get("theme", "light"), "lang": prefs.get("lang", "auto")}}
+                "prefs": {"theme": prefs.get("theme", "auto"), "lang": prefs.get("lang", "auto")}}
 
     @api.put("/api/farm/me/prefs")
     async def set_prefs(body: PrefsIn, x_comfyfarm_user: str | None = Header(default=None)):
