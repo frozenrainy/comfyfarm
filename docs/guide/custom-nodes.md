@@ -51,10 +51,12 @@ gets its own CPU venv with the same additions.
 A profile in use cannot change: copy each profile, put in the new venv and node set, and roll the copies out — the
 UI worker first (its rollout is quick, and the screen then knows the node's widgets), then the group. A node that
 fails to import does not stop ComfyUI — the worker would run on without it — so the rollout asks the worker extension
-which custom nodes did not import, and a single one fails that worker's step: it goes back to its previous profile
-(the error names the node; the cause is under `IMPORT FAILED` in `/var/lib/comfyfarm/logs/<instance>.log`). A worker
-started outside a rollout shows the same as a warning in System → Workers. Then run one real workflow with the node
-through the gateway.
+which custom nodes ComfyUI dropped (its own verdict, read from its log: an exception, no node mappings, a failed V3
+entrypoint), and a single one fails that worker's step: it goes back to its previous profile (the error names the
+node; the cause is under `IMPORT FAILED` in `/var/lib/comfyfarm/logs/<instance>.log`). Packs a profile disables on
+purpose (`--disable-all-custom-nodes` with a whitelist) are not failures. With `--verbose` above INFO the verdict is
+not in the log and the extension reports it as unknown — the rollout then cannot check it. A worker started outside a
+rollout shows the same as a warning in System → Workers. Then run one real workflow with the node through the gateway.
 
 ## 5. Previews of files that are not saved
 

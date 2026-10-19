@@ -41,13 +41,37 @@ def test_only_an_installed_recipe_can_be_requested_and_only_it_is_built(box):
         ran.append(argv)
         kw["stderr"].write(b"venv/rocm72-1: published\n")
         return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"template": "rocm-gfx1201-1"}).encode())
+    os.mkdir(os.path.join(box["req"], "a-directory"))                      # the drop box is group-writable: dirs too
+    os.symlink("/etc/passwd", os.path.join(box["req"], "a-link"))
+    assert build.status("rocm-gfx1201", box["st"], box["req"])["state"] == "queued"      # not the last run's state
+    assert "already queued" in build.request("rocm-gfx1201", box["req"], box["here"])
     done = build.run("/srv/art", "/usr/local/bin/uv", box["req"], box["st"], box["here"], as_user=None, runner=runner)
-    assert done == ["rocm-gfx1201"] and len(ran) == 1 and os.listdir(box["req"]) == []
+    assert done == ["rocm-gfx1201"] and len(ran) == 1 and os.listdir(box["req"]) == []   # junk removed, never run
     assert ran[0][2:] == ["recipe", "/srv/art", "rocm-gfx1201", "--uv", "/usr/local/bin/uv", "--recipes", box["here"]]
-    st = build.status("rocm-gfx1201", box["st"])
+    st = build.status("rocm-gfx1201", box["st"], box["req"])
     assert st["state"] == "done" and st["template"] == "rocm-gfx1201-1" and "published" in st["log"]
-    assert build.status("other-recipe", box["st"])["state"] == "failed"
-    assert build.status("never", box["st"]) == {"recipe": "never", "state": "none"}
+    assert build.status("other-recipe", box["st"], box["req"])["state"] == "none"       # nothing written for junk
+    assert build.status("never", box["st"], box["req"]) == {"recipe": "never", "state": "none"}
+    assert os.path.exists("/etc/passwd")                                                   # the link's target untouched
+
+
+def test_root_never_writes_through_a_link_in_the_status_directory(box, tmp_path):
+    """status/ is root's; still, a link there (whoever made it) is never followed by the root writer."""
+    target = tmp_path / "unit.service"
+    target.write_text("ExecStart=/bin/true\n")
+    os.symlink(str(target), os.path.join(box["st"], "rocm-gfx1201.json.tmp"))
+    build.request("rocm-gfx1201", box["req"], box["here"])
+    with pytest.raises(OSError):
+        build.run("/srv/art", "uv", box["req"], box["st"], box["here"], as_user=None,
+                  runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=b"{}"))
+    assert target.read_text() == "ExecStart=/bin/true\n"
+    os.unlink(os.path.join(box["st"], "rocm-gfx1201.json.tmp"))
+    os.symlink(str(target), os.path.join(box["st"], "rocm-gfx1201.log"))
+    build.request("rocm-gfx1201", box["req"], box["here"])
+    with pytest.raises(OSError):
+        build.run("/srv/art", "uv", box["req"], box["st"], box["here"], as_user=None,
+                  runner=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=b"{}"))
+    assert target.read_text() == "ExecStart=/bin/true\n"
 
 
 def test_a_failed_build_says_so(box):
@@ -97,13 +121,19 @@ def test_setup_with_builds_installs_the_builder_and_without_removes_its_units(tm
     tools = root / "opt" / "comfyfarm" / "worker"
     assert (tools / "recipes" / "rocm-gfx1201.json").exists() and (tools / "ui_ext" / "comfyfarm_ui" / "web" / "x.js").exists()
     assert rec.ran("useradd")[-1][-1] == "comfyfarm-build"
+    useradd = rec.ran("useradd")[-1]
+    assert "--no-create-home" in useradd and useradd[useradd.index("--home-dir") + 1] == "/var/lib/comfyfarm-build/home"
+    # root's directories: nothing root writes is in a place the build account can put a link
+    assert oct(os.stat(root / "var/lib/comfyfarm-build").st_mode & 0o777) == "0o711"
+    assert oct(os.stat(root / "var/lib/comfyfarm-build/status").st_mode & 0o777) == "0o755"
+    assert oct(os.stat(root / "var/lib/comfyfarm-build/home").st_mode & 0o777) == "0o700"
     assert "COMFYFARM_AGENT_BUILD=1" in (root / "etc" / "comfyfarm" / "agent.env").read_text()
     svc = (root / "etc" / "systemd" / "system" / "comfyfarm-build.service").read_text()
     assert "build.py run /srv/art /usr/local/bin/uv" in svc
     assert "DirectoryNotEmpty=/var/lib/comfyfarm-build/requests" in (root / "etc/systemd/system/comfyfarm-build.path").read_text()
     assert ["systemctl", "enable", "--now", "comfyfarm-build.path"] in rec.calls
     assert ["chgrp", "comfyfarm", "/var/lib/comfyfarm-build/requests"] in rec.calls
-    assert ["chmod", "0711", "/var/lib/comfyfarm-build"] in rec.calls      # field: useradd's 0750 locked the drop box away
+    assert ["chmod", "0711", "/var/lib/comfyfarm-build"] in rec.calls      # the service account passes through to the drop box
     # set up again without builds: the units go, the permission goes
     rec2 = Recorder()
     res = ws.setup(payload(), ws.Host(root=str(root), run=rec2))
@@ -158,6 +188,21 @@ def test_the_host_check_names_the_recipes_a_build_may_use(tmp_path):
     assert c.out == []
 
 
+def test_a_worker_set_up_again_with_another_account_takes_the_key_from_the_old_one(tmp_path, monkeypatch):
+    import pwd
+    root = fake_root(tmp_path)
+    old = root / "var" / "lib" / "olduser" / ".ssh" / "authorized_keys"
+    old.parent.mkdir(parents=True)
+    old.write_text(f"{ws.MARK}\ncommand=... ssh-ed25519 AAAA router\n")
+    real = pwd.getpwnam
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd(("olduser", "x", 1500, 1500, "", "/var/lib/olduser", "/bin/sh"))
+                        if n == "olduser" else real(n))
+    rec = Recorder()
+    res = ws.setup(payload(previous_account="olduser"), ws.Host(root=str(root), run=rec))
+    assert res["ok"], res
+    assert not old.exists() and ["systemctl", "--user", "disable", "--now", "comfyfarm@gpu-1"] in [c[-5:] for c in rec.calls]
+
+
 async def test_setting_a_worker_up_again_keeps_it_and_build_through_the_api(farm, tmp_path, monkeypatch):
     r, c, keys = farm
     made = (await c.post("/api/admin/setups", json=spec(builds=True), headers=H)).json()
@@ -170,8 +215,12 @@ async def test_setting_a_worker_up_again_keeps_it_and_build_through_the_api(farm
     assert (await c.put(f"/api/admin/instances/{w['id']}", json=cfg, headers=H)).status_code == 200
     # a new worker cannot take that instance or name; the same worker set up again can
     assert (await c.post("/api/admin/setups", json=spec(), headers=H)).status_code == 409
-    again = await c.post("/api/admin/setups", json=spec(worker_id=w["id"], builds=True), headers=H)
+    again = await c.post("/api/admin/setups", json=spec(worker_id=w["id"], builds=True, account="farmsvc"), headers=H)
     assert again.status_code == 200, again.text
+    s = (await c.get(f"/api/admin/setups/{again.json()['id']}", headers=H)).json()
+    assert s["spec"]["previous_account"] == "comfyfarm" and s["extra"]["again"] == w["id"]   # the old account's key goes
+    mine = (await c.get(f"/api/admin/setups?worker_id={w['id']}", headers=H)).json()
+    assert [x["id"] for x in mine] == [] or all(x["worker_id"] == w["id"] for x in mine)       # only that worker's
     other = await c.post("/api/admin/setups", json=spec(worker_id=w["id"], name="renamed"), headers=H)
     assert other.status_code == 409 and "keeps its name" in other.text
     # build and its state through the agent (a fake ssh answering for it)

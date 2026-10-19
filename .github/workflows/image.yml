@@ -30,6 +30,11 @@ jobs:
           pep = re.sub(r"-(dev)\.?(\d+)$", r".\1\2", re.sub(r"-(a|b|rc)\.?(\d+)$", r"\1\2", tag))
           if pep != ver:
               sys.exit(f"tag v{tag} does not match pyproject.toml version {ver} (expected {pep})")
+          # what the easy compose file pulls by default and what install.md names must be this release too
+          for path, needle in (("deploy/easy/compose.yaml", "${COMFYFARM_VERSION:-" + tag + "}"),
+                               ("docs/guide/install.md", "V=" + tag + " ")):
+              if needle not in open(path).read():
+                  sys.exit(f"{path} does not name {tag} ({needle!r} missing): bump it with the version")
           PY
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/comfyfarm" >> "$GITHUB_OUTPUT"

@@ -32,9 +32,9 @@ import sys
 import tempfile
 
 try:
-    from .launcher import CONTRACT, NAME, tree_sha256
+    from .launcher import CONTRACT, NAME, OPTIONS, env_problem, tree_sha256
 except ImportError:                                        # run as a copied single file next to launcher.py
-    from launcher import CONTRACT, NAME, tree_sha256     # type: ignore
+    from launcher import CONTRACT, NAME, OPTIONS, env_problem, tree_sha256     # type: ignore
 
 
 class Refused(Exception):
@@ -50,6 +50,30 @@ def count(root: str) -> tuple[int, int]:
                 files += 1
                 size += os.path.getsize(p)
     return files, size
+
+
+def content_sha256(root: str) -> str:
+    """SHA-256 over every file's contents and every link's target, in path order — the publishing side's notion of
+    "the same tree". Contract §2's tree_sha256 is path+size only (a change-detection key), so two different commits
+    whose files keep their sizes would look alike by it."""
+    h = hashlib.sha256()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for n in sorted(filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]):
+            p = os.path.join(dirpath, n)
+            rel = os.path.relpath(p, root)
+            if rel in ("READY", "manifest.json"):
+                continue
+            h.update(rel.encode("utf-8", "surrogateescape") + b"\0")
+            if os.path.islink(p):
+                h.update(b"l" + os.readlink(p).encode("utf-8", "surrogateescape") + b"\0")
+                continue
+            h.update(b"f")
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            h.update(b"\0")
+    return h.hexdigest()
 
 
 def write_manifest(path: str, kind: str, name: str, **extra) -> dict:
@@ -74,7 +98,8 @@ def target(art: str, kind: str, name: str) -> str:
     return path
 
 
-def publish_tree(art: str, kind: str, name: str, src: str) -> dict:
+def publish_tree(art: str, kind: str, name: str, src: str, **extra) -> dict:
+    """extra: additive manifest fields (the contract ignores unknown ones) — content_sha256 is always added."""
     path = target(art, kind, name)
     if kind == "core" and not os.path.isfile(os.path.join(src, "main.py")):
         raise Refused(f"{src} does not look like a ComfyUI release (no main.py)")
@@ -88,7 +113,7 @@ def publish_tree(art: str, kind: str, name: str, src: str) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
         raise Refused("; ".join(bad[:5]) + (f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""))
     os.rename(tmp, path)
-    m = write_manifest(path, kind, name)
+    m = write_manifest(path, kind, name, content_sha256=content_sha256(path), **extra)
     seal(path)
     return m
 
@@ -237,35 +262,66 @@ def find_dir(name: str, given: str | None) -> str:
     raise Refused(f"no {name}/ next to publish.py or in the repository — run it from a ComfyFarm checkout")
 
 
+REPO = re.compile(r"^(https://[A-Za-z0-9][A-Za-z0-9._~:/@-]*|/[A-Za-z0-9._][A-Za-z0-9._/-]*)$")   # https, or a local path
+RELEASE = re.compile(r"^(v?[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$")                                     # a tag or a commit
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+INDEX = re.compile(r"^https://[A-Za-z0-9][A-Za-z0-9._~:/@%-]*$")
+
+
 def load_recipe(name: str, recipes: str | None = None) -> dict:
-    path = name if name.endswith(".json") else os.path.join(find_dir("recipes", recipes), "recipes", name + ".json")
+    """A recipe is as trusted as code (root installs it on build hosts), so everything in it that reaches git, pip or
+    a profile is checked here against the same rules the launcher applies — a typo surfaces now, not after the build.
+    `name` is a file only when given as a path."""
+    path = name if os.sep in name else os.path.join(find_dir("recipes", recipes), "recipes", name + ".json")
     try:
         with open(path) as f:
             r = json.load(f)
     except (OSError, ValueError) as e:
         raise Refused(f"recipe {name}: {e}")
-    if not NAME.match(r.get("recipe", "")):
+    if not isinstance(r, dict) or not NAME.match(str(r.get("recipe", ""))):
         raise Refused(f"recipe {path}: 'recipe' must be a plain name")
+    who = f"recipe {r['recipe']}"
+    c = r.get("comfyui") or {}
+    if not isinstance(c, dict) or not REPO.match(str(c.get("repo", ""))) or not RELEASE.match(str(c.get("ref", ""))):
+        raise Refused(f"{who}: comfyui needs repo (https://… or a local path) and ref (a release tag or a full commit, "
+                      "never a branch: a recipe is pinned)")
+    if not re.fullmatch(r"3\.\d{1,2}", str(r.get("python", "3.12"))):
+        raise Refused(f"{who}: python must be a minor version like 3.12")
     for role in ROLES:
         v = r.get(role) or {}
-        if not NAME.match(v.get("venv", "")) or v.get("accelerator") not in ("cuda", "rocm", "cpu") or not v.get("index"):
-            raise Refused(f"recipe {r['recipe']}: {role} needs venv (a name), accelerator and index")
+        if (not isinstance(v, dict) or not NAME.match(str(v.get("venv", ""))) or v.get("accelerator") not in ("cuda", "rocm", "cpu")
+                or not INDEX.match(str(v.get("index", "")))):
+            raise Refused(f"{who}: {role} needs venv (a name), accelerator and index (an https URL)")
+        if not all(isinstance(a, str) and NAME.match(a) for a in v.get("arch", [])):
+            raise Refused(f"{who}: {role} arch must be plain names")
+        if not all(isinstance(a, str) and a.startswith("--") and "\n" not in a for a in v.get("pip", [])):
+            raise Refused(f"{who}: {role} pip entries must be options (--…)")
+        if bad := [f for f in v.get("flags", []) if not isinstance(f, str) or (f.startswith("--") and f not in OPTIONS)]:
+            raise Refused(f"{who}: {role} flags the launcher refuses: {bad}")
+        if bad := [why for k, x in (v.get("env") or {}).items() if (why := env_problem(str(k), x))]:
+            raise Refused(f"{who}: {role} environment the launcher refuses: {'; '.join(bad)}")
     for n in r.get("nodes", []):
-        if not NAME.match(n.get("name", "")) or not n.get("repo") or not re.fullmatch(r"[0-9a-f]{40}", n.get("commit", "")):
-            raise Refused(f"recipe {r['recipe']}: a node needs name, repo and a full commit (no branches: a recipe is pinned)")
+        if (not isinstance(n, dict) or not NAME.match(str(n.get("name", ""))) or not REPO.match(str(n.get("repo", "")))
+                or not COMMIT.match(str(n.get("commit", "")))):
+            raise Refused(f"{who}: a node needs name, repo (https://… or a local path) and a full commit (no branches: "
+                          "a recipe is pinned)")
+        if not all(isinstance(x, str) and "\n" not in x and not x.startswith("-") for x in n.get("requirements", [])):
+            raise Refused(f"{who}: node {n['name']} requirements must be requirement lines, not options")
     return r
 
 
-def fetch(repo: str, ref: str, dest: str) -> str:
-    """The tree of `ref` in `repo`, as `git archive` gives it (no .git) — the same bytes every time."""
+def fetch(repo: str, ref: str, dest: str) -> tuple[str, str]:
+    """The tree of `ref` in `repo`, as `git archive` gives it (no .git) — the same bytes every time — and the commit
+    it resolved to. repo and ref come after --end-of-options: git never reads them as options."""
     src = dest + ".git-src"
     subprocess.run(["git", "init", "-q", src], check=True)
-    subprocess.run(["git", "-C", src, "fetch", "-q", "--depth", "1", repo, ref], check=True)
+    subprocess.run(["git", "-C", src, "fetch", "-q", "--depth", "1", "--end-of-options", repo, ref], check=True)
+    commit = subprocess.run(["git", "-C", src, "rev-parse", "FETCH_HEAD"], check=True, capture_output=True, text=True).stdout.strip()
     os.makedirs(dest)
     archive = subprocess.run(["git", "-C", src, "archive", "FETCH_HEAD"], check=True, capture_output=True).stdout
     subprocess.run(["tar", "-x", "-C", dest], input=archive, check=True)
     shutil.rmtree(src)
-    return dest
+    return dest, commit
 
 
 def ready(art: str, kind: str) -> dict[str, dict]:
@@ -294,9 +350,11 @@ def tree_or_refuse(path: str) -> str:
 
 
 def same_tree(art: str, kind: str, src: str, prefix: str | None = None) -> str | None:
-    t = tree_or_refuse(src)
+    """A published artifact with the same contents (content_sha256; one published without it is never reused)."""
+    tree_or_refuse(src)                                   # refuse odd entries early (contract §2)
+    c = content_sha256(src)
     for name, m in sorted(ready(art, kind).items()):
-        if (prefix is None or name.startswith(prefix + "-")) and m.get("tree_sha256") == t:
+        if (prefix is None or re.fullmatch(re.escape(prefix) + r"-\d+", name)) and m.get("content_sha256") == c:
             return name
     return None
 
@@ -334,20 +392,24 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
         subprocess.run([uv, "python", "install", py], check=True)
     with tempfile.TemporaryDirectory(prefix="comfyfarm-recipe-") as work:
         c = recipe["comfyui"]
-        core_src = fetch(c["repo"], c["ref"], os.path.join(work, "core"))
-        core = "comfyui-" + c["ref"].lstrip("v")
+        core_src, core_commit = fetch(c["repo"], c["ref"], os.path.join(work, "core"))
+        core = "comfyui-" + (c["ref"].lstrip("v") if not COMMIT.match(c["ref"]) else c["ref"][:12])
         if not NAME.match(core):
             raise Refused(f"comfyui ref {c['ref']!r} does not make a name")
         if os.path.exists(os.path.join(art, "core", core)):
             have = ready(art, "core").get(core)
-            if not have or have.get("tree_sha256") != tree_or_refuse(core_src):
-                raise Refused(f"core/{core} exists with other contents (or unpublished) — not the release {c['ref']}")
+            same = have and (have.get("content_sha256") == content_sha256(core_src) if have.get("content_sha256")
+                             else have.get("tree_sha256") == tree_or_refuse(core_src))     # published before content hashes
+            if not same:
+                raise Refused(f"core/{core} exists with other contents (or unpublished) — not the release {c['ref']} "
+                              f"(commit {core_commit[:12]})")
             log(f"core/{core}: already published, reused")
         else:
-            publish_tree(art, "core", core, core_src)
-            log(f"core/{core}: published")
-        fetched = {n["name"]: fetch(n["repo"], n["commit"], os.path.join(work, "node-" + n["name"]))
-                   for n in recipe.get("nodes", [])}
+            publish_tree(art, "core", core, core_src, source={"repo": c["repo"], "ref": c["ref"], "commit": core_commit})
+            log(f"core/{core}: published (commit {core_commit[:12]})")
+        fetched, commits = {}, {}
+        for n in recipe.get("nodes", []):
+            fetched[n["name"]], commits[n["name"]] = fetch(n["repo"], n["commit"], os.path.join(work, "node-" + n["name"]))
         node_reqs = []
         for n in recipe.get("nodes", []):
             node_reqs += n.get("requirements", [])
@@ -365,7 +427,9 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
                 log(f"nodes/{nodes}: same contents already published, reused")
             else:
                 nodes = next_name(art, "nodes", prefix)
-                publish_tree(art, "nodes", nodes, stage)
+                publish_tree(art, "nodes", nodes, stage, recipe=recipe["recipe"],
+                             sources={n["name"]: {"repo": n["repo"], "commit": commits[n["name"]]}
+                                      for n in recipe.get("nodes", []) if role == "gpu" or n.get("ui")})
                 log(f"nodes/{nodes}: published")
             v = recipe[role]
             inputs = venv_inputs(recipe, role, req_files)
@@ -384,6 +448,8 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
     pdir = os.path.join(art, "profiles")
     os.makedirs(pdir, exist_ok=True)
     for f in sorted(glob.glob(os.path.join(pdir, recipe["recipe"] + "-*.json"))):
+        if not re.fullmatch(re.escape(recipe["recipe"]) + r"-\d+\.json", os.path.basename(f)):
+            continue                                       # another recipe whose name starts with this one
         with open(f) as fh:
             old = json.load(fh)
         if all(old.get(r) == template[r] for r in ROLES):

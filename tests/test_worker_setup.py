@@ -178,17 +178,39 @@ def test_a_persons_login_account_is_refused_before_anything_changes(tmp_path, mo
     import grp
     import pwd
     root = fake_root(tmp_path)
+    (root / "etc" / "shadow").write_text("root:*:1::::::\nalice:$6$salt$hash:19000:0:99999:7:::\ncomfyfarm:!:19000::::::\n")
     monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 1000, 1000, "", "/home/alice", "/bin/bash")))
     rec = Recorder()
     res = ws.setup(payload(account="alice", uid=None), ws.Host(root=str(root), run=rec))
-    assert not res["ok"] and "login account" in res["error"] and "comfyfarm" in res["error"]
+    assert not res["ok"] and "password" in res["error"] and "comfyfarm" in res["error"]
     assert not rec.ran("useradd") and not rec.ran("usermod") and not (root / "home").exists() and not (root / "var").exists()
+    # a person without a password but with keys of their own: refused before anything changes, too
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 1001, 1001, "", "/home/bob", "/bin/bash")))
+    keys = root / "home" / "bob" / ".ssh" / "authorized_keys"
+    keys.parent.mkdir(parents=True)
+    keys.write_text("ssh-ed25519 AAAAbobsown bob@laptop\n")
+    rec = Recorder()
+    res = ws.setup(payload(account="bob", uid=None), ws.Host(root=str(root), run=rec))
+    assert not res["ok"] and "did not write" in res["error"] and not rec.ran("usermod")
+    assert keys.read_text() == "ssh-ed25519 AAAAbobsown bob@laptop\n" and not (root / "home" / "bob" / "logs").exists()
 
     monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 47800, 47800, "", "/var/lib/ops", "/bin/sh")))
     real_getgrnam = grp.getgrnam
     monkeypatch.setattr(grp, "getgrnam", lambda g: grp.struct_group(("sudo", "x", 27, ["ops"])) if g == "sudo" else real_getgrnam(g))
     res = ws.setup(payload(account="ops", uid=47800), ws.Host(root=str(fake_root(tmp_path / "b")), run=Recorder()))
     assert not res["ok"] and "sudo" in res["error"]
+
+
+def test_a_service_account_made_by_hand_under_home_is_adopted(tmp_path, monkeypatch):
+    """`useradd -m comfyfarm` or a manual install (rollouts.md §2) puts the account under /home with a locked
+    password: that is a service account, wherever its home is."""
+    import pwd
+    root = fake_root(tmp_path)
+    (root / "etc" / "shadow").write_text("comfyfarm:!:19000::::::\n")
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 47800, 47800, "", "/home/comfyfarm", "/bin/sh")))
+    res = ws.setup(payload(uid=47800), ws.Host(root=str(root), run=Recorder()))
+    assert res["ok"], res
+    assert (root / "home" / "comfyfarm" / ".ssh" / "authorized_keys").read_text().startswith(ws.MARK)
 
 
 def test_an_existing_service_account_keeps_its_own_home(tmp_path, monkeypatch):

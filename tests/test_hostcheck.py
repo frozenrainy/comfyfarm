@@ -185,13 +185,19 @@ def test_recipe_templates_in_the_store_are_reported_with_the_way_to_make_them(tm
     t = {"template": "rocm-gfx1201-1", "recipe": "rocm-gfx1201",
          "gpu": {"core": "c1", "venv": "rocm72-1", "nodes": ["farm-gpu-1"], "flags": [], "env": {}},
          "ui": {"core": "c1", "venv": "cpu-1", "nodes": ["farm-ui-1"], "flags": ["--cpu"], "env": {}}}
+    for kind, name in (("venv", "rocm72-1"), ("venv", "cpu-1"), ("nodes", "farm-gpu-1"), ("nodes", "farm-ui-1")):
+        os.makedirs(os.path.join(art, kind, name))
+        open(os.path.join(art, kind, name, "READY"), "w").close()
     with open(os.path.join(art, "profiles", "rocm-gfx1201-1.json"), "w") as f:
         json.dump(t, f)
+    with open(os.path.join(art, "profiles", "rocm-gfx1201-2.json"), "w") as f:          # points at a retired venv
+        json.dump({**t, "template": "rocm-gfx1201-2", "gpu": {**t["gpu"], "venv": "rocm72-9"}}, f)
     with open(os.path.join(art, "profiles", "broken.json"), "w") as f:
         f.write("{not json")
     env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
     cfg = {"gpu": "amd", "paths": paths, "port": free_port(), "listen": "127.0.0.1", "instance": "gpu-1"}
     out = hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()
     line = next(r for r in out if r["name"] == "recipes")
-    assert line["level"] == "OK" and line["templates"] == [t]               # the broken file is skipped, not fatal
+    assert line["level"] == "OK" and line["templates"][0] == {**t, "missing": []}     # the broken file is skipped, not fatal
+    assert line["templates"][1]["missing"] == ["venv/rocm72-9"] and "rocm-gfx1201-2" not in line["detail"]
     assert levels(out)["artifact store"] == "OK"                             # templates are not counted as artifacts

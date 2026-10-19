@@ -112,7 +112,7 @@ function workers(root, { refresh }) {
       act(() => api("DELETE", `/api/admin/workers/${id()}`), t("Deleted"), refresh);
     }, { cls: "danger" });
     const again = button(t("Set up again"), async () => {
-      const s = (await api("GET", "/api/admin/setups")).find((x) => x.worker_id === id() && x.status === "finished");
+      const s = (await api("GET", `/api/admin/setups?worker_id=${id()}`)).find((x) => x.status === "finished");
       if (!s) return toast(t("this worker was not set up from the dashboard — Set up a worker, with another name"), true);
       setupWorker(refresh, { worker_id: id(), spec: s.spec, extra: s.extra });
     });

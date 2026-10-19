@@ -34,6 +34,7 @@ def setup(log_dir: str | None = None, level: str = "INFO", name: str = "router")
     root.addHandler(out)
     _mine.append(out)
     if log_dir:
+        os.umask(0o077)                     # a service: its logs (and backups, dumps) are its own, not the host's
         os.makedirs(log_dir, exist_ok=True)
         main = logging.handlers.RotatingFileHandler(os.path.join(log_dir, f"{name}.log"), maxBytes=ROTATE_BYTES,
                                                     backupCount=ROTATE_KEEP, encoding="utf-8")

@@ -503,6 +503,21 @@ async def test_first_administrator_from_the_login_page(dsn, caplog):
             await task
 
 
+async def test_login_page_says_when_the_router_is_down_instead_of_an_ordinary_form(dsn):
+    """Right after `docker compose up` the router may still be starting: the page must not pretend a login works."""
+    from conftest import free_port
+    started = []
+    gw = f"http://127.0.0.1:{await serve_asgi(create_gateway(GatewaySettings(f'http://127.0.0.1:{free_port()}', 'auto', SECRET, b'k' * 32)), started)}"
+    try:
+        async with httpx.AsyncClient() as c:
+            page = (await c.get(f"{gw}/comfyfarm/login")).text
+            assert "not answering" in page and "action=/comfyfarm/login" in page
+    finally:
+        for server, task in started:
+            server.should_exit = True
+            await task
+
+
 async def test_first_administrator_only_once_when_two_try_at_once(dsn):
     app = create_app(fast_settings(dsn, gateway_secret=SECRET))
     G = {"x-comfyfarm-gateway-login": SECRET}

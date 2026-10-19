@@ -70,28 +70,34 @@ async def test_router_warns_about_open_workers(dsn, fakes):
     assert not any("unsecured" in x or "extension" in x for x in ws["locked"]), ws["locked"]
 
 
-def test_extension_names_custom_nodes_that_did_not_import(tmp_path, monkeypatch):
-    """ComfyUI keeps only the loaded nodes; the extension reports the rest (a failed import leaves the worker running
-    with a shorter node list — the rollout must not call that a success)."""
+def test_extension_reads_comfyuis_own_import_verdict(monkeypatch):
+    """ComfyUI's summary after the loading loop is the verdict: a pack it dropped (an exception, no mappings, a V3
+    entrypoint that failed) is "(IMPORT FAILED)" there; one it skipped on purpose (--disable-all-custom-nodes,
+    policy) is not listed at all — reconstructing from LOADED_MODULE_DIRS got both wrong."""
+    import logging
     import sys
     pkg = ROOT / "worker_ext" / "comfyfarm_worker"
     spec = importlib.util.spec_from_file_location("comfyfarm_worker_under_test", pkg / "__init__.py",
                                                   submodule_search_locations=[str(pkg)])
     ext = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, ext)
-    spec.loader.exec_module(ext)                     # outside ComfyUI its installs log and skip
-    a, b = tmp_path / "set-a", tmp_path / "set-b"
-    for d in ("GoodNode", "BrokenNode", "__pycache__", "Off.disabled"):
-        (a / d).mkdir(parents=True)
-    (a / "README.md").write_text("")
-    b.mkdir()
-    (b / "single.py").write_text("")
-    (b / "single_bad.py").write_text("")
-    monkeypatch.setitem(sys.modules, "nodes", types.SimpleNamespace(
-        LOADED_MODULE_DIRS={"GoodNode": str(a / "GoodNode"), str(b / "single"): str(b)}))   # ComfyUI's own keys
-    monkeypatch.setitem(sys.modules, "folder_paths", types.SimpleNamespace(
-        get_folder_paths=lambda kind: [str(a), str(b), str(tmp_path / "gone")]))
-    assert ext.custom_node_status() == {"loaded": ["GoodNode", "single.py"], "failed": ["BrokenNode", "single_bad.py"]}
+    spec.loader.exec_module(ext)                     # outside ComfyUI its installs log and skip; the watch is installed
+    try:
+        assert ext.custom_node_status() is None      # nothing seen yet: unknown, not "all fine"
+        root = logging.getLogger()
+        level = root.level
+        root.setLevel(logging.INFO)
+        logging.info("\nImport times for custom nodes:")
+        logging.info("   0.0 seconds: /x/custom_nodes/websocket_image_save.py")
+        logging.info("   1.3 seconds (IMPORT FAILED): /x/custom_nodes/BrokenNode")
+        logging.info("   0.2 seconds: /x/custom_nodes/GoodNode/")
+        logging.warning("IMPORT FAILED: comfy_extras/nodes_broken_builtin.py")
+        logging.info("Skipping Hidden due to disable_all_custom_nodes and whitelist_custom_nodes")   # not a verdict
+        root.setLevel(level)
+        assert ext.custom_node_status() == {"loaded": ["GoodNode", "websocket_image_save.py"],
+                                            "failed": ["BrokenNode", "nodes_broken_builtin.py"]}
+    finally:
+        logging.getLogger().removeHandler(ext._watch)
 
 
 def test_failed_custom_nodes_are_a_worker_warning():

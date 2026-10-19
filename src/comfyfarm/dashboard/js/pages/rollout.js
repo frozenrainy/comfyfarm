@@ -149,74 +149,96 @@ export function rollout(root, { refresh }) {
     else act(() => api("POST", "/api/admin/profiles", body), t("Profile created"), refresh);
   }
   // A recipe (publish.py recipe) leaves a profile template in the artifact store; a worker host's check reads it.
+  // Read through a GPU worker that is enabled and online when there is one: it mounts the store the GPU hosts use.
   async function fromRecipe() {
-    const via = insts.find((i) => i.instance && ["ssh", "http-agent"].includes(i.instance.restart_backend));
+    const rank = (i) => (i.instance.role !== "ui" ? 0 : 4) + (i.enabled ? 0 : 2) + (i.state === "online" ? 0 : 1);
+    const via = insts.filter((i) => i.instance && ["ssh", "http-agent"].includes(i.instance.restart_backend))
+                     .sort((x, y) => rank(x) - rank(y))[0];
     if (!via) return toast(t("no worker to read the artifact store through yet — set one up first (System → Workers)"), true);
     const r = await act(() => api("POST", `/api/admin/instances/${via.worker_id}/check`));
     if (!r) return;
-    const line = (r.check || []).find((x) => x.name === "recipes");
-    const templates = line?.templates || [];
-    const buildable = (r.check || []).find((x) => x.name === "builds")?.recipes || [];
-    if (!templates.length && !buildable.length) {
-      return toast(line ? line.detail : t("this worker's tools are older than recipes — Set up again (System → Workers)"), true);
+    const check = r.check || [];
+    const line = check.find((x) => x.name === "recipes"), store = check.find((x) => x.name === "artifact store");
+    if (!line) {
+      if (store?.level === "FAIL") return toast(t("the artifact store on {name} is not usable: {detail}", { name: via.worker, detail: store.detail }), true);
+      return toast(t("this worker's tools are older than recipes — Set up again (System → Workers)"), true);
     }
-    if (!templates.length) {                               // nothing published yet: build first, then come back here
+    const all = line.templates || [];
+    const templates = all.filter((x) => !(x.missing || []).length), stale = all.filter((x) => (x.missing || []).length);
+    const buildable = check.find((x) => x.name === "builds")?.recipes || [];
+    if (!templates.length && !buildable.length) {
+      return toast(stale.length ? t("no template is usable: {names}", { names: stale.map((x) => `${x.template} ${t("(artifacts missing)")}`).join(", ") })
+                                : line.detail, true);
+    }
+    const buildFirst = async () => {
       const b = await formDialog(t("Build a recipe on {name}", { name: via.worker }), [
         { name: "recipe", label: t("Recipe"), type: "select", value: buildable[0], options: buildable.map((x) => ({ value: x, label: x })),
           hint: t("the host downloads ComfyUI, PyTorch and the nodes and publishes them to its artifact store — minutes, mostly the PyTorch download") },
       ], t("Build"));
       if (b && await runBuild(via, b.recipe)) return fromRecipe();
-      return;
-    }
+    };
+    if (!templates.length) return buildFirst();            // nothing published yet: build, then come back here
     let allow = "";
     try {
-      const last = (await api("GET", "/api/admin/setups")).find((s) => s.spec?.router_url);
-      if (last) allow = new URL(last.spec.router_url).hostname;
+      const last = (await api("GET", "/api/admin/setups")).find((x) => x.spec?.router_url);
+      const host = last ? new URL(last.spec.router_url).hostname : "";
+      if (/^[0-9.]+$/.test(host)) allow = host;                 // the allow-list takes addresses, not names
     } catch { /* a guess only */ }
-    const v = await formDialog(t("Profiles from a recipe"), [
+    const v = await formDialog(t("Profiles from a recipe (read through {name})", { name: via.worker }), [
       { name: "template", label: t("Template"), type: "select", value: templates[templates.length - 1].template,
         options: templates.map((x) => ({ value: x.template, label: x.about ? `${x.template} — ${x.about}` : x.template })) },
       { name: "allow", label: "COMFYFARM_ALLOW", value: allow,
         hint: t("the addresses the workers take requests from: the router's and the gateway's, as the workers see them") },
+      ...(buildable.length ? [{ name: "build", type: "checkbox", value: false, label: t("Build"),
+                               text: t("Build {recipe} on {name} first (a new template after a recipe update)", { recipe: buildable[0], name: via.worker }) }] : []),
     ], t("Create both profiles"), { wide: true });
     if (!v) return;
+    if (v.build) return buildFirst();
     const tpl = templates.find((x) => x.template === v.template);
     const made = [];
     for (const [role, what] of [["gpu", t("GPU workers")], ["ui", t("UI worker")]]) {
-      const p = tpl[role];
-      const res = await act(() => api("POST", "/api/admin/profiles", {
-        name: `${tpl.template}-${role}`, core: p.core, venv: p.venv, nodes: p.nodes, frontend: null, flags: p.flags || [],
-        env: { ...(p.env || {}), ...(v.allow.trim() ? { COMFYFARM_ALLOW: v.allow.trim() } : {}) },
-        note: `${what} · ${tpl.template}` }));
-      if (!res) return refresh();
-      made.push(`${tpl.template}-${role}`);
+      const name = `${tpl.template}-${role}`, p = tpl[role];
+      try {
+        await api("POST", "/api/admin/profiles", {
+          name, core: p.core, venv: p.venv, nodes: p.nodes, frontend: null, flags: p.flags || [],
+          env: { ...(p.env || {}), ...(v.allow.trim() ? { COMFYFARM_ALLOW: v.allow.trim() } : {}) }, note: `${what} · ${tpl.template}` });
+        made.push(name);
+      } catch (e) {
+        if (e.status === 409) { toast(t("profile {name} exists — kept", { name })); continue; }   // a second click, or half of a pair
+        toast(e.message, true);
+        return refresh();
+      }
     }
-    toast(t("Profiles created: {names} — pick them in Set up a worker, or Assign", { names: made.join(", ") }));
+    if (made.length) toast(t("Profiles created: {names} — pick them in Set up a worker, or Assign", { names: made.join(", ") }));
     refresh();
   }
-  // A build on a host that allows it (its setup): request, then follow its state until done or failed.
+  // A build on a host that allows it (its setup): request, then follow its state until done or failed. The host
+  // answers "queued" until its build service takes the request, so the last run's state is never read as this one's.
   async function runBuild(via, recipe) {
     if (!await act(() => api("POST", `/api/admin/instances/${via.worker_id}/build`, { recipe }))) return false;
+    const LOOK = { queued: "pending", none: "pending", running: "running", done: "done", failed: "failed" };
     const state = h("div", { class: "section-head" }), log = h("pre", { class: "code log" });
     const dlg = h("dialog", { class: "form wide" });
-    let timer = null, result = null, done;
+    let timer = null, result = null, closed = false, done;
     const finished = new Promise((r) => (done = r));
-    const close = () => { clearTimeout(timer); dlg.close(); dlg.remove(); done(result); };
+    const close = () => { closed = true; clearTimeout(timer); dlg.close(); dlg.remove(); done(result); };
     dlg.append(h("h3", {}, t("Building {recipe} on {name}", { recipe, name: via.worker })), state, log,
       h("div", { class: "dialog-actions" }, button(t("Close"), close)));
     dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
     document.body.append(dlg);
     dlg.showModal();
     const poll = async () => {
+      if (closed) return;
       try {
         const s = await api("GET", `/api/admin/instances/${via.worker_id}/build?recipe=${encodeURIComponent(recipe)}`);
-        state.replaceChildren(pill(t(s.state === "none" ? "waiting" : s.state), s.state === "done" ? "ok" : s.state === "failed" ? "bad" : "warn"),
-          " ", s.template ? t("template {name}", { name: s.template }) : s.error || "");
+        if (closed) return;
+        state.replaceChildren(pill(LOOK[s.state] || "pending", t(s.state === "none" ? "waiting" : s.state)), " ",
+          s.template ? t("template {name}", { name: s.template }) : s.error || "");
         log.textContent = s.log || "";
         log.scrollTop = log.scrollHeight;
         if (s.state === "done") { result = true; toast(t("Built — now pick the template")); return close(); }
         if (s.state === "failed") { result = false; return; }
-      } catch (e) { state.textContent = e.message; }
+      } catch (e) { if (closed) return; state.textContent = e.message; }
       timer = setTimeout(poll, 3000);
     };
     poll();

@@ -50,7 +50,7 @@ export async function setupWorker(refresh, again = null) {
     }
     return (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
   };
-  const keep = again ? t("kept: setting a worker up again changes its host, not its identity") : "";
+  const keep = again ? t("kept: setting a worker up again changes its host settings, not its identity") : "";
   const v = await formDialog(again ? t("Set up {name} again", { name: lastX.name }) : ui ? t("Set up the UI worker") : t("Set up a GPU worker"), [
     { name: "name", label: t("Worker name (shown in the dashboard)"), value: again ? lastX.name : ui ? "ui" : "", hint: keep },
     { name: "host", label: t("Host address"), value: lastX.host ?? "", placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
@@ -166,10 +166,16 @@ function runSetup(made, refresh) {
   async function addWorker() {
     finish.disabled = true;
     try {
-      if (made.again) {                                    // the same worker: its instance gets the new settings
+      if (made.again) {                                    // the same worker: instance, address, group and profile follow
         await api("PUT", `/api/admin/instances/${made.again}`, setup.instance_config);
+        const w = setup.worker;
+        await api("PATCH", `/api/admin/workers/${made.again}`,
+                  { base_url: w.base_url, ...(w.kind === "ui" ? {} : { group: w.group ?? "" }) });
+        const pid = setup.extra.profile_id;
+        if (pid) await api("POST", `/api/admin/instances/${made.again}/assign`, { profile_id: pid });
         await api("POST", `/api/admin/setups/${made.id}/finished?worker_id=${made.again}`);
-        toast(t("Worker updated — the new worker tools are used from its next start (Rollout → Render, or a rollout)"));
+        toast(pid ? t("Worker updated and the profile assigned — restart it (Rollout → Render) or roll it out to use the new tools")
+                  : t("Worker updated — the new worker tools are used from its next start (Rollout → Render, or a rollout)"));
         return close();
       }
       const w = await api("POST", "/api/admin/workers", setup.worker);

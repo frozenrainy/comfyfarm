@@ -141,11 +141,16 @@ class Check:
                     t = json.load(fh)
             except (OSError, ValueError):
                 continue
-            if isinstance(t, dict) and all(isinstance(t.get(k), dict) for k in ("gpu", "ui")) and t.get("template"):
-                templates.append(t)
+            if isinstance(t, dict) and all(isinstance(t.get(k), dict) for k in ("gpu", "ui")) and isinstance(t.get("template"), str):
+                missing = sorted({f"{kind}/{n}" for role in ("gpu", "ui")
+                                  for kind, names in (("core", [t[role].get("core")]), ("venv", [t[role].get("venv")]),
+                                                      ("nodes", t[role].get("nodes") or []))
+                                  for n in names if isinstance(n, str) and not os.path.exists(os.path.join(art, kind, n, "READY"))})
+                templates.append({**t, "missing": missing})
         if templates:
-            self.add(OK, "recipes", ", ".join(t["template"] for t in templates) + " — System → Rollout → Profiles → "
-                     "From a recipe", templates=templates)
+            usable = [t["template"] for t in templates if not t["missing"]]
+            self.add(OK if usable else WARN, "recipes", ", ".join(usable or [t["template"] + " (artifacts missing)" for t in templates])
+                     + " — System → Rollout → Profiles → From a recipe", templates=templates)
         else:
             self.add(WARN, "recipes", f"no profile template in {art} — on a host with internet that mounts it here: "
                      f"python3 publish.py recipe {art} rocm-gfx1201 (docs/guide/rollouts.md §1)")

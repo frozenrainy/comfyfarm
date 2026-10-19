@@ -244,24 +244,34 @@ def give_to_service(paths: list[str], owner: tuple[int, int] = SERVICE_OWNER) ->
         for path in [top] + [os.path.join(d, n) for d, dirs, files in os.walk(top) for n in dirs + files]:
             try:
                 os.lchown(path, *owner)
+            except FileNotFoundError:
+                continue                                   # the running router rotated or removed it meanwhile
             except PermissionError:
                 sys.exit(f"cannot give {path} to uid {owner[0]} (an NFS export with root_squash?) — "
                          f"chown -R {owner[0]}:{owner[1]} it where it is stored, or use a Docker volume")
 
 
 def prepare_state(root: str, chown: list[str] = ()) -> list[str]:
-    """The easy deployment's state directory (a volume or a bind mount): secrets/ (0711 — Postgres, another user,
-    reads its file by name; nobody can list it), keys/ and backups/ (0700). Run by the compose `init` service before
+    """The easy deployment's state directory (a volume or a bind mount): secrets/, keys/ and backups/, 0700, the
+    secrets 0400 — the owner's alone (Postgres reads its file as root). Run by the compose `init` service before
     anything else starts; idempotent. As root it also gives the state and `chown` directories (the logs) to the
     service's account — then a bind mount works as well as a named volume."""
     made = []
-    for sub, mode in (("secrets", 0o711), ("keys", 0o700), ("backups", 0o700)):
+    for sub, mode in (("secrets", 0o700), ("keys", 0o700), ("backups", 0o700)):
         path = os.path.join(root, sub)
         if not os.path.isdir(path):
             os.makedirs(path)
             made.append(sub + "/")
         os.chmod(path, mode)
     made += ["secrets/" + n for n in write_secret_files(os.path.join(root, "secrets"))]
+    # With a bind mount every account on the host would otherwise read the secrets (and the setup code in the logs):
+    # the state and the logs are the service's alone. Postgres reads its password file as root before it drops to
+    # its own user, so 0400 for the owner is enough for every container.
+    for name in SECRET_FILES:
+        os.chmod(os.path.join(root, "secrets", name), 0o400)
+    for d in (root, *chown):
+        if os.path.isdir(d):
+            os.chmod(d, 0o700)
     if os.geteuid() == 0:
         give_to_service([root, *chown])
     return made

@@ -136,12 +136,17 @@ def make_router(ctx: Ctx) -> APIRouter:
     async def create(body: SetupIn, request: Request, x_comfyfarm_user: str | None = Header(default=None)):
         who = ctx.admin(x_comfyfarm_user)
         check_spec(body)
+        previous_account = None
         async with db.conn() as c:
             if body.worker_id is not None:              # again: the same worker and instance, nothing else
-                same = await c.fetchrow("SELECT w.name, i.instance FROM workers w JOIN instances i ON i.worker_id = w.id "
-                                        "WHERE w.id = $1 AND w.deleted_at IS NULL", body.worker_id)
+                same = await c.fetchrow("SELECT w.name, i.instance, i.restart_config FROM workers w "
+                                        "JOIN instances i ON i.worker_id = w.id WHERE w.id = $1 AND w.deleted_at IS NULL",
+                                        body.worker_id)
                 if same is None or same["instance"] != body.instance or same["name"] != body.name.strip():
                     raise HTTPException(409, "setting a worker up again keeps its name and instance")
+                was = (same["restart_config"] or {}).get("user")
+                if was and was != body.account:         # the old account's key and unit go on the host
+                    previous_account = was
             if await c.fetchval("SELECT 1 FROM instances WHERE instance = $1 AND worker_id IS DISTINCT FROM $2",
                                 body.instance, body.worker_id):
                 raise HTTPException(409, f"instance name {body.instance!r} is taken")
@@ -159,7 +164,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 "art": body.paths["art"], "local": body.paths["local"], "gpu": "none" if body.role == "ui" else body.gpu, "port": body.port, "listen": body.listen,
                 "paths": {k: v for k, v in body.paths.items() if k not in ("art", "local")},
                 "mounts": [m.model_dump(exclude_none=True) for m in body.mounts], "agent_pubkey": pub,
-                "builds": body.builds}
+                "builds": body.builds, **({"previous_account": previous_account} if previous_account else {})}
         extra = {"name": body.name.strip(), "host": body.host, "ssh_port": body.ssh_port, "group": body.group,
                  "profile_id": body.profile_id, "again": body.worker_id}
         try:
@@ -178,10 +183,14 @@ def make_router(ctx: Ctx) -> APIRouter:
                 "expires_in": int(TOKEN_TTL.total_seconds())}
 
     @api.get("/api/admin/setups")
-    async def list_setups(x_comfyfarm_user: str | None = Header(default=None)):
+    async def list_setups(worker_id: int | None = None, x_comfyfarm_user: str | None = Header(default=None)):
+        """The latest 20; with worker_id, that worker's (for Set up again — a farm has more setups than 20)."""
         ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
-            rows = await c.fetch("SELECT * FROM worker_setups ORDER BY id DESC LIMIT 20")
+            if worker_id is not None:
+                rows = await c.fetch("SELECT * FROM worker_setups WHERE worker_id = $1 ORDER BY id DESC LIMIT 20", worker_id)
+            else:
+                rows = await c.fetch("SELECT * FROM worker_setups ORDER BY id DESC LIMIT 20")
         return [public(r) for r in rows]
 
     @api.get("/api/admin/setups/{sid}")

@@ -282,18 +282,21 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         except (httpx.HTTPError, ValueError):
             return None
 
-    async def first_admin_needed() -> bool:
+    async def first_admin_needed() -> bool | None:
+        """True: no administrator yet; False: there is one; None: the router did not answer (say so — right after
+        `docker compose up` the router may still be starting, and a silent ordinary login form misleads)."""
         try:
             r = await http.get(f"{s.router_url}/api/internal/first-admin", headers={"x-comfyfarm-gateway-login": s.secret},
                                timeout=3)
             return r.status_code == 200 and r.json().get("needed") is True
         except (httpx.HTTPError, ValueError):
-            return False
+            return None
 
     async def login_page(request: Request):
         lang = login_lang(request)
         tx = LOGIN_TEXT[lang]
-        if s.provider == "local" and await first_admin_needed():
+        needed = await first_admin_needed() if s.provider == "local" else False
+        if needed:
             err = request.query_params.get("s")
             msg = f'<p class=bad>{tx["s_" + err]}</p>' if err in ("code", "differ", "short", "name") else ""
             if request.query_params.get("e") == "2":
@@ -310,7 +313,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             user_field = f'<select name=username autofocus><option value="" disabled selected>{tx["user"]}</option>{options}</select>'
         else:
             user_field = f'<input name=username placeholder="{tx["user"]}" autocomplete=username autofocus>'
-        msg = (f'<p class=bad>{tx["down"] if err == "2" else tx["failed"]}</p>' if err else "") \
+        msg = (f'<p class=bad>{tx["down"] if err == "2" or needed is None else tx["failed"]}</p>' if err or needed is None else "") \
             + (f'<p class=note>{html.escape(note)}</p>' if note else "")
         return HTMLResponse(LOGIN_PAGE.format(lang=lang, form=LOGIN_FORM.format(
             next=html.escape(nxt), user_field=user_field, msg=msg, password=tx["password"], login=tx["login"])))

@@ -247,7 +247,16 @@ export default {
   "this worker's tools are older than recipes — Set up again (System → Workers)":
     "이 워커의 도구가 레시피보다 오래됐습니다 — 다시 설치하세요 (시스템 → 워커)",
   "Set up again": "다시 설치", "Set up {name} again": "{name} 다시 설치",
-  "kept: setting a worker up again changes its host, not its identity": "유지됨: 다시 설치는 호스트 설정만 바꾸고 워커 정체성은 그대로입니다",
+  "kept: setting a worker up again changes its host settings, not its identity": "유지됨: 다시 설치는 호스트 설정만 바꾸고 워커 정체성은 그대로입니다",
+  "Worker updated and the profile assigned — restart it (Rollout → Render) or roll it out to use the new tools":
+    "워커를 갱신하고 프로필을 배정했습니다 — 새 도구를 쓰려면 재시작(롤아웃 → 렌더)하거나 롤아웃하세요",
+  "Profiles from a recipe (read through {name})": "레시피로 프로필 만들기 ({name}을(를) 통해 읽음)",
+  "(artifacts missing)": "(아티팩트 없음)", "queued": "대기열에 있음",
+  "the artifact store on {name} is not usable: {detail}": "{name}의 아티팩트 저장소를 쓸 수 없습니다: {detail}",
+  "Build the recipe on {name} first (no profile template in its store yet)": "먼저 {name}에서 레시피를 빌드하세요 (저장소에 아직 프로필 견본이 없음)",
+  "no template is usable: {names}": "쓸 수 있는 견본이 없습니다: {names}",
+  "profile {name} exists — kept": "프로필 {name}이(가) 이미 있어 그대로 둡니다",
+  "Build {recipe} on {name} first (a new template after a recipe update)": "먼저 {name}에서 {recipe}를 빌드 (레시피 갱신 뒤 새 견본)",
   "Allow builds from the dashboard on this host": "이 호스트에서 대시보드 빌드 허용", "Builds": "빌드",
   "the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet, git and uv on the host":
     "대시보드가 이 호스트에 설치된 레시피의 빌드를 요청할 수 있습니다(이름만 고르고 내용은 보내지 않음). 빌드 계정이 아티팩트 저장소를 소유하고, 서비스 계정은 계속 읽기만 합니다. 호스트에 인터넷·git·uv가 필요합니다",

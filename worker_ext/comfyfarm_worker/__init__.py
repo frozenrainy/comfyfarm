@@ -10,14 +10,14 @@ module swaps the /ws route for a copy whose cleanup only removes its own socket.
 
 The swap happens only if the original handler's source matches a known version; otherwise the original is kept and a
 warning is logged (a silently wrong copy would be worse than the known bug)."""
-import hashlib, inspect, json, logging, os, uuid
+import hashlib, inspect, json, logging, os, re, uuid
 
 import aiohttp
 from aiohttp import web
 
 from .allow import from_env, make_middleware
 
-EXT_VERSION = "0.3"
+EXT_VERSION = "0.4"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")
@@ -112,27 +112,45 @@ def _install_validate():
     log.info("comfyfarm: /comfyfarm/validate installed")
 
 
-def custom_node_status() -> dict:
-    """The custom node directories ComfyUI tried to load, and those that did not load. ComfyUI remembers only the
-    loaded ones (nodes.LOADED_MODULE_DIRS); a failed import is logged as IMPORT FAILED and otherwise forgotten, and the
-    worker runs on without that node. Same walk as nodes.init_external_custom_nodes; asked at request time, after every
-    custom node has had its turn."""
-    import folder_paths, nodes
-    loaded_dirs = {os.path.realpath(d) for d in nodes.LOADED_MODULE_DIRS.values()}
-    loaded, failed = [], []
-    for base in folder_paths.get_folder_paths("custom_nodes"):
+# ComfyUI's own verdict on every custom node pack, read from its log: after the loading loop it prints one line per
+# pack it tried — "  1.2 seconds (IMPORT FAILED): <path>" — and a pack is "failed" there exactly when ComfyUI dropped
+# it (an exception, no NODE_CLASS_MAPPINGS, a V3 entrypoint that failed); packs it skipped on purpose
+# (--disable-all-custom-nodes, policy) are not in that list at all. Reconstructing this from LOADED_MODULE_DIRS would
+# get both of those wrong. The handler is installed when this extension imports, i.e. inside the loop, before the
+# summary is logged. Built-in extra nodes that fail are logged as "IMPORT FAILED: <path>" and counted too.
+IMPORT_LINE = re.compile(r"^\s*[\d.]+ seconds( \(IMPORT FAILED\))?: (.+)$")
+IMPORT_FAILED = re.compile(r"^IMPORT FAILED: (.+)$")
+
+
+class _ImportWatch(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.loaded, self.failed = [], []
+
+    def emit(self, record):
         try:
-            entries = sorted(os.listdir(os.path.realpath(base)))
-        except OSError:
-            continue
-        for name in entries:
-            path = os.path.join(base, name)
-            if name == "__pycache__" or name.endswith(".disabled") or (os.path.isfile(path) and not name.endswith(".py")):
-                continue
-            ok = (os.path.realpath(path) in loaded_dirs if os.path.isdir(path)
-                  else os.path.splitext(path)[0] in nodes.LOADED_MODULE_DIRS)          # a single-file node: keyed by path
-            (loaded if ok else failed).append(name)
-    return {"loaded": loaded, "failed": failed}
+            msg = record.getMessage()
+        except Exception:                                   # a record we cannot read is not our business
+            return
+        m = IMPORT_LINE.match(msg)
+        if m:
+            (self.failed if m.group(1) else self.loaded).append(os.path.basename(m.group(2).strip().rstrip("/")))
+            return
+        m = IMPORT_FAILED.match(msg)
+        if m:
+            self.failed.append(os.path.basename(m.group(1).strip().rstrip("/")))
+
+
+_watch = _ImportWatch()
+logging.getLogger().addHandler(_watch)
+
+
+def custom_node_status() -> dict | None:
+    """{loaded, failed} by ComfyUI's own account, or None while no verdict has been seen — before the loading loop
+    ends, or when the log level is above INFO (then the extension cannot know, and says so rather than guessing)."""
+    if not _watch.loaded and not _watch.failed:
+        return None
+    return {"loaded": sorted(set(_watch.loaded)), "failed": sorted(set(_watch.failed))}
 
 
 def _install_allow():
@@ -160,8 +178,11 @@ def _install_allow():
         except Exception as e:                                   # never let the report break the info route
             log.warning("comfyfarm: custom node status unavailable: %r", e)
             nodes_state = None
-        return web.json_response({"extension": EXT_VERSION, "comfyui": comfyui_version.__version__, "ws_fix": ws_fix,
-                                  "custom_nodes": nodes_state, **policy.describe()})
+        body = {"extension": EXT_VERSION, "comfyui": comfyui_version.__version__, "ws_fix": ws_fix,
+                "custom_nodes": nodes_state, **policy.describe()}
+        if nodes_state is None:
+            body["custom_nodes_note"] = "no import summary seen in the log — ComfyUI's log level above INFO?"
+        return web.json_response(body)
 
 
 for _step, _fn in (("reconnect fix", _install), ("validate endpoint", _install_validate), ("allow-list", _install_allow)):

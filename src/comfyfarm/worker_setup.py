@@ -31,7 +31,7 @@ UNIT = "/etc/systemd/user/comfyfarm@.service"
 INSTANCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 ACCOUNT = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 MARK = "# managed by ComfyFarm worker setup — changes are overwritten"
-BUILD_USER, BUILD_HOME = "comfyfarm-build", "/var/lib/comfyfarm-build"
+BUILD_USER, BUILD_HOME = "comfyfarm-build", "/var/lib/comfyfarm-build"     # BUILD_HOME: root; the account's own home: /home below
 BUILD_UNITS = ("/etc/systemd/system/comfyfarm-build.path", "/etc/systemd/system/comfyfarm-build.service")
 BUILD_FILE = re.compile(r"^(publish\.py|build\.py|recipes/[A-Za-z0-9][A-Za-z0-9._-]*\.json|"
                         r"(worker_ext/comfyfarm_worker|ui_ext/comfyfarm_ui)(/[A-Za-z0-9_][A-Za-z0-9._-]*)+)$")
@@ -187,14 +187,36 @@ def preconditions(h: Host):
 ADMIN_GROUPS = ("sudo", "wheel", "admin")
 
 
-def person_account(pw) -> str | None:
+def owner_name(uid: int) -> str:
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return f"uid {uid} (no account of that number here)"
+
+
+def has_password(user: str, root: str = "") -> bool:
+    """A usable password in /etc/shadow — a person's account; a service account is locked (!, *, empty)."""
+    try:
+        with open(root + "/etc/shadow") as f:
+            for line in f:
+                parts = line.split(":")
+                if parts[0] == user:
+                    return len(parts) > 1 and bool(parts[1]) and not parts[1].startswith(("!", "*"))
+    except OSError:
+        pass
+    return False
+
+
+def person_account(pw, root: str = "") -> str | None:
     """Why an existing account cannot be the service account (None: it can). The service account runs ComfyUI and gets
     a root-owned authorized_keys holding only the router's forced-command key: a person's login account would lose its
-    own keys, and the router would act as someone who may use sudo."""
-    if pw.pw_uid == 0:
+    own keys, and the router would act as someone who may use sudo. A person is known by what the account has — root,
+    sudo, a password, keys of its own (checked by the caller) — not by where its home is: a service account made by
+    hand (`useradd -m comfyfarm`, a manual install under /home) must be adoptable."""
+    if pw.pw_uid == 0 or pw.pw_dir == "/root":
         return "root"
-    if pw.pw_dir == "/root" or pw.pw_dir.startswith("/home/"):
-        return f"a person's login account (home {pw.pw_dir})"
+    if has_password(pw.pw_name, root):
+        return "a person's login account (it has a password)"
     for g in ADMIN_GROUPS:
         try:
             gr = grp.getgrnam(g)
@@ -211,10 +233,15 @@ def account(h: Host, spec: dict):
         pw = pwd.getpwnam(user)
     except KeyError:
         pw = None
-    if pw is not None and (why := person_account(pw)):
+    if pw is not None and (why := person_account(pw, h.root)):
         raise Failed(f"{user} is {why} — the service account must be its own: it runs ComfyUI and only the router's "
                      "restart key logs in as it. Keep the default 'comfyfarm' (setup creates it) or name an unused account")
     home = pw.pw_dir if pw is not None else spec.get("home") or f"/var/lib/{user}"    # an existing account: its own home
+    keys = f"{home}/.ssh/authorized_keys"
+    if pw is not None and os.path.exists(h.p(keys)) and MARK not in h.read(keys):      # before the first change
+        raise Failed(f"{keys} holds keys ComfyFarm did not write — {user} is someone's account, not replaced. "
+                     "Keep the default 'comfyfarm' (setup creates it); if this one really is the service account, "
+                     "move those keys away and run setup again")
     have = pw.pw_uid if pw is not None else None
     if have is not None and uid is not None and have != uid:
         raise Failed(f"account {user} exists with uid {have}, setup asks for {uid}: shared storage needs the same uid on "
@@ -240,6 +267,18 @@ def account(h: Host, spec: dict):
             h.log(f"{user} added to {g}")
             h.groups_changed = True
     h.mkdir(f"{home}/logs", 0o750, owner=user)
+    prev = spec.get("previous_account")
+    if prev and prev != user and ACCOUNT.match(prev):          # set up again with another account: one account per instance
+        try:
+            old_home = pwd.getpwnam(prev).pw_dir
+        except KeyError:
+            old_home = None
+        if old_home:
+            old_keys = f"{old_home}/.ssh/authorized_keys"
+            if os.path.exists(h.p(old_keys)) and MARK in h.read(old_keys):
+                h.remove(old_keys)
+                h.log(f"the router's key removed from {prev} (this worker's account is {user} now)")
+            h.run(["systemctl", "--user", "disable", "--now", f"comfyfarm@{spec['instance']}"], check=False, as_user=prev)
     return home
 
 
@@ -374,26 +413,39 @@ def builds(h: Host, spec: dict, files: dict):
         pw = pwd.getpwnam(BUILD_USER)
     except KeyError:
         pw = None
-    if pw is not None and (why := person_account(pw)):
+    if pw is not None and (why := person_account(pw, h.root)):
         raise Failed(f"{BUILD_USER} is {why} — the build account must be its own")
+    home = f"{BUILD_HOME}/home"
     if pw is None:
-        h.run(["useradd", "--system", "--create-home", "--home-dir", BUILD_HOME, "--shell", "/usr/sbin/nologin", BUILD_USER])
-        h.log(f"account {BUILD_USER} created (home {BUILD_HOME}) — builds run as it")
+        h.run(["useradd", "--system", "--no-create-home", "--home-dir", home, "--shell", "/usr/sbin/nologin", BUILD_USER])
+        h.log(f"account {BUILD_USER} created (home {home}) — builds run as it")
     art = spec["art"]
     full = h.p(art)
     if not os.path.isdir(full):
         h.mkdir(art, 0o755, owner=BUILD_USER)
-    elif not h.dry and pwd.getpwuid(os.stat(full).st_uid).pw_name != BUILD_USER:
+    elif not h.dry and os.stat(full).st_uid != h.uid(BUILD_USER):
+        owner = owner_name(os.stat(full).st_uid)
         if os.listdir(full):
-            raise Failed(f"{art} belongs to {pwd.getpwuid(os.stat(full).st_uid).pw_name}: builds from the dashboard publish "
-                         f"there as {BUILD_USER} — chown -R {BUILD_USER} {art} once, or set the host up without builds "
+            raise Failed(f"{art} belongs to {owner}: builds from the dashboard publish there as {BUILD_USER} — "
+                         f"chown -R {BUILD_USER} {art} once, or set the host up without builds "
                          f"({spec['account']}, which runs ComfyUI, must not be able to write it)")
         h.run(["chown", BUILD_USER, art])
         h.log(f"{art} (empty) given to {BUILD_USER}")
-    # useradd makes the home 0750: the service account must pass through it to the drop box and the states
+    # Root owns BUILD_HOME, status/ and requests/: what root writes there is never a link the build account made, and
+    # the service account only passes through (0711) to drop a request (0730, group = its own) or read a state.
+    # The build account's own home is home/ (uv's interpreter store, caches). An older setup made BUILD_HOME the
+    # account's home and gave it status/: taken back.
+    if not h.dry and os.path.isdir(h.p(BUILD_HOME)) and os.stat(h.p(BUILD_HOME)).st_uid != 0:
+        h.run(["chown", "root:root", BUILD_HOME])
+        for sub in ("status", "requests"):
+            if os.path.isdir(h.p(f"{BUILD_HOME}/{sub}")) and os.stat(h.p(f"{BUILD_HOME}/{sub}")).st_uid != 0:
+                shutil.rmtree(h.p(f"{BUILD_HOME}/{sub}"))
+                h.log(f"{BUILD_HOME}/{sub} from an older setup removed (root makes it anew)")
+        h.run(["usermod", "--home", home, BUILD_USER])
+    h.mkdir(BUILD_HOME, 0o711)
     h.run(["chmod", "0711", BUILD_HOME])
-    h.mkdir(f"{BUILD_HOME}/status", 0o755, owner=BUILD_USER)
-    # the service account may drop a file in, never list or read what is there
+    h.mkdir(home, 0o700, owner=BUILD_USER)
+    h.mkdir(f"{BUILD_HOME}/status", 0o755)
     h.mkdir(f"{BUILD_HOME}/requests", 0o730)
     h.run(["chgrp", spec["account"], f"{BUILD_HOME}/requests"])
     h.run(["chmod", "0730", f"{BUILD_HOME}/requests"])

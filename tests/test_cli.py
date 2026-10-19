@@ -248,9 +248,11 @@ def test_prepare_makes_the_easy_state_once(tmp_path, capsys):
     state.mkdir()
     cli.main(["prepare", str(state)])
     assert {p.name: oct(p.stat().st_mode & 0o777) for p in state.iterdir()} == \
-        {"secrets": "0o711", "keys": "0o700", "backups": "0o700"}       # Postgres reads its file by name, lists nothing
+        {"secrets": "0o700", "keys": "0o700", "backups": "0o700"}       # the owner's alone (Postgres reads as root)
+    assert oct(state.stat().st_mode & 0o777) == "0o700"
     secrets = {p.name: p.read_text() for p in (state / "secrets").iterdir()}
     assert set(secrets) == {"db_password", "gateway_secret", "session_key"}
+    assert all(oct(p.stat().st_mode & 0o777) == "0o400" for p in (state / "secrets").iterdir())
     capsys.readouterr()
     cli.main(["prepare", str(state)])                                    # every later `docker compose up`
     assert {p.name: p.read_text() for p in (state / "secrets").iterdir()} == secrets
@@ -276,6 +278,13 @@ def test_prepare_as_root_gives_bind_mounts_to_the_service(tmp_path, monkeypatch)
     assert {"state", "state/secrets", "state/secrets/db_password", "state/keys", "state/backups", "state/escape",
             "logs", "logs/old", "logs/old/router.log"} <= owned and len(owned) == len(calls)
     assert not any(p.startswith("state/escape/") for p in owned)          # the link itself, never what it points to
+
+    def gone(p, u, g):
+        if p.endswith("router.log"):
+            raise FileNotFoundError(2, "rotated meanwhile")                  # the running router moved it: not an error
+    monkeypatch.setattr(cli.os, "lchown", gone)
+    cli.prepare_state(str(state), [str(logs)])
+    assert oct(logs.stat().st_mode & 0o777) == "0o700"
 
     def squashed(p, u, g):
         raise PermissionError(1, "Operation not permitted")

@@ -30,9 +30,10 @@ services:
 
   router:
     image: ${COMFYFARM_IMAGE:-ghcr.io/frozenrainy/comfyfarm}:${COMFYFARM_VERSION:?set COMFYFARM_VERSION in .env (the image tag)}
-    build:
+    build:                              # only for `docker compose build` (an own change); `up` pulls the named tag
       context: ../..
       dockerfile: deploy/Dockerfile
+    pull_policy: missing
     restart: unless-stopped
     depends_on:
       db:

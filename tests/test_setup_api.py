@@ -73,6 +73,18 @@ async def test_setup_from_command_to_worker(farm, tmp_path):
     assert (await c.get(path)).status_code == 404                                  # the token is spent
 
 
+async def test_a_deleted_worker_frees_its_instance_name(farm):
+    """Field: a worker set up with the wrong account was deleted; the same instance name then got 409 forever."""
+    r, c, keys = farm
+    w = (await c.post("/api/admin/workers", json={"name": "gpu one", "base_url": "http://10.0.0.21:8188"}, headers=H)).json()
+    cfg = {"instance": "gpu-1", "hosts": ["10.0.0.21"], "port": 8188, "restart_backend": "manual", "restart_config": {},
+           "paths": spec()["paths"]}
+    assert (await c.put(f"/api/admin/instances/{w['id']}", json=cfg, headers=H)).status_code == 200
+    assert (await c.post("/api/admin/setups", json=spec(), headers=H)).status_code == 409
+    assert (await c.delete(f"/api/admin/workers/{w['id']}", headers=H)).status_code == 200
+    assert (await c.post("/api/admin/setups", json=spec(), headers=H)).status_code == 200
+
+
 async def test_a_failed_host_check_is_kept_and_can_be_rerun(farm, tmp_path):
     r, c, keys = farm
     made = (await c.post("/api/admin/setups", json=spec(), headers=H)).json()

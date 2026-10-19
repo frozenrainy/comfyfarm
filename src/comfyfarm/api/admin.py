@@ -303,8 +303,11 @@ def make_router(ctx: Ctx) -> APIRouter:
     async def delete_worker(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
         ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:     # soft delete: its running jobs become worker_lost (D-06b); name/URL reusable
-            done = await c.fetchval("UPDATE workers SET deleted_at = now(), enabled = false WHERE id = $1 AND deleted_at IS NULL "
-                                    "RETURNING id", worker_id)
+            async with c.transaction():
+                done = await c.fetchval("UPDATE workers SET deleted_at = now(), enabled = false WHERE id = $1 AND deleted_at IS NULL "
+                                        "RETURNING id", worker_id)
+                if done is not None:   # its instance goes with it: the name is free for the host's next setup
+                    await c.execute("DELETE FROM instances WHERE worker_id = $1", worker_id)
         if done is None:
             raise HTTPException(404, "not found")
         return {"deleted": True}

@@ -58,8 +58,15 @@ Open `http://<this host>:8080`: the login page offers to create the administrato
 start until one exists). Optional settings go into a `.env` next to `compose.yaml`: `GATEWAY_PORT`, `ROUTER_PORT`,
 `COMFYFARM_ARTIFACTS_MOUNT`, `COMFYFARM_USER_DIR`, `UI_WORKER_URL`, `COMFYFARM_DEFAULT_GROUP` (as in the strict file).
 Closed network: pull (or `docker compose build`) outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version>
-postgres:17`, and `docker load` it inside next to the repository. Backups: `docker compose exec router comfyfarm backup /state/backups
---user-dir /userdata`, then copy them off the host (`docker compose cp router:/state/backups .`).
+postgres:17`, and `docker load` it inside next to the repository.
+
+The `state` volume holds the secrets, the router's agent key (every worker trusts it) and the backups; `db` the
+ledger. `docker compose down` keeps them, **`docker compose down -v` deletes them** — then every worker must be set up
+again. Upgrade: check out the new release (`git fetch --tags && git checkout v<version>`) and `docker compose up -d`;
+`init` runs again and changes nothing. Backups: `docker compose exec router comfyfarm backup /state/backups`, with
+`--user-dir /userdata` once `COMFYFARM_USER_DIR` in `.env` names the UI worker's user directory on this host (without
+it, that flag would archive an empty placeholder); copy them off the host (`docker compose cp router:/state/backups .`).
+With bind mounts the state directory is the service account's alone (0700): read it as root.
 
 ### Strict
 
@@ -67,7 +74,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.5                                                 # a release tag without the v
+V=0.1.0-dev.6                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
@@ -78,11 +85,12 @@ The published image carries a signed build provenance: `gh attestation verify oc
 
 The control-plane host needs Docker with the Compose v2 plugin (`docker compose version`; tested with Docker 29 and
 Compose 2.40, Ubuntu 24.04's `docker.io` and `docker-compose-v2`), and an ssh server if the UI worker will run on it
-(§2). Carry in the images and the release (the tarball, or a `git clone` of the repository at that version), then:
+(§2). Carry in the images and the repository at that release (`git clone --branch v$V …`, or the tag's source
+archive from GitHub, which unpacks as `comfyfarm-<version>/`), and do the rest as root — the state is root's:
 
 ```sh
-docker load < comfyfarm-images.tar.gz
-sudo tar xzf comfyfarm-<version>.tar.gz -C /opt                # → /opt/comfyfarm; keep it there (upgrades go over it)
+sudo docker load < comfyfarm-images.tar.gz
+sudo mv comfyfarm-$V /opt/comfyfarm                            # keep it there: an upgrade is a checkout in that directory
 sudo install -d -m 700 /srv/comfyfarm/secrets                  # the three secrets, as files (never in .env)
 sudo docker run --rm -u 0 -v /srv/comfyfarm/secrets:/s ghcr.io/frozenrainy/comfyfarm:$V comfyfarm secrets --write /s
 cd /opt/comfyfarm/deploy/compose && sudo cp env.example .env && sudo chmod 600 .env
@@ -92,9 +100,9 @@ sudo editor .env      # COMFYFARM_VERSION=$V; ROUTER_PORT/GATEWAY_PORT as <host-
                       # include the users' workflows (backup.md)
 sudo mkdir -p /srv/comfyfarm/keys /srv/comfyfarm/backups && sudo chown 10001 /srv/comfyfarm/keys /srv/comfyfarm/backups
 sudo chmod 700 /srv/comfyfarm/keys
-docker compose up -d                                          # (the router keeps its agent key and backups there)
-docker compose exec router comfyfarm add-user <you> --admin   # asks for the password (or: the browser, with the
-                                                              # setup code from `docker compose logs router`)
+sudo docker compose up -d                                     # pulls the image named in .env; never builds (pull_policy)
+sudo docker compose exec router comfyfarm add-user <you> --admin   # asks for the password (or: the browser, with the
+                                                                   # setup code from `docker compose logs router`)
 ```
 
 The secrets are mounted into the containers as compose secrets (`/run/secrets/…`, read through `PGPASSWORD_FILE`,
@@ -103,9 +111,9 @@ replaces an existing file: the database password is fixed when Postgres first in
 key logs everyone out. Keep a copy of `/srv/comfyfarm/secrets` and `/srv/comfyfarm/keys` where you keep backups
 (backup.md) — a reinstall needs them.
 
-**Upgrading the control plane**: `docker load` the new images, then unpack the new release **over** the old one
-(`sudo tar xzf comfyfarm-<version>.tar.gz -C /opt`) — never delete `/opt/comfyfarm` first: your `.env` lives there —
-set `COMFYFARM_VERSION` to the new tag and run `docker compose up -d`. Migrations run when the router starts; take a
+**Upgrading the control plane**: `docker load` the new image, check out the new release in `/opt/comfyfarm`
+(`git fetch --tags && git checkout v<version>`, or unpack the new archive and move your `.env` across) — never delete
+the directory with `.env` in it — set `COMFYFARM_VERSION` to the new tag and run `sudo docker compose up -d`. Migrations run when the router starts; take a
 backup before (backup.md). From a release that kept the secrets in `.env`: write each value into its file in
 `/srv/comfyfarm/secrets` (`DB_PASSWORD` → `db_password`, `COMFYFARM_GATEWAY_SECRET` → `gateway_secret`,
 `COMFYFARM_SESSION_KEY` → `session_key`, mode 0444, the directory 0700) and remove the three lines from `.env`.
@@ -187,6 +195,15 @@ says and run the same command again (it is idempotent). When it is green, **Add 
 configures its instance with the ssh restart backend and the pinned host keys, assigns the profile and starts it.
 
 Later: *Check host* on the instance (System → Rollout) and `comfyfarm doctor` run the same check through the agent.
+
+**Set up again** (System → Workers, on the worker's row) runs setup once more for a host that is already a worker:
+after a router upgrade (new worker tools), to change its address, group, profile or service account, or to turn
+*builds from the dashboard* on or off. Its name and instance stay; the last step is *Update the worker*.
+
+**Allow builds from the dashboard on this host** (in *Set up a worker*): the host then builds recipes on request from
+*System → Rollout → Profiles → From a recipe* ([rollouts.md](rollouts.md) §1) — as a separate build account that
+owns the artifact store, never as the service account. It needs internet, git and uv on that host, and an artifact
+store that is empty or already that account's ([design 14](../design/14-worker-setup.md)).
 
 Worker access control: put `COMFYFARM_ALLOW=<control-plane address>` in the profile's environment (with containers
 the control plane talks to other hosts from the host's address). Without it the dashboard shows the worker as

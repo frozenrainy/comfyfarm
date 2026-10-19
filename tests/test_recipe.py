@@ -90,6 +90,51 @@ def test_one_recipe_publishes_a_farm_and_a_second_run_reuses_it(setup):
     assert t3["gpu"]["venv"] == "gv-2" and t3["ui"]["venv"] == "uv-2" and t3["template"] == "test-gpu-3"
 
 
+def test_a_change_that_keeps_every_file_size_is_still_a_change(setup):
+    """tree_sha256 is path+size (contract: change detection); reuse goes by contents."""
+    t = run(setup)
+    assert t["gpu"]["nodes"] == ["farm-gpu-1"]
+    art = setup["art"]
+    m = json.loads((art / "nodes" / "farm-gpu-1" / "manifest.json").read_text())
+    assert len(m["content_sha256"]) == 64 and m["sources"]["SomeNode"]["commit"] == setup["recipe"]["nodes"][0]["commit"]
+    assert json.loads((art / "core" / "comfyui-0.41.0" / "manifest.json").read_text())["source"]["ref"] == "v0.41.0"
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x.invalid", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@x.invalid"}
+    (setup["node"] / "__init__.py").write_text("NODE_CLASS_MAPPINGS = []\n")           # {} → [], same size
+    subprocess.run(["git", "-C", str(setup["node"]), "commit", "-qam", "same size"], check=True, env=git_env)
+    setup["recipe"]["nodes"][0]["commit"] = subprocess.run(["git", "-C", str(setup["node"]), "rev-parse", "HEAD"],
+                                                           capture_output=True, text=True).stdout.strip()
+    (setup["rdir"] / "test-gpu.json").write_text(json.dumps(setup["recipe"]))
+    t2 = run(setup)
+    assert t2["gpu"]["nodes"] == ["farm-gpu-2"] and t2["template"] == "test-gpu-2"
+
+
+def test_a_recipe_is_checked_before_anything_is_fetched_or_built(setup):
+    r = setup["recipe"]
+    bad = [
+        ({"comfyui": {"repo": r["comfyui"]["repo"], "ref": "master"}}, "never a branch"),
+        ({"comfyui": {"repo": "--upload-pack=sh -c id", "ref": "v0.41.0"}}, "comfyui needs repo"),
+        ({"comfyui": {}}, "comfyui needs repo"),
+        ({"gpu": {**r["gpu"], "flags": ["--enable-manager"]}}, "flags the launcher refuses"),
+        ({"gpu": {**r["gpu"], "env": {"LD_PRELOAD": "x"}}}, "environment the launcher refuses"),
+        ({"gpu": {**r["gpu"], "index": "http://plain.invalid/x"}}, "https URL"),
+        ({"nodes": [{**r["nodes"][0], "repo": "-oProxyCommand=x"}]}, "a node needs name, repo"),
+        ({"nodes": [{**r["nodes"][0], "requirements": ["--index-url=https://evil.invalid"]}]}, "requirement lines"),
+    ]
+    for change, why in bad:
+        (setup["rdir"] / "test-gpu.json").write_text(json.dumps({**r, **change}))
+        with pytest.raises(publish.Refused, match=why):
+            run(setup)
+    assert not (setup["art"] / "core").exists() and not setup["built"]
+
+
+def test_templates_of_a_recipe_whose_name_starts_another_are_its_own(setup):
+    run(setup)
+    (setup["rdir"] / "test.json").write_text(json.dumps({**setup["recipe"], "recipe": "test"}))
+    t = publish.publish_recipe(str(setup["art"]), "test", uv=None, recipes=setup["recipes"], ext=ROOT, log=lambda x: None)
+    assert t["template"] == "test-1" and t["gpu"] == run(setup)["gpu"]           # the artifacts are shared, the template not
+
+
 def test_a_core_name_with_other_contents_is_refused(setup):
     d = setup["art"] / "core" / "comfyui-0.41.0"
     d.mkdir(parents=True)
@@ -105,6 +150,8 @@ def test_recipes_must_be_pinned(setup):
     (setup["rdir"] / "test-gpu.json").write_text(json.dumps(setup["recipe"]))
     with pytest.raises(publish.Refused, match="full commit"):
         run(setup)
+    with pytest.raises(publish.Refused, match="recipe x.json"):                  # a name, not a path
+        publish.load_recipe("x.json", setup["recipes"])
 
 
 def test_the_shipped_recipes_load():

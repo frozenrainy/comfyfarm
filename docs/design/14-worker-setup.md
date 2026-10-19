@@ -116,6 +116,19 @@ ComfyUI still cannot write the store (D-37 holds: what the launcher accepts is s
 produced). The store must belong to `comfyfarm-build` (setup hands over an empty one, and stops with the command for
 one with contents); the host needs git and uv in `/usr/local/bin` or `/usr/bin`.
 
+What runs as root (the path unit's service) writes only into directories root owns and the build account cannot:
+`/var/lib/comfyfarm-build` (0711), its `status/` and `requests/`; the build account's own home is `home/` below.
+Files are opened without following links and nothing root creates is handed to the build account — a build account
+that ran something hostile (a wheel's install hook) stays a build account. Anything but a plain file in the drop box
+is removed unread, so the service account cannot wedge the path unit either. The service account *can* request a
+build of any installed recipe at will (the agent runs as it): that is network and CPU on the build host, nothing more.
+
+A recipe is as trusted as code — root installs it — so `recipes/` changes get a code review: repo (https or a local
+path) and ref (a release tag or a full commit, never a branch) are checked at load time, as are flags and
+environment against the launcher's allow-lists; git gets them after `--end-of-options`. Reuse of a published node
+set or release goes by a content hash the publisher records (the contract's `tree_sha256` is path+size — change
+detection, not identity), and the manifests name the commits that went in.
+
 *Set up again* (System → Workers) runs setup once more for an existing worker — the same name and instance, its host
 settings, new worker tools, builds on or off — and ends with *Update the worker* (its instance gets the new settings)
 instead of adding one. The latest setup on a host decides whether that host allows builds.
