@@ -238,9 +238,10 @@ export default {
   "AMD (ROCm)": "AMD (ROCm)", "NVIDIA (CUDA)": "NVIDIA (CUDA)", "Any / not sure": "상관없음 / 모름", "None (CPU only)": "없음 (CPU만)",
   "ComfyFarm checks the driver; it never installs one": "ComfyFarm은 드라이버를 확인만 하고 설치하지 않습니다",
   "Profile to run": "실행할 프로필", "(assign later)": "(나중에 할당)", "ComfyUI port": "ComfyUI 포트", "ssh port": "ssh 포트",
-  "Service account": "서비스 계정",
-  "created by setup; runs ComfyUI; the router's key can only restart, query and check it":
-    "설치가 만듭니다. ComfyUI를 실행하고, 라우터의 키로는 재시작·상태 조회·점검만 할 수 있습니다",
+  "Service account (its own, made by setup)": "서비스 계정 (전용, 설치가 만듦)",
+  "not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it":
+    "본인 로그인 계정이 아닙니다: 설치가 ComfyUI 실행용으로 만들고, 라우터 키(재시작·조회·점검)만 이 계정으로 접속합니다",
+  "your own admin account here, not the service account": "여기는 서비스 계정이 아니라 본인의 관리자 계정입니다",
   "Router address as the worker sees it": "워커가 보는 라우터 주소",
   "Artifact store <ART> (same path on every host)": "아티팩트 저장소 <ART> (모든 호스트에서 같은 경로)",
   "Local root <LOCAL> (this host's disk)": "로컬 루트 <LOCAL> (이 호스트의 디스크)",
@@ -260,7 +261,7 @@ export default {
   "Copied": "복사했습니다",
   "It downloads the setup script from the router, checks it against this checksum and runs it with sudo. The router never holds root on the host. Valid for 2 hours.":
     "라우터에서 설치 스크립트를 받아 이 체크섬과 맞는지 확인한 뒤 sudo로 실행합니다. 라우터는 호스트의 root 권한을 갖지 않습니다. 2시간 동안 유효합니다.",
-  "Account on the host (may use sudo)": "호스트 계정 (sudo 가능)", "Log in and run": "로그인해서 실행",
+  "Your admin account on the host (may use sudo)": "호스트의 본인 관리자 계정 (sudo 가능)", "Log in and run": "로그인해서 실행",
   "account and password, please": "계정과 비밀번호를 입력하세요",
   "The router logs in with this account and runs the same script with sudo. The password is used for this run only: it is not stored, logged or shown again. While setup runs, the router has root on this host.":
     "라우터가 이 계정으로 로그인해 같은 스크립트를 sudo로 실행합니다. 비밀번호는 이번 실행에만 쓰고 저장·기록·재표시하지 않습니다. 설치가 도는 동안 라우터가 이 호스트의 root 권한을 갖습니다.",

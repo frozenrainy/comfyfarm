@@ -169,3 +169,53 @@ def test_a_mount_point_the_site_already_mounted_is_left_alone(tmp_path):
     res = ws.setup(payload(), h)
     assert res["ok"] and "nas:/export/farm" not in (root / "etc/fstab").read_text()
     assert not rec.ran("mount", "/mnt/farm") and any("already mounted" in m for m in h.done)
+
+
+def test_a_persons_login_account_is_refused_before_anything_changes(tmp_path, monkeypatch):
+    """Field report: the operator's own login account typed as the service account. Setup would have replaced that
+    account's authorized_keys with the router's forced-command key (locking the person out) and given the router a
+    sudo-capable identity. Refused — by home, and by sudo group — before the first change."""
+    import grp
+    import pwd
+    root = fake_root(tmp_path)
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 1000, 1000, "", "/home/alice", "/bin/bash")))
+    rec = Recorder()
+    res = ws.setup(payload(account="alice", uid=None), ws.Host(root=str(root), run=rec))
+    assert not res["ok"] and "login account" in res["error"] and "comfyfarm" in res["error"]
+    assert not rec.ran("useradd") and not rec.ran("usermod") and not (root / "home").exists() and not (root / "var").exists()
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 47800, 47800, "", "/var/lib/ops", "/bin/sh")))
+    real_getgrnam = grp.getgrnam
+    monkeypatch.setattr(grp, "getgrnam", lambda g: grp.struct_group(("sudo", "x", 27, ["ops"])) if g == "sudo" else real_getgrnam(g))
+    res = ws.setup(payload(account="ops", uid=47800), ws.Host(root=str(fake_root(tmp_path / "b")), run=Recorder()))
+    assert not res["ok"] and "sudo" in res["error"]
+
+
+def test_an_existing_service_account_keeps_its_own_home(tmp_path, monkeypatch):
+    import pwd
+    root = fake_root(tmp_path)
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: pwd.struct_passwd((n, "x", 47800, 47800, "", "/srv/cf", "/bin/sh")))
+    res = ws.setup(payload(uid=47800), ws.Host(root=str(root), run=Recorder()))
+    assert res["ok"], res
+    assert (root / "srv" / "cf" / ".ssh" / "authorized_keys").read_text().startswith(ws.MARK)   # where sshd looks
+    assert not (root / "var" / "lib" / "comfyfarm" / ".ssh").exists()
+
+
+def test_keys_setup_did_not_write_are_never_replaced(tmp_path):
+    root = fake_root(tmp_path)
+    keys = root / "var" / "lib" / "comfyfarm" / ".ssh" / "authorized_keys"
+    keys.parent.mkdir(parents=True)
+    keys.write_text("ssh-ed25519 AAAAsomeonesownkey me@laptop\n")
+    res = ws.setup(payload(), ws.Host(root=str(root), run=Recorder()))
+    assert not res["ok"] and "did not write" in res["error"]
+    assert keys.read_text() == "ssh-ed25519 AAAAsomeonesownkey me@laptop\n"
+
+
+def test_a_unit_in_the_accounts_home_that_would_shadow_setups_is_named(tmp_path):
+    """Field report: an older manual install's ~/.config/systemd/user/comfyfarm@.service won over /etc/systemd/user."""
+    root = fake_root(tmp_path)
+    own = root / "var" / "lib" / "comfyfarm" / ".config" / "systemd" / "user" / "comfyfarm@.service"
+    own.parent.mkdir(parents=True)
+    own.write_text("[Service]\n")
+    res = ws.setup(payload(), ws.Host(root=str(root), run=Recorder()))
+    assert not res["ok"] and "take the place" in res["error"]

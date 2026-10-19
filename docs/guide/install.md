@@ -67,7 +67,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.2                                                 # a release tag without the v
+V=0.1.0-dev.3                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
@@ -151,6 +151,11 @@ host-checked and rolled out with the others, so its ComfyUI and frontend follow 
 What a worker host needs before setup: Linux with systemd, Python ≥ 3.10, an ssh server, the GPU driver (ComfyFarm checks
 it, never installs it), the system libraries the GPU wheels load (ROCm PyTorch: `libatomic1`; the host check names any
 that is missing), and — for NFS mounts written by setup — `nfs-common`. Everything else comes from the router.
+
+The service account is its own: keep the default `comfyfarm` and setup creates it. It runs ComfyUI, and its
+`authorized_keys` holds only the router's restart key — setup refuses a person's login account (home under `/home`,
+sudo rights), never replaces keys it did not write, and stops if a unit in that account's home would take the place
+of the one it installs. The admin account you type for *Let the router log in once* is a different one: yours.
 
 The shared directories (`input`, `output`, `user` on the NAS) must be writable by the service account's uid — the same
 uid on every host (setup's *Service account uid*, default 47800): `chown 47800` them on the NAS once, or the host check

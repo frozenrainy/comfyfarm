@@ -139,6 +139,8 @@ else:
 async def test_router_runs_setup_over_ssh_without_keeping_the_password(farm, fake_ssh):
     r, c, keys = farm
     made = (await c.post("/api/admin/setups", json=spec(), headers=H)).json()
+    same = await c.post(f"/api/admin/setups/{made['id']}/ssh", json={"user": "comfyfarm", "password": "x"}, headers=H)
+    assert same.status_code == 400 and "service account" in same.json()["detail"]   # the login account is the operator's
     assert (await c.post(f"/api/admin/setups/{made['id']}/ssh", json={"user": "-oProxyCommand", "password": "x"},
                          headers=H)).status_code == 400
     resp = await c.post(f"/api/admin/setups/{made['id']}/ssh", json={"user": "ops", "password": "s3cret-pw"}, headers=H)

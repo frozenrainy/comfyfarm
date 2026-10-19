@@ -33,7 +33,7 @@ export async function setupWorker(refresh) {
     const s = open.find((x) => `continue:${x.id}` === pickRole.role);
     const made = s.status === "reported" ? { id: s.id, command: null }
       : await act(() => api("POST", `/api/admin/setups/${s.id}/renew`));
-    if (made) runSetup({ ...made, instance: s.spec.instance }, refresh);
+    if (made) runSetup({ ...made, instance: s.spec.instance, account: s.spec.account }, refresh);
     return;
   }
   const ui = pickRole.role === "ui";
@@ -62,8 +62,8 @@ export async function setupWorker(refresh) {
     { name: "port", label: t("ComfyUI port"), type: "number", value: ui ? 8189 : 8188,
       hint: ui ? t("not 8188 when it shares the host with the router") : "" },
     { name: "ssh_port", label: t("ssh port"), type: "number", value: 22 },
-    { name: "account", label: t("Service account"), value: last?.account ?? "comfyfarm",
-      hint: t("created by setup; runs ComfyUI; the router's key can only restart, query and check it") },
+    { name: "account", label: t("Service account (its own, made by setup)"), value: last?.account ?? "comfyfarm",
+      hint: t("not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it") },
     { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
       hint: t("the same number on every host: shared storage checks numbers, not names") },
     { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188",
@@ -87,7 +87,7 @@ export async function setupWorker(refresh) {
     }),
   };
   const made = await act(() => api("POST", "/api/admin/setups", body));
-  if (made) runSetup({ ...made, instance: inst }, refresh);
+  if (made) runSetup({ ...made, instance: inst, account: body.account }, refresh);
 }
 
 // Step 2: get root on the host — the operator picks the way; then watch the report come in.
@@ -104,6 +104,7 @@ function runSetup(made, refresh) {
   const pw = h("input", { type: "password", autocomplete: "new-password" });
   const runSsh = button(t("Log in and run"), async () => {
     if (!user.value || !pw.value) return toast(t("account and password, please"), true);
+    if (made.account && user.value.trim() === made.account) return toast(t("your own admin account here, not the service account"), true);
     const r = await act(() => api("POST", `/api/admin/setups/${made.id}/ssh`, { user: user.value.trim(), password: pw.value }));
     pw.value = "";                                           // not kept in the page either
     if (r) poll();
@@ -112,7 +113,7 @@ function runSetup(made, refresh) {
     h("p", {}, t("On the new host, as a user who may use sudo, run:")), cmd, h("div", {}, copy),
     h("p", { class: "muted small" }, t("It downloads the setup script from the router, checks it against this checksum and runs it with sudo. The router never holds root on the host. Valid for 2 hours.")));
   const paneSsh = h("div", { class: "stack", hidden: true },
-    h("div", { class: "field" }, h("div", { class: "label" }, t("Account on the host (may use sudo)")), user),
+    h("div", { class: "field" }, h("div", { class: "label" }, t("Your admin account on the host (may use sudo)")), user),
     h("div", { class: "field" }, h("div", { class: "label" }, t("Password")), pw),
     h("p", { class: "muted small" }, t("The router logs in with this account and runs the same script with sudo. The password is used for this run only: it is not stored, logged or shown again. While setup runs, the router has root on this host.")),
     h("div", {}, runSsh));

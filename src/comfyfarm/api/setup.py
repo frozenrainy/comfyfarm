@@ -192,6 +192,9 @@ def make_router(ctx: Ctx) -> APIRouter:
                 r = await c.fetchrow("SELECT * FROM worker_setups WHERE id = $1 FOR UPDATE", sid)
                 if r is None:
                     raise HTTPException(404, "no such setup")
+                if body.user == r["spec"]["account"]:
+                    raise HTTPException(400, "log in with your own admin account, not the service account "
+                                             f"{body.user!r} (setup creates that one for ComfyUI)")
                 if r["status"] not in ("waiting", "failed") or r["expires_at"] < dt.datetime.now(dt.timezone.utc):
                     raise HTTPException(409, f"this setup is {r['status']}" + (" (expired)" if r["status"] == "waiting" else ""))
                 await c.execute("UPDATE worker_setups SET mode = 'ssh', status = 'running', log = '' WHERE id = $1", sid)

@@ -170,12 +170,38 @@ def preconditions(h: Host):
         raise Failed("no ssh server: install openssh-server (the router restarts and checks the worker over ssh)")
 
 
+ADMIN_GROUPS = ("sudo", "wheel", "admin")
+
+
+def person_account(pw) -> str | None:
+    """Why an existing account cannot be the service account (None: it can). The service account runs ComfyUI and gets
+    a root-owned authorized_keys holding only the router's forced-command key: a person's login account would lose its
+    own keys, and the router would act as someone who may use sudo."""
+    if pw.pw_uid == 0:
+        return "root"
+    if pw.pw_dir == "/root" or pw.pw_dir.startswith("/home/"):
+        return f"a person's login account (home {pw.pw_dir})"
+    for g in ADMIN_GROUPS:
+        try:
+            gr = grp.getgrnam(g)
+        except KeyError:
+            continue
+        if pw.pw_name in gr.gr_mem or pw.pw_gid == gr.gr_gid:
+            return f"allowed to use sudo (group {g})"
+    return None
+
+
 def account(h: Host, spec: dict):
-    user, home, uid = spec["account"], spec.get("home") or f"/var/lib/{spec['account']}", spec.get("uid")
+    user, uid = spec["account"], spec.get("uid")
     try:
-        have = pwd.getpwnam(user).pw_uid
+        pw = pwd.getpwnam(user)
     except KeyError:
-        have = None
+        pw = None
+    if pw is not None and (why := person_account(pw)):
+        raise Failed(f"{user} is {why} — the service account must be its own: it runs ComfyUI and only the router's "
+                     "restart key logs in as it. Keep the default 'comfyfarm' (setup creates it) or name an unused account")
+    home = pw.pw_dir if pw is not None else spec.get("home") or f"/var/lib/{user}"    # an existing account: its own home
+    have = pw.pw_uid if pw is not None else None
     if have is not None and uid is not None and have != uid:
         raise Failed(f"account {user} exists with uid {have}, setup asks for {uid}: shared storage needs the same uid on "
                      "every host — change the uid in the setup, or the account on this host")
@@ -213,6 +239,10 @@ def tools(h: Host, files: dict, version: str):
 
 
 def configure(h: Host, spec: dict, home: str):
+    own = f"{home}/.config/systemd/user/comfyfarm@.service"
+    if os.path.exists(h.p(own)):
+        raise Failed(f"{own} would take the place of the unit setup installs (/etc/systemd/user) — remove it "
+                     "(left from a manual install?) and run setup again")
     inst, user = spec["instance"], spec["account"]
     paths = spec.get("paths", {})
     h.mkdir(ETC)
@@ -281,6 +311,10 @@ def ssh_access(h: Host, spec: dict, home: str):
         raise Failed("the router's agent key is missing or not an ed25519 public key")
     forced = (f'command="/usr/bin/python3 {TOOLS}/agent.py ssh",no-port-forwarding,no-pty,no-agent-forwarding,'
               f"no-X11-forwarding,no-user-rc {key}")
+    path = f"{home}/.ssh/authorized_keys"
+    if os.path.exists(h.p(path)) and MARK not in h.read(path):
+        raise Failed(f"{path} holds keys ComfyFarm did not write — not replaced. The service account must be its own "
+                     "(keep 'comfyfarm'); if this one is, move those keys away and run setup again")
     # root-owned: the account (and so the router) cannot add keys or lift the forced command
     h.mkdir(f"{home}/.ssh", 0o755)
     h.write(f"{home}/.ssh/authorized_keys", f"{MARK}\n{forced}\n", 0o644)
