@@ -255,3 +255,30 @@ def test_prepare_makes_the_easy_state_once(tmp_path, capsys):
     cli.main(["prepare", str(state)])                                    # every later `docker compose up`
     assert {p.name: p.read_text() for p in (state / "secrets").iterdir()} == secrets
     assert "nothing changed" in capsys.readouterr().out
+
+
+def test_prepare_as_root_gives_bind_mounts_to_the_service(tmp_path, monkeypatch):
+    """A bind mount (./state, ./logs) is created by Docker as root: the easy init (root) hands it over, recursively,
+    without following links out of it; not as root it changes no owner."""
+    state, logs = tmp_path / "state", tmp_path / "logs"
+    state.mkdir()
+    (logs / "old").mkdir(parents=True)
+    (logs / "old" / "router.log").write_text("")
+    (state / "escape").symlink_to("/etc")
+    calls = []
+    monkeypatch.setattr(cli.os, "lchown", lambda p, u, g: calls.append((os.path.relpath(p, tmp_path), u, g)))
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 1000)
+    cli.prepare_state(str(state), [str(logs)])
+    assert calls == []
+    monkeypatch.setattr(cli.os, "geteuid", lambda: 0)
+    cli.prepare_state(str(state), [str(logs)])
+    owned = {p for p, u, g in calls if (u, g) == cli.SERVICE_OWNER}
+    assert {"state", "state/secrets", "state/secrets/db_password", "state/keys", "state/backups", "state/escape",
+            "logs", "logs/old", "logs/old/router.log"} <= owned and len(owned) == len(calls)
+    assert not any(p.startswith("state/escape/") for p in owned)          # the link itself, never what it points to
+
+    def squashed(p, u, g):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(cli.os, "lchown", squashed)
+    with pytest.raises(SystemExit, match="root_squash"):
+        cli.prepare_state(str(state))

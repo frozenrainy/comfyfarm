@@ -42,7 +42,9 @@ docker compose up -d                                   # pulls the release image
 docker compose logs router | grep "setup code"
 ```
 
-Open `http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
+Bind mounts instead of the volumes (`./state:/state`, `./db:/var/lib/postgresql/data`, `./logs:/var/log/comfyfarm`)
+work as they are: `init` gives `./state` and `./logs` to the image's account (uid 10001) on every start. Open
+`http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
 start until one exists). Optional settings go into a `.env` next to `compose.yaml`: `GATEWAY_PORT`, `ROUTER_PORT`,
 `COMFYFARM_ARTIFACTS_MOUNT`, `COMFYFARM_USER_DIR`, `UI_WORKER_URL`, `COMFYFARM_DEFAULT_GROUP` (as in the strict file).
 Closed network: pull (or `docker compose build`) outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version>
@@ -55,7 +57,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.1                                                 # a release tag without the v
+V=0.1.0-dev.2                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz

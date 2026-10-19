@@ -6,7 +6,7 @@
   comfyfarm backup <dir> [--user-dir PATH] [--pg-bin DIR]              ledger dump + user data + artifact list
   comfyfarm restore <backup-dir> --yes [--user-dir PATH] [--pg-bin DIR]
   comfyfarm doctor [--ui URL]                                          health of ledger, workers, groups, storage, disk
-  comfyfarm prepare <state-dir>                                        easy deployment: secrets/, keys/, backups/ in one
+  comfyfarm prepare <state-dir> [--chown DIR]                          easy deployment: secrets/, keys/, backups/ in one
                                                                        directory (made once, kept on every later run)
   comfyfarm secrets [--write DIR]                                      fresh gateway secret and session key (--write: also a
                                                                        database password, as files for compose secrets)
@@ -234,10 +234,26 @@ def write_secret_files(directory: str) -> list[str]:
     return written
 
 
-def prepare_state(root: str) -> list[str]:
-    """The easy deployment's state directory (a volume): secrets/ (0711 — Postgres, another user, reads its file by
-    name; nobody can list it), keys/ and backups/ (0700). Run by the compose `init` service as the image's user before
-    anything else starts; idempotent."""
+SERVICE_OWNER = (10001, 10001)               # the image's account (deploy/Dockerfile)
+
+
+def give_to_service(paths: list[str], owner: tuple[int, int] = SERVICE_OWNER) -> None:
+    """Run as root (the easy `init`): hand the directories the service writes to its account, recursively. A bind
+    mount (./state instead of a named volume) is created by Docker as root, so the service could not write there."""
+    for top in paths:
+        for path in [top] + [os.path.join(d, n) for d, dirs, files in os.walk(top) for n in dirs + files]:
+            try:
+                os.lchown(path, *owner)
+            except PermissionError:
+                sys.exit(f"cannot give {path} to uid {owner[0]} (an NFS export with root_squash?) — "
+                         f"chown -R {owner[0]}:{owner[1]} it where it is stored, or use a Docker volume")
+
+
+def prepare_state(root: str, chown: list[str] = ()) -> list[str]:
+    """The easy deployment's state directory (a volume or a bind mount): secrets/ (0711 — Postgres, another user,
+    reads its file by name; nobody can list it), keys/ and backups/ (0700). Run by the compose `init` service before
+    anything else starts; idempotent. As root it also gives the state and `chown` directories (the logs) to the
+    service's account — then a bind mount works as well as a named volume."""
     made = []
     for sub, mode in (("secrets", 0o711), ("keys", 0o700), ("backups", 0o700)):
         path = os.path.join(root, sub)
@@ -246,6 +262,8 @@ def prepare_state(root: str) -> list[str]:
             made.append(sub + "/")
         os.chmod(path, mode)
     made += ["secrets/" + n for n in write_secret_files(os.path.join(root, "secrets"))]
+    if os.geteuid() == 0:
+        give_to_service([root, *chown])
     return made
 
 
@@ -277,13 +295,15 @@ def main(argv=None):
     d.add_argument("--pg-bin")
     pr = sub.add_parser("prepare", help="easy deployment: make the state directory (secrets, keys, backups) once")
     pr.add_argument("dir")
+    pr.add_argument("--chown", action="append", default=[], metavar="DIR",
+                    help="as root: also give DIR (recursively) to the service account, e.g. the log directory")
     sc = sub.add_parser("secrets", help="print a fresh COMFYFARM_GATEWAY_SECRET and COMFYFARM_SESSION_KEY")
     sc.add_argument("--write", metavar="DIR", help="write db_password, gateway_secret and session_key into DIR instead "
                                                    "(files for compose secrets; existing files are kept)")
     args = ap.parse_args(argv)
 
     if args.cmd == "prepare":
-        made = prepare_state(args.dir)
+        made = prepare_state(args.dir, args.chown)
         print("state: " + (", ".join(made) + " made" if made else "already prepared, nothing changed"))
         return
     if args.cmd == "secrets":

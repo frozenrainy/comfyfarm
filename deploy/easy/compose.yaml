@@ -13,14 +13,18 @@ name: comfyfarm
 
 services:
   init:                                     # makes /state once (secrets, keys, backups) and exits; never changes it
-    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.1}
+    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.2}
     build: &build                           # only for `docker compose build` (a change of your own, a closed network)
       context: ../..
       dockerfile: deploy/Dockerfile
     pull_policy: missing
-    command: ["comfyfarm", "prepare", "/state"]
+    # root for these seconds only: a bind mount (./state, ./logs instead of the volumes below) is created by Docker as
+    # root; init gives it to the image's account (uid 10001) — every other service runs as that account
+    user: "0:0"
+    command: ["comfyfarm", "prepare", "/state", "--chown", "/var/log/comfyfarm"]
     volumes:
       - state:/state
+      - logs:/var/log/comfyfarm
     restart: "no"
 
   db:
@@ -42,7 +46,7 @@ services:
       retries: 20
 
   router:
-    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.1}
+    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.2}
     build: *build
     pull_policy: missing
     restart: unless-stopped
@@ -65,7 +69,7 @@ services:
       - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # optional: the UI worker's user directory (backups)
 
   gateway:
-    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.1}
+    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.2}
     build: *build
     pull_policy: missing
     restart: unless-stopped
