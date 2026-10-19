@@ -42,9 +42,19 @@ docker compose up -d                                   # pulls the release image
 docker compose logs router | grep "setup code"
 ```
 
-Bind mounts instead of the volumes (`./state:/state`, `./db:/var/lib/postgresql/data`, `./logs:/var/log/comfyfarm`)
-work as they are: `init` gives `./state` and `./logs` to the image's account (uid 10001) on every start. Open
-`http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
+Bind mounts instead of the volumes work as they are: `init` gives `./state` and `./logs` to the image's account
+(uid 10001) on every start. Put them into `compose.override.yaml` next to `compose.yaml` rather than editing it —
+compose merges the two (by mount target), and an upgrade is then just the new `compose.yaml`:
+
+```yaml
+services:
+  init:    { volumes: ["./state:/state", "./logs:/var/log/comfyfarm"] }
+  db:      { volumes: ["./db:/var/lib/postgresql/data", "./state:/state:ro"] }
+  router:  { volumes: ["./state:/state", "./logs:/var/log/comfyfarm"] }
+  gateway: { volumes: ["./state:/state:ro", "./logs:/var/log/comfyfarm"] }
+```
+
+Open `http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
 start until one exists). Optional settings go into a `.env` next to `compose.yaml`: `GATEWAY_PORT`, `ROUTER_PORT`,
 `COMFYFARM_ARTIFACTS_MOUNT`, `COMFYFARM_USER_DIR`, `UI_WORKER_URL`, `COMFYFARM_DEFAULT_GROUP` (as in the strict file).
 Closed network: pull (or `docker compose build`) outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version>
