@@ -118,6 +118,20 @@ class Check:
         elif not found and want == "any":
             self.add(WARN, "GPU", "no GPU found — this host can only run ComfyUI on the CPU")
 
+    def builds(self):
+        """Builds from the dashboard, if setup allowed them here: the recipes root installed (the only ones the router
+        may name)."""
+        try:
+            allowed = read_env(self.p("/etc/comfyfarm/agent.env")).get("COMFYFARM_AGENT_BUILD") == "1"
+        except OSError:
+            return
+        if not allowed:
+            return
+        d = self.p("/opt/comfyfarm/worker/recipes")
+        names = sorted(n[:-5] for n in os.listdir(d) if n.endswith(".json")) if os.path.isdir(d) else []
+        self.add(OK if names else WARN, "builds", "from the dashboard: " + (", ".join(names) if names else
+                 "allowed, but no recipe is installed — run setup again") + " (built as comfyfarm-build)", recipes=names)
+
     def recipes(self, art: str):
         """Profile templates that `publish.py recipe` left in the store: the dashboard makes profiles from them."""
         templates = []
@@ -275,7 +289,7 @@ class Check:
                      + (f" — missing {', '.join(missing)}" if missing else ""))
 
     def run(self) -> list[dict]:
-        for step in (self.system, self.groups, self.gpu, self.paths, self.venvs, self.time_and_network):
+        for step in (self.system, self.groups, self.gpu, self.paths, self.venvs, self.builds, self.time_and_network):
             try:
                 step()
             except Exception as e:                                       # noqa: BLE001 — one broken check is a finding

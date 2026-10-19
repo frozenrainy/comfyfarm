@@ -57,6 +57,11 @@ class Backend:
         no agent to ask. Raises BackendError when the agent could not be asked."""
         return None
 
+    async def build(self, recipe: str, state: bool = False) -> dict | None:
+        """Builds from the dashboard (build.py): ask for one (state=False) or read its state; None without an agent.
+        The agent refuses unless setup allowed builds on that host, and takes only recipes root installed there."""
+        return None
+
 
 class Manual(Backend):
     """The dashboard asks an operator to restart the instance and waits (default 30 minutes) to see it happen."""
@@ -143,6 +148,19 @@ class Ssh(Backend):
     async def check(self, instance):
         rc, out = await _run(self.argv("check", instance), timeout=240)
         return _parse_check(rc, out)
+
+    async def build(self, recipe, state=False):
+        if not SSH_USER.match(recipe):
+            raise BackendError(f"bad recipe name {recipe!r}")
+        rc, out = await _run(self.argv("build-status" if state else "build", recipe))
+        if rc != 0:
+            raise BackendError(out.strip()[-300:] or f"the agent answered {rc}")
+        if state:
+            try:
+                return json.loads(out)
+            except ValueError:
+                raise BackendError(f"the agent's build state is not JSON: {out[-200:]}")
+        return {"requested": True, "detail": out.strip()[-300:]}
 
 
 def _is_ip(host: str) -> bool:

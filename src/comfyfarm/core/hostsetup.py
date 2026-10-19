@@ -54,10 +54,42 @@ def tool_files() -> dict[str, str]:
     return {name: base64.b64encode(pkg.joinpath(name).read_bytes()).decode() for name in TOOLS}
 
 
+SHARE = ("recipes", "worker_ext/comfyfarm_worker", "ui_ext/comfyfarm_ui")
+
+
+def share_dir() -> str:
+    """recipes/, worker_ext/, ui_ext/ — beside the package in a checkout, /opt/comfyfarm/share in the image."""
+    for d in (os.environ.get("COMFYFARM_SHARE_DIR"), "/opt/comfyfarm/share",
+              os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")):
+        if d and all(os.path.isdir(os.path.join(d, s)) for s in SHARE):
+            return os.path.abspath(d)
+    raise SetupError("the router has no recipes and extensions to send (COMFYFARM_SHARE_DIR) — builds from the "
+                     "dashboard cannot be set up with this installation")
+
+
+def build_files() -> dict[str, str]:
+    """What a host that allows builds from the dashboard gets besides the worker tools (worker_setup.builds)."""
+    pkg = resources.files("comfyfarm")
+    out = {name: base64.b64encode(pkg.joinpath(name).read_bytes()).decode() for name in ("publish.py", "build.py")}
+    root = share_dir()
+    for sub in SHARE:
+        for d, dirs, names in os.walk(os.path.join(root, sub)):
+            dirs[:] = sorted(x for x in dirs if not x.startswith(".") and x != "__pycache__")
+            for n in sorted(names):
+                if n.startswith(".") or n.endswith(".pyc"):
+                    continue
+                full = os.path.join(d, n)
+                with open(full, "rb") as f:
+                    out[os.path.relpath(full, root)] = base64.b64encode(f.read()).decode()
+    return out
+
+
 def build_script(spec: dict, report_url: str, version: str) -> tuple[str, str]:
     """The setup script with its parameters and the worker tools of this router version. Returns (text, sha256)."""
     src = resources.files("comfyfarm").joinpath("worker_setup.py").read_text()
     payload = {"spec": spec, "files": tool_files(), "report_url": report_url, "version": version}
+    if spec.get("builds"):
+        payload["build_files"] = build_files()
     blob = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
     text, n = PAYLOAD_LINE.subn(f'PAYLOAD = json.loads(base64.b64decode("{blob}").decode())', src, count=1)
     if n != 1:

@@ -101,6 +101,25 @@ clears the user-id mapping, since ComfyUI's user ids belong to one instance). It
 `comfyfarm_worker`: stock `--multi-user` has no login, so the allow-list is what keeps users from reading each other's
 workflows by talking to it directly.
 
+## Builds from the dashboard (opt-in) and setting a worker up again
+
+Publishing (`publish.py recipe`) is an operator's command on a host with internet. Where the operator wants a button
+instead, setup offers *Allow builds from the dashboard on this host*. It installs, root-owned, `publish.py`, `build.py`,
+the recipes and the two extensions of this router version; creates `comfyfarm-build`, which owns the artifact store
+and runs the builds; a drop box (`/var/lib/comfyfarm-build/requests`, group = the service account, 0730: it may add
+a file, never list one); and `comfyfarm-build.path` → `comfyfarm-build.service` (root), which takes each file, refuses
+any name that is not an installed recipe and runs `publish.py recipe` as `comfyfarm-build`. The agent gains
+`build <recipe>` / `build-status <recipe>` only there (`COMFYFARM_AGENT_BUILD=1`).
+
+So the router can *name* a recipe root installed — never send one, never a path — and the service account that runs
+ComfyUI still cannot write the store (D-37 holds: what the launcher accepts is still only what root's recipes
+produced). The store must belong to `comfyfarm-build` (setup hands over an empty one, and stops with the command for
+one with contents); the host needs git and uv in `/usr/local/bin` or `/usr/bin`.
+
+*Set up again* (System → Workers) runs setup once more for an existing worker — the same name and instance, its host
+settings, new worker tools, builds on or off — and ends with *Update the worker* (its instance gets the new settings)
+instead of adding one. The latest setup on a host decides whether that host allows builds.
+
 ## Venvs carry their interpreter (D-42)
 
 A venv built by `uv venv` points `bin/python` at uv's interpreter store in the builder's home — the artifact then works

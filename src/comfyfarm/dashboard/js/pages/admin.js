@@ -1,6 +1,6 @@
 // System administration: workers, groups, users, statistics (admins only; the router enforces it as well).
 import { TZ, act, api, button, dailyChart, dur, formDialog, h, hours, namedRow, noteInput, periodPicker, pill, progressOf,
-         qs, setPill, setText, statCards, syncNote, syncRows, t, table, when } from "../core.js";
+         qs, setPill, setText, statCards, syncNote, syncRows, t, table, toast, when } from "../core.js";
 import { locale } from "../i18n.js";
 import { rollout } from "./rollout.js";
 import { setupWorker } from "./setup.js";
@@ -111,7 +111,12 @@ function workers(root, { refresh }) {
       if (!confirm(w.job ? t("Delete {name}? Its running job will be reported as lost.", w) : t("Delete {name}?", w))) return;
       act(() => api("DELETE", `/api/admin/workers/${id()}`), t("Deleted"), refresh);
     }, { cls: "danger" });
-    tr.c.actions.append(tr.maint, tr.enable, edit, del);
+    const again = button(t("Set up again"), async () => {
+      const s = (await api("GET", "/api/admin/setups")).find((x) => x.worker_id === id() && x.status === "finished");
+      if (!s) return toast(t("this worker was not set up from the dashboard — Set up a worker, with another name"), true);
+      setupWorker(refresh, { worker_id: id(), spec: s.spec, extra: s.extra });
+    });
+    tr.c.actions.append(tr.maint, tr.enable, again, edit, del);
     return tr;
   }
   function update(tr, w) {

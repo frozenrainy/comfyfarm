@@ -1,5 +1,6 @@
 """Restart agent for a worker host (contract §6): the only things the router may ask a host are `restart <instance>`,
-`status <instance>` and `check <instance>` (the read-only host check, docs/design/14). Standard library only —
+`status <instance>` and `check <instance>` (the read-only host check, docs/design/14) — and, only where setup allowed
+builds from the dashboard, `build <recipe>` / `build-status <recipe>` (build.py: a request by name). Standard library only —
 installed by worker setup into /opt/comfyfarm/worker/ (root-owned: the router cannot replace it, D-40).
 
 SSH forced command (backend `ssh`): in ~/.ssh/authorized_keys of the service account
@@ -12,6 +13,7 @@ Configuration (environment, else /etc/comfyfarm/agent.env — a forced command c
   COMFYFARM_AGENT_INSTANCES   comma-separated instances this host serves (anything else is refused)
   COMFYFARM_AGENT_UNIT        systemd unit template, default comfyfarm@{instance}
   COMFYFARM_AGENT_USER        1 = user units (systemctl --user; enable lingering for the account)
+  COMFYFARM_AGENT_BUILD       1 = setup allowed builds from the dashboard on this host
 """
 from __future__ import annotations
 
@@ -71,6 +73,17 @@ def systemctl(*args: str) -> subprocess.CompletedProcess:
 
 def do(verb: str, instance: str) -> tuple[int, str]:
     """(exit code, output). restart: delivery only — the router watches the worker go down and come back."""
+    if verb in ("build", "build-status"):            # the second word is a recipe name here
+        if setting("COMFYFARM_AGENT_BUILD") != "1":
+            raise Refused("builds from the dashboard are not allowed on this host (worker setup decides)")
+        try:
+            from . import build as b
+        except ImportError:                          # run as a copied single file next to build.py
+            import build as b                        # type: ignore
+        try:
+            return (0, b.request(instance)) if verb == "build" else (0, json.dumps(b.status(instance)))
+        except (ValueError, OSError) as e:
+            raise Refused(str(e))
     u = unit(instance)
     if verb == "restart":
         p = systemctl("restart", "--no-block", u)
@@ -92,7 +105,7 @@ def ssh_main() -> int:
     words = os.environ.get("SSH_ORIGINAL_COMMAND", "").split()
     try:
         if len(words) != 2:
-            raise Refused("expected: restart|status|check <instance>")
+            raise Refused("expected: restart|status|check <instance>, or build|build-status <recipe>")
         rc, out = do(words[0], words[1])
     except Refused as e:
         print(f"refused: {e}", file=sys.stderr)

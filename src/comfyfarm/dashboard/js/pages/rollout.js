@@ -156,7 +156,18 @@ export function rollout(root, { refresh }) {
     if (!r) return;
     const line = (r.check || []).find((x) => x.name === "recipes");
     const templates = line?.templates || [];
-    if (!templates.length) return toast(line ? line.detail : t("this worker's tools are older than recipes — run its setup again"), true);
+    const buildable = (r.check || []).find((x) => x.name === "builds")?.recipes || [];
+    if (!templates.length && !buildable.length) {
+      return toast(line ? line.detail : t("this worker's tools are older than recipes — Set up again (System → Workers)"), true);
+    }
+    if (!templates.length) {                               // nothing published yet: build first, then come back here
+      const b = await formDialog(t("Build a recipe on {name}", { name: via.worker }), [
+        { name: "recipe", label: t("Recipe"), type: "select", value: buildable[0], options: buildable.map((x) => ({ value: x, label: x })),
+          hint: t("the host downloads ComfyUI, PyTorch and the nodes and publishes them to its artifact store — minutes, mostly the PyTorch download") },
+      ], t("Build"));
+      if (b && await runBuild(via, b.recipe)) return fromRecipe();
+      return;
+    }
     let allow = "";
     try {
       const last = (await api("GET", "/api/admin/setups")).find((s) => s.spec?.router_url);
@@ -182,6 +193,34 @@ export function rollout(root, { refresh }) {
     }
     toast(t("Profiles created: {names} — pick them in Set up a worker, or Assign", { names: made.join(", ") }));
     refresh();
+  }
+  // A build on a host that allows it (its setup): request, then follow its state until done or failed.
+  async function runBuild(via, recipe) {
+    if (!await act(() => api("POST", `/api/admin/instances/${via.worker_id}/build`, { recipe }))) return false;
+    const state = h("div", { class: "section-head" }), log = h("pre", { class: "code log" });
+    const dlg = h("dialog", { class: "form wide" });
+    let timer = null, result = null, done;
+    const finished = new Promise((r) => (done = r));
+    const close = () => { clearTimeout(timer); dlg.close(); dlg.remove(); done(result); };
+    dlg.append(h("h3", {}, t("Building {recipe} on {name}", { recipe, name: via.worker })), state, log,
+      h("div", { class: "dialog-actions" }, button(t("Close"), close)));
+    dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
+    document.body.append(dlg);
+    dlg.showModal();
+    const poll = async () => {
+      try {
+        const s = await api("GET", `/api/admin/instances/${via.worker_id}/build?recipe=${encodeURIComponent(recipe)}`);
+        state.replaceChildren(pill(t(s.state === "none" ? "waiting" : s.state), s.state === "done" ? "ok" : s.state === "failed" ? "bad" : "warn"),
+          " ", s.template ? t("template {name}", { name: s.template }) : s.error || "");
+        log.textContent = s.log || "";
+        log.scrollTop = log.scrollHeight;
+        if (s.state === "done") { result = true; toast(t("Built — now pick the template")); return close(); }
+        if (s.state === "failed") { result = false; return; }
+      } catch (e) { state.textContent = e.message; }
+      timer = setTimeout(poll, 3000);
+    };
+    poll();
+    return finished;
   }
   const profCols = ["name", "core", "venv", "nodes", "flags", "assigned", "note", "actions"];
   function buildProf() {

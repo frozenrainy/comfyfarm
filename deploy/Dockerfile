@@ -9,6 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-client 
 WORKDIR /opt/comfyfarm
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
+# what worker setup sends a host that allows builds from the dashboard (core/hostsetup.py share_dir)
+COPY recipes ./share/recipes
+COPY worker_ext/comfyfarm_worker ./share/worker_ext/comfyfarm_worker
+COPY ui_ext/comfyfarm_ui ./share/ui_ext/comfyfarm_ui
 # /state: the easy deployment's volume — a new volume takes this directory's owner, so its init runs unprivileged
 RUN pip install --no-cache-dir . && mkdir -p /var/log/comfyfarm /state && chown comfyfarm:comfyfarm /var/log/comfyfarm /state
 USER comfyfarm

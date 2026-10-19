@@ -31,6 +31,10 @@ UNIT = "/etc/systemd/user/comfyfarm@.service"
 INSTANCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 ACCOUNT = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 MARK = "# managed by ComfyFarm worker setup — changes are overwritten"
+BUILD_USER, BUILD_HOME = "comfyfarm-build", "/var/lib/comfyfarm-build"
+BUILD_UNITS = ("/etc/systemd/system/comfyfarm-build.path", "/etc/systemd/system/comfyfarm-build.service")
+BUILD_FILE = re.compile(r"^(publish\.py|build\.py|recipes/[A-Za-z0-9][A-Za-z0-9._-]*\.json|"
+                        r"(worker_ext/comfyfarm_worker|ui_ext/comfyfarm_ui)(/[A-Za-z0-9_][A-Za-z0-9._-]*)+)$")
 
 UNIT_TEXT = """{mark}
 # One instance per ComfyUI on this host: comfyfarm@<instance>, run by the service account's user manager.
@@ -131,6 +135,16 @@ class Host:
         if owner and not self.root:
             shutil.chown(full, owner, owner)
         self.log(f"created {path}")
+        return True
+
+    def remove(self, path: str) -> bool:
+        if not os.path.exists(self.p(path)):
+            return False
+        if self.dry:
+            self.log(f"would remove {path}")
+            return True
+        os.remove(self.p(path))
+        self.log(f"removed {path}")
         return True
 
     def read(self, path: str) -> str:
@@ -263,7 +277,8 @@ def configure(h: Host, spec: dict, home: str):
         if line.startswith("COMFYFARM_AGENT_INSTANCES="):
             served = {x for x in line.split("=", 1)[1].split(",") if x}
     h.write(f"{ETC}/agent.env", "\n".join([MARK, f"COMFYFARM_AGENT_INSTANCES={','.join(sorted(served | {inst}))}",
-                                           "COMFYFARM_AGENT_USER=1", ""]))
+                                           "COMFYFARM_AGENT_USER=1"]
+                                          + (["COMFYFARM_AGENT_BUILD=1"] if spec.get("builds") else []) + [""]))
 
 
 def directories(h: Host, spec: dict):
@@ -330,6 +345,80 @@ def user_manager(h: Host, spec: dict):
     h.run(["systemctl", "--user", "enable", f"comfyfarm@{inst}"], as_user=user)   # started by the router, not here
 
 
+def builds(h: Host, spec: dict, files: dict):
+    """Builds from the dashboard (opt-in, build.py): the recipes, publish.py and the extensions root-owned under TOOLS,
+    an account that owns the artifact store and runs `publish.py recipe`, a drop box the service account can put a
+    recipe name into, and the units that take it. Off: the units go, the account and its files stay."""
+    if not spec.get("builds"):
+        if any(os.path.exists(h.p(u)) for u in BUILD_UNITS):
+            h.run(["systemctl", "disable", "--now", "comfyfarm-build.path"], check=False)
+            for u in BUILD_UNITS:
+                h.remove(u)
+            h.run(["systemctl", "daemon-reload"])
+            h.log("builds from the dashboard: turned off")
+        return
+    if not files:
+        raise Failed("this router sent no build tools — upgrade the router, or set the host up without builds")
+    uv = next((u for u in ("/usr/local/bin/uv", "/usr/bin/uv") if os.path.exists(h.p(u))), None)
+    if not uv:
+        raise Failed("builds need uv where every account finds it: curl -LsSf https://astral.sh/uv/install.sh | "
+                     "sudo env UV_INSTALL_DIR=/usr/local/bin sh   (then run setup again)")
+    if not os.path.exists(h.p("/usr/bin/git")):
+        raise Failed("builds need git (apt install git)")
+    for rel, b64 in sorted(files.items()):
+        if not BUILD_FILE.match(rel) or "/." in "/" + rel:
+            raise Failed(f"unexpected file in the build payload: {rel!r}")
+        h.mkdir(os.path.dirname(f"{TOOLS}/{rel}"))
+        h.write(f"{TOOLS}/{rel}", base64.b64decode(b64), 0o644)
+    try:
+        pw = pwd.getpwnam(BUILD_USER)
+    except KeyError:
+        pw = None
+    if pw is not None and (why := person_account(pw)):
+        raise Failed(f"{BUILD_USER} is {why} — the build account must be its own")
+    if pw is None:
+        h.run(["useradd", "--system", "--create-home", "--home-dir", BUILD_HOME, "--shell", "/usr/sbin/nologin", BUILD_USER])
+        h.log(f"account {BUILD_USER} created (home {BUILD_HOME}) — builds run as it")
+    art = spec["art"]
+    full = h.p(art)
+    if not os.path.isdir(full):
+        h.mkdir(art, 0o755, owner=BUILD_USER)
+    elif not h.dry and pwd.getpwuid(os.stat(full).st_uid).pw_name != BUILD_USER:
+        if os.listdir(full):
+            raise Failed(f"{art} belongs to {pwd.getpwuid(os.stat(full).st_uid).pw_name}: builds from the dashboard publish "
+                         f"there as {BUILD_USER} — chown -R {BUILD_USER} {art} once, or set the host up without builds "
+                         f"({spec['account']}, which runs ComfyUI, must not be able to write it)")
+        h.run(["chown", BUILD_USER, art])
+        h.log(f"{art} (empty) given to {BUILD_USER}")
+    # useradd makes the home 0750: the service account must pass through it to the drop box and the states
+    h.run(["chmod", "0711", BUILD_HOME])
+    h.mkdir(f"{BUILD_HOME}/status", 0o755, owner=BUILD_USER)
+    # the service account may drop a file in, never list or read what is there
+    h.mkdir(f"{BUILD_HOME}/requests", 0o730)
+    h.run(["chgrp", spec["account"], f"{BUILD_HOME}/requests"])
+    h.run(["chmod", "0730", f"{BUILD_HOME}/requests"])
+    h.write(BUILD_UNITS[0], f"""{MARK}
+[Unit]
+Description=ComfyFarm: a build requested from the dashboard
+
+[Path]
+DirectoryNotEmpty={BUILD_HOME}/requests
+
+[Install]
+WantedBy=multi-user.target
+""")
+    h.write(BUILD_UNITS[1], f"""{MARK}
+[Unit]
+Description=ComfyFarm: build the requested recipes (publish.py recipe as {BUILD_USER})
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 {TOOLS}/build.py run {art} {uv}
+""")
+    h.run(["systemctl", "daemon-reload"])
+    h.run(["systemctl", "enable", "--now", "comfyfarm-build.path"])
+
+
 def host_check(h: Host, spec: dict) -> list[dict]:
     code, out = h.run(["/usr/bin/python3", f"{TOOLS}/hostcheck.py", spec["instance"], "--json"], check=False,
                       as_user=spec["account"])
@@ -369,7 +458,8 @@ def setup(payload: dict, h: Host) -> dict:
                          ("mounts", lambda: mounts(h, spec)),
                          ("directories", lambda: directories(h, spec)),
                          ("router access", lambda: ssh_access(h, spec, result["home"])),
-                         ("user manager", lambda: user_manager(h, spec))]:
+                         ("user manager", lambda: user_manager(h, spec)),
+                         ("builds", lambda: builds(h, spec, payload.get("build_files", {})))]:
             print(f"- {name}", flush=True)
             fn()
             steps.append({"step": name, "ok": True})

@@ -17,10 +17,12 @@ function checkTable(rows) {
 }
 
 // Step 1: what the host should become. Defaults: the last setup's answers (a farm's hosts look alike).
-export async function setupWorker(refresh) {
+// again: { worker_id, spec, extra } of the worker's last setup — the same host set up once more (new worker tools,
+// builds on or off); its name and instance stay, and the last step updates it instead of adding a worker.
+export async function setupWorker(refresh, again = null) {
   // unfinished setups can be continued: the dialog may have been closed while the host ran the script
   const open = (await api("GET", "/api/admin/setups")).filter((x) => ["waiting", "failed", "reported"].includes(x.status));
-  const pickRole = await formDialog(t("Set up a worker"), [
+  const pickRole = again ? { role: again.spec.role || "gpu" } : await formDialog(t("Set up a worker"), [
     { name: "role", label: t("What will this host be?"), type: "select", value: "gpu",
       options: [{ value: "gpu", label: t("GPU worker — runs the jobs") },
                 { value: "ui", label: t("UI worker — serves the screen and the users' files (no GPU, no jobs)") },
@@ -33,13 +35,14 @@ export async function setupWorker(refresh) {
     const s = open.find((x) => `continue:${x.id}` === pickRole.role);
     const made = s.status === "reported" ? { id: s.id, command: null }
       : await act(() => api("POST", `/api/admin/setups/${s.id}/renew`));
-    if (made) runSetup({ ...made, instance: s.spec.instance, account: s.spec.account }, refresh);
+    if (made) runSetup({ ...made, instance: s.spec.instance, account: s.spec.account, again: s.extra.again }, refresh);
     return;
   }
   const ui = pickRole.role === "ui";
   const [groups, profiles, recent] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
                                                        api("GET", "/api/admin/setups")]);
-  const last = recent[0]?.spec;
+  const last = again ? again.spec : recent[0]?.spec;
+  const lastX = again ? again.extra : {};
   const pathOf = (k, d) => {
     if (k === "temp") {                                   // per instance: keep the template, not the last one's name
       const lt = last?.paths?.temp, li = last?.instance;
@@ -47,21 +50,22 @@ export async function setupWorker(refresh) {
     }
     return (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
   };
-  const v = await formDialog(ui ? t("Set up the UI worker") : t("Set up a GPU worker"), [
-    { name: "name", label: t("Worker name (shown in the dashboard)"), value: ui ? "ui" : "" },
-    { name: "host", label: t("Host address"), placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
-    { name: "instance", label: t("Instance name"), value: ui ? "ui-1" : "gpu-1", hint: t("one ComfyUI on this host; letters, digits, . _ -") },
+  const keep = again ? t("kept: setting a worker up again changes its host, not its identity") : "";
+  const v = await formDialog(again ? t("Set up {name} again", { name: lastX.name }) : ui ? t("Set up the UI worker") : t("Set up a GPU worker"), [
+    { name: "name", label: t("Worker name (shown in the dashboard)"), value: again ? lastX.name : ui ? "ui" : "", hint: keep },
+    { name: "host", label: t("Host address"), value: lastX.host ?? "", placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
+    { name: "instance", label: t("Instance name"), value: again ? last.instance : ui ? "ui-1" : "gpu-1", hint: keep || t("one ComfyUI on this host; letters, digits, . _ -") },
     ...(ui ? [] : [
       { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
         options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })), hint: t("ComfyFarm checks the driver; it never installs one") },
-      { name: "group", label: t("Group"), type: "select", value: groups[0]?.name ?? "",
+      { name: "group", label: t("Group"), type: "select", value: again ? lastX.group ?? "" : groups[0]?.name ?? "",
         options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] }]),
     { name: "profile", label: t("Profile to run"), type: "select", value: "",
       options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))],
       hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
-    { name: "port", label: t("ComfyUI port"), type: "number", value: ui ? 8189 : 8188,
+    { name: "port", label: t("ComfyUI port"), type: "number", value: again ? last.port : ui ? 8189 : 8188,
       hint: ui ? t("not 8188 when it shares the host with the router") : "" },
-    { name: "ssh_port", label: t("ssh port"), type: "number", value: 22 },
+    { name: "ssh_port", label: t("ssh port"), type: "number", value: lastX.ssh_port ?? 22 },
     { name: "account", label: t("Service account (its own, made by setup)"), value: last?.account ?? "comfyfarm",
       hint: t("not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it") },
     { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
@@ -72,6 +76,9 @@ export async function setupWorker(refresh) {
     { name: "mounts", label: t("NFS mounts (optional, one per line: server:/export /mountpoint [options])"), type: "textarea", rows: 2,
       value: "",                                            // per host: never carried over from another host's setup
       hint: t("written to /etc/fstab and mounted by setup; needs nfs-common on the host. Other storage: mount it yourself, the host check verifies it") },
+    { name: "builds", type: "checkbox", value: !!last?.builds, text: t("Allow builds from the dashboard on this host"),
+      label: t("Builds"),
+      hint: t("the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet, git and uv on the host") },
   ], t("Next"), { wide: true });
   if (!v) return;
   const inst = v.instance.trim();
@@ -85,9 +92,10 @@ export async function setupWorker(refresh) {
       const [source, target, options] = l.split(/\s+/);
       return options ? { source, target, options } : { source, target };
     }),
+    builds: !!v.builds, worker_id: again ? again.worker_id : null,
   };
   const made = await act(() => api("POST", "/api/admin/setups", body));
-  if (made) runSetup({ ...made, instance: inst, account: body.account }, refresh);
+  if (made) runSetup({ ...made, instance: inst, account: body.account, again: body.worker_id }, refresh);
 }
 
 // Step 2: get root on the host — the operator picks the way; then watch the report come in.
@@ -96,7 +104,8 @@ function runSetup(made, refresh) {
   const status = h("div", { class: "section-head" });
   const log = h("pre", { class: "code log", hidden: true });
   const checks = h("div");
-  const finish = h("button", { type: "button", class: "primary", hidden: true, onclick: () => addWorker() }, t("Add the worker"));
+  const finish = h("button", { type: "button", class: "primary", hidden: true, onclick: () => addWorker() },
+                   made.again ? t("Update the worker") : t("Add the worker"));
   const cmd = h("pre", { class: "code wrap" }, made.command ?? t("(the host has reported — no need to run the script again)"));
   const copy = button(t("Copy"), () => navigator.clipboard?.writeText(made.command).then(() => toast(t("Copied")), () => {}));
   copy.hidden = !made.command;
@@ -157,6 +166,12 @@ function runSetup(made, refresh) {
   async function addWorker() {
     finish.disabled = true;
     try {
+      if (made.again) {                                    // the same worker: its instance gets the new settings
+        await api("PUT", `/api/admin/instances/${made.again}`, setup.instance_config);
+        await api("POST", `/api/admin/setups/${made.id}/finished?worker_id=${made.again}`);
+        toast(t("Worker updated — the new worker tools are used from its next start (Rollout → Render, or a rollout)"));
+        return close();
+      }
       const w = await api("POST", "/api/admin/workers", setup.worker);
       await api("PUT", `/api/admin/instances/${w.id}`, setup.instance_config);
       const pid = setup.extra.profile_id;

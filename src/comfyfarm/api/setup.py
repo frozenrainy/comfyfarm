@@ -52,6 +52,8 @@ class SetupIn(BaseModel):
     router_url: str                             # the router as the worker sees it
     paths: dict[str, str]                       # art, local, models, input, output, user, temp
     mounts: list[MountIn] = []
+    builds: bool = False                        # allow builds from the dashboard on this host (build.py)
+    worker_id: int | None = None                # set up an existing worker again (new tools, other options)
 
 
 class SshRunIn(BaseModel):
@@ -135,10 +137,17 @@ def make_router(ctx: Ctx) -> APIRouter:
         who = ctx.admin(x_comfyfarm_user)
         check_spec(body)
         async with db.conn() as c:
-            if await c.fetchval("SELECT 1 FROM instances WHERE instance = $1", body.instance):
+            if body.worker_id is not None:              # again: the same worker and instance, nothing else
+                same = await c.fetchrow("SELECT w.name, i.instance FROM workers w JOIN instances i ON i.worker_id = w.id "
+                                        "WHERE w.id = $1 AND w.deleted_at IS NULL", body.worker_id)
+                if same is None or same["instance"] != body.instance or same["name"] != body.name.strip():
+                    raise HTTPException(409, "setting a worker up again keeps its name and instance")
+            if await c.fetchval("SELECT 1 FROM instances WHERE instance = $1 AND worker_id IS DISTINCT FROM $2",
+                                body.instance, body.worker_id):
                 raise HTTPException(409, f"instance name {body.instance!r} is taken")
-            if await c.fetchval("SELECT 1 FROM workers WHERE deleted_at IS NULL AND (name = $1 OR base_url = $2)",
-                                body.name.strip(), f"http://{body.host}:{body.port}"):
+            if await c.fetchval("SELECT 1 FROM workers WHERE deleted_at IS NULL AND (name = $1 OR base_url = $2) "
+                                "AND id IS DISTINCT FROM $3", body.name.strip(), f"http://{body.host}:{body.port}",
+                                body.worker_id):
                 raise HTTPException(409, "a worker with this name or address exists")
         try:
             pub = await hostsetup.agent_public_key(settings.keys_dir)
@@ -149,10 +158,14 @@ def make_router(ctx: Ctx) -> APIRouter:
         spec = {"instance": body.instance, "role": body.role, "account": body.account, "uid": body.uid, "router_url": base,
                 "art": body.paths["art"], "local": body.paths["local"], "gpu": "none" if body.role == "ui" else body.gpu, "port": body.port, "listen": body.listen,
                 "paths": {k: v for k, v in body.paths.items() if k not in ("art", "local")},
-                "mounts": [m.model_dump(exclude_none=True) for m in body.mounts], "agent_pubkey": pub}
+                "mounts": [m.model_dump(exclude_none=True) for m in body.mounts], "agent_pubkey": pub,
+                "builds": body.builds}
         extra = {"name": body.name.strip(), "host": body.host, "ssh_port": body.ssh_port, "group": body.group,
-                 "profile_id": body.profile_id}
-        script, sha = hostsetup.build_script(spec, f"{base}/api/worker_setup/{token}/report", version())
+                 "profile_id": body.profile_id, "again": body.worker_id}
+        try:
+            script, sha = hostsetup.build_script(spec, f"{base}/api/worker_setup/{token}/report", version())
+        except hostsetup.SetupError as e:
+            raise HTTPException(400, str(e))
         async with db.conn() as c:
             async with c.transaction():
                 sid = await c.fetchval(
@@ -239,7 +252,10 @@ def make_router(ctx: Ctx) -> APIRouter:
                 if r["status"] not in ("waiting", "failed"):
                     raise HTTPException(409, f"this setup is {r['status']}")
                 base = r["spec"]["router_url"]
-                script, sha = hostsetup.build_script(r["spec"], f"{base}/api/worker_setup/{token}/report", version())
+                try:
+                    script, sha = hostsetup.build_script(r["spec"], f"{base}/api/worker_setup/{token}/report", version())
+                except hostsetup.SetupError as e:
+                    raise HTTPException(400, str(e))
                 await c.execute("UPDATE worker_setups SET token_sha256 = $2, script = $3, script_sha256 = $4, status = 'waiting', "
                                 "expires_at = now() + $5::interval WHERE id = $1", sid, hashlib.sha256(token.encode()).hexdigest(),
                                 script, sha, TOKEN_TTL)

@@ -238,11 +238,27 @@ export default {
   "AMD (ROCm)": "AMD (ROCm)", "NVIDIA (CUDA)": "NVIDIA (CUDA)", "Any / not sure": "상관없음 / 모름", "None (CPU only)": "없음 (CPU만)",
   "ComfyFarm checks the driver; it never installs one": "ComfyFarm은 드라이버를 확인만 하고 설치하지 않습니다",
   "Profile to run": "실행할 프로필", "(assign later)": "(나중에 할당)", "ComfyUI port": "ComfyUI 포트", "ssh port": "ssh 포트",
-  "From a recipe": "레시피로", "Profiles from a recipe": "레시피로 프로필 만들기", "Template": "견본",
+  "From a recipe": "레시피로",
+  "Build a recipe on {name}": "{name}에서 레시피 빌드", "Recipe": "레시피", "Build": "빌드",
+  "the host downloads ComfyUI, PyTorch and the nodes and publishes them to its artifact store — minutes, mostly the PyTorch download":
+    "호스트가 ComfyUI·PyTorch·노드를 받아 자기 아티팩트 저장소에 게시합니다 — 몇 분, 대부분 PyTorch 다운로드",
+  "Building {recipe} on {name}": "{name}에서 {recipe} 빌드 중", "template {name}": "견본 {name}",
+  "Built — now pick the template": "빌드 완료 — 이제 견본을 고르세요",
+  "this worker's tools are older than recipes — Set up again (System → Workers)":
+    "이 워커의 도구가 레시피보다 오래됐습니다 — 다시 설치하세요 (시스템 → 워커)",
+  "Set up again": "다시 설치", "Set up {name} again": "{name} 다시 설치",
+  "kept: setting a worker up again changes its host, not its identity": "유지됨: 다시 설치는 호스트 설정만 바꾸고 워커 정체성은 그대로입니다",
+  "Allow builds from the dashboard on this host": "이 호스트에서 대시보드 빌드 허용", "Builds": "빌드",
+  "the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet, git and uv on the host":
+    "대시보드가 이 호스트에 설치된 레시피의 빌드를 요청할 수 있습니다(이름만 고르고 내용은 보내지 않음). 빌드 계정이 아티팩트 저장소를 소유하고, 서비스 계정은 계속 읽기만 합니다. 호스트에 인터넷·git·uv가 필요합니다",
+  "Update the worker": "워커 갱신",
+  "Worker updated — the new worker tools are used from its next start (Rollout → Render, or a rollout)":
+    "워커를 갱신했습니다 — 새 워커 도구는 다음 시작부터 쓰입니다 (롤아웃 → 렌더, 또는 롤아웃)",
+  "this worker was not set up from the dashboard — Set up a worker, with another name":
+    "이 워커는 대시보드로 설치되지 않았습니다 — 다른 이름으로 워커 설치를 하세요", "Profiles from a recipe": "레시피로 프로필 만들기", "Template": "견본",
   "Create both profiles": "프로필 두 개 만들기", "GPU workers": "GPU 워커",
   "no worker to read the artifact store through yet — set one up first (System → Workers)":
     "아티팩트 저장소를 읽을 워커가 아직 없습니다 — 먼저 워커를 설치하세요 (시스템 → 워커)",
-  "this worker's tools are older than recipes — run its setup again": "이 워커의 도구가 레시피보다 오래됐습니다 — 설치를 다시 실행하세요",
   "the addresses the workers take requests from: the router's and the gateway's, as the workers see them":
     "워커가 요청을 받는 주소: 워커에서 본 라우터와 게이트웨이 주소",
   "Profiles created: {names} — pick them in Set up a worker, or Assign": "프로필을 만들었습니다: {names} — 워커 설치나 배정에서 고르세요",

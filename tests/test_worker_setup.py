@@ -58,7 +58,7 @@ def test_setup_builds_a_worker_and_reports(tmp_path):
     res = ws.setup(payload(), ws.Host(root=str(root), run=rec))
     assert res["ok"], res
     assert [s["step"] for s in res["steps"]] == ["preconditions", "account", "worker tools", "configuration", "mounts",
-                                                 "directories", "router access", "user manager"]
+                                                 "directories", "router access", "user manager", "builds"]
     assert res["host_keys"] == ["ssh-ed25519 AAAAhostkey"]
     # account with a real shell (sshd runs the forced command through it)
     assert rec.ran("useradd")[0][-3:] == ["--shell", "/bin/sh", "comfyfarm"] or "/bin/sh" in rec.ran("useradd")[0]

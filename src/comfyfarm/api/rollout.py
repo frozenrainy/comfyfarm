@@ -34,6 +34,10 @@ class ProfileIn(BaseModel):
     note: str | None = None
 
 
+class BuildIn(BaseModel):
+    recipe: str
+
+
 class ProfilePatch(BaseModel):
     name: str | None = None
     core: str | None = None
@@ -392,6 +396,41 @@ def make_router(ctx: Ctx) -> APIRouter:
         if out is None:
             raise HTTPException(400, f"the {inst['restart_backend']} backend has no agent to run the host check")
         return {"instance": inst["instance"], "check": out}
+
+    async def builder(worker_id: int):
+        async with db.conn() as c:
+            inst = await inst_row(c, worker_id)
+        if inst is None:
+            raise HTTPException(404, "no instance")
+        return inst, be.make(inst["restart_backend"], inst["restart_config"], keys_dir=settings.keys_dir)
+
+    @api.post("/api/admin/instances/{worker_id}/build")
+    async def build(worker_id: int, body: BuildIn, x_comfyfarm_user: str | None = Header(default=None)):
+        """A recipe build on that host (only where its setup allowed it): the router names an installed recipe; the
+        host runs it as its build account. Progress: GET the same path."""
+        who = ctx.admin(x_comfyfarm_user)
+        inst, b = await builder(worker_id)
+        try:
+            out = await b.build(body.recipe)
+        except be.BackendError as e:
+            raise HTTPException(502, str(e))
+        if out is None:
+            raise HTTPException(400, f"the {inst['restart_backend']} backend has no agent to ask for a build")
+        async with db.conn() as c:
+            await audit(c, who, "build requested", inst["instance"], recipe=body.recipe)
+        return out
+
+    @api.get("/api/admin/instances/{worker_id}/build")
+    async def build_state(worker_id: int, recipe: str, x_comfyfarm_user: str | None = Header(default=None)):
+        ctx.admin(x_comfyfarm_user)
+        inst, b = await builder(worker_id)
+        try:
+            out = await b.build(recipe, state=True)
+        except be.BackendError as e:
+            raise HTTPException(502, str(e))
+        if out is None:
+            raise HTTPException(400, f"the {inst['restart_backend']} backend has no agent")
+        return out
 
     @api.get("/api/admin/instances/{worker_id}/render")
     async def preview_render(worker_id: int, profile_id: int | None = None, x_comfyfarm_user: str | None = Header(default=None)):

@@ -26,7 +26,8 @@ commits); the command publishes the release, the GPU and UI node sets (with `com
 GPU venv and a CPU venv for the UI worker, and writes a profile template to `<ART>/profiles/`. Run again, it reuses
 what has the same contents (a venv: the same inputs) and builds only what changed; `--rebuild` builds new venvs.
 Then *System → Rollout → Profiles → From a recipe* creates the GPU and UI profiles from that template (it reads the
-store through a worker's host check). A recipe of your own: copy one in `recipes/` — the ComfyUI `ref` is a release
+store through a worker's host check). A host whose setup allowed *builds from the dashboard* (design 14) offers the
+same build there as a button while the store has no template. A recipe of your own: copy one in `recipes/` — the ComfyUI `ref` is a release
 tag, every node a full commit.
 
 **By hand** — what the recipe does, step by step (`publish.py` needs `launcher.py` next to it):
