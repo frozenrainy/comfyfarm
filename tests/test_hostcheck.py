@@ -174,3 +174,24 @@ def test_only_the_venvs_this_host_can_use_are_checked(tmp_path, router):
     assert names("amd") == ["venv cpu-v", "venv rocm-v"]
     assert names("nvidia") == ["venv cpu-v", "venv cuda-v"]
     assert names("any") == ["venv cpu-v", "venv cuda-v", "venv rocm-v"]
+
+
+def test_recipe_templates_in_the_store_are_reported_with_the_way_to_make_them(tmp_path, router):
+    out, _ = check(tmp_path / "a", router)
+    line = next(r for r in out if r["name"] == "recipes")
+    assert line["level"] == "WARN" and "publish.py recipe" in line["detail"] and "rocm-gfx1201" in line["detail"]
+    root, paths, art, local = host(tmp_path / "b")
+    os.makedirs(os.path.join(art, "profiles"))
+    t = {"template": "rocm-gfx1201-1", "recipe": "rocm-gfx1201",
+         "gpu": {"core": "c1", "venv": "rocm72-1", "nodes": ["farm-gpu-1"], "flags": [], "env": {}},
+         "ui": {"core": "c1", "venv": "cpu-1", "nodes": ["farm-ui-1"], "flags": ["--cpu"], "env": {}}}
+    with open(os.path.join(art, "profiles", "rocm-gfx1201-1.json"), "w") as f:
+        json.dump(t, f)
+    with open(os.path.join(art, "profiles", "broken.json"), "w") as f:
+        f.write("{not json")
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    cfg = {"gpu": "amd", "paths": paths, "port": free_port(), "listen": "127.0.0.1", "instance": "gpu-1"}
+    out = hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()
+    line = next(r for r in out if r["name"] == "recipes")
+    assert line["level"] == "OK" and line["templates"] == [t]               # the broken file is skipped, not fatal
+    assert levels(out)["artifact store"] == "OK"                             # templates are not counted as artifacts

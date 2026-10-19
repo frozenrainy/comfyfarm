@@ -5,6 +5,9 @@
     python3 publish.py frontend <ART> <name> --from <built frontend dist>
     python3 publish.py venv     <ART> <name> --python python3.12 -r requirements.txt [--accelerator rocm --arch gfx1201]
                                 [--pip-arg=--index-url=…] [--uv /path/to/uv]   (uv: same rules, its wheel cache)
+    python3 publish.py recipe   <ART> <recipe> [--uv /path/to/uv] [--rebuild]
+                                everything a farm needs from one recipe (recipes/<recipe>.json): the ComfyUI release, the
+                                GPU and UI node sets, their venvs, and a profile template the dashboard turns into profiles
 
 Rules kept: a name is never reused (an existing directory is refused); READY is written last, only after the copy or
 build and the checks, and the artifact is made read-only first; a venv is built at its final path (absolute paths are
@@ -16,13 +19,17 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import glob
+import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 
 try:
     from .launcher import CONTRACT, NAME, tree_sha256
@@ -172,7 +179,7 @@ def carry_interpreter(python: str, path: str) -> str:
 
 
 def publish_venv(art: str, name: str, python: str, requirements: list[str], accelerator: str | None,
-                 arch: list[str], pip_args: list[str], uv: str | None = None) -> dict:
+                 arch: list[str], pip_args: list[str], uv: str | None = None, manifest_extra: dict | None = None) -> dict:
     """Built at its final path, with its interpreter inside it (D-42), so every host that mounts the store at the same
     path can run it — not only the build host."""
     path = target(art, "venv", name)
@@ -211,14 +218,191 @@ def publish_venv(art: str, name: str, python: str, requirements: list[str], acce
         extra["accelerator"] = accelerator             # contract §9.1; absent = unknown
     if arch:
         extra["arch"] = arch
-    m = write_manifest(path, "venv", name, **extra)
+    m = write_manifest(path, "venv", name, **extra, **(manifest_extra or {}))
     seal(path)
     return m
 
 
+# ---- recipes: everything a farm needs, from one file ----------------------------------------------------------------
+HERE = os.path.dirname(os.path.abspath(__file__))
+PYPI = "https://pypi.org/simple"
+ROLES = ("gpu", "ui")
+
+
+def find_dir(name: str, given: str | None) -> str:
+    """recipes/, worker_ext/, ui_ext/: given, next to this file (copied onto a host), or the repository root."""
+    for d in ([given] if given else []) + [HERE, os.path.join(HERE, "..", "..")]:
+        if os.path.isdir(os.path.join(d, name)):
+            return os.path.abspath(d)
+    raise Refused(f"no {name}/ next to publish.py or in the repository — run it from a ComfyFarm checkout")
+
+
+def load_recipe(name: str, recipes: str | None = None) -> dict:
+    path = name if name.endswith(".json") else os.path.join(find_dir("recipes", recipes), "recipes", name + ".json")
+    try:
+        with open(path) as f:
+            r = json.load(f)
+    except (OSError, ValueError) as e:
+        raise Refused(f"recipe {name}: {e}")
+    if not NAME.match(r.get("recipe", "")):
+        raise Refused(f"recipe {path}: 'recipe' must be a plain name")
+    for role in ROLES:
+        v = r.get(role) or {}
+        if not NAME.match(v.get("venv", "")) or v.get("accelerator") not in ("cuda", "rocm", "cpu") or not v.get("index"):
+            raise Refused(f"recipe {r['recipe']}: {role} needs venv (a name), accelerator and index")
+    for n in r.get("nodes", []):
+        if not NAME.match(n.get("name", "")) or not n.get("repo") or not re.fullmatch(r"[0-9a-f]{40}", n.get("commit", "")):
+            raise Refused(f"recipe {r['recipe']}: a node needs name, repo and a full commit (no branches: a recipe is pinned)")
+    return r
+
+
+def fetch(repo: str, ref: str, dest: str) -> str:
+    """The tree of `ref` in `repo`, as `git archive` gives it (no .git) — the same bytes every time."""
+    src = dest + ".git-src"
+    subprocess.run(["git", "init", "-q", src], check=True)
+    subprocess.run(["git", "-C", src, "fetch", "-q", "--depth", "1", repo, ref], check=True)
+    os.makedirs(dest)
+    archive = subprocess.run(["git", "-C", src, "archive", "FETCH_HEAD"], check=True, capture_output=True).stdout
+    subprocess.run(["tar", "-x", "-C", dest], input=archive, check=True)
+    shutil.rmtree(src)
+    return dest
+
+
+def ready(art: str, kind: str) -> dict[str, dict]:
+    out = {}
+    for m in glob.glob(os.path.join(art, kind, "*", "manifest.json")):
+        d = os.path.dirname(m)
+        if os.path.exists(os.path.join(d, "READY")):
+            with open(m) as f:
+                out[os.path.basename(d)] = json.load(f)
+    return out
+
+
+def next_name(art: str, kind: str, prefix: str) -> str:
+    """prefix-<n>, one past every name taken — published or not: a name is never reused."""
+    bases = [os.path.basename(d).split(".tmp-")[0].removesuffix(".json")
+             for d in glob.glob(os.path.join(art, kind, prefix + "-*"))]
+    taken = [int(m.group(1)) for b in bases if (m := re.fullmatch(re.escape(prefix) + r"-(\d+)", b))]
+    return f"{prefix}-{max(taken, default=0) + 1}"
+
+
+def tree_or_refuse(path: str) -> str:
+    try:
+        return tree_sha256(path)
+    except ValueError as e:
+        raise Refused(str(e))
+
+
+def same_tree(art: str, kind: str, src: str, prefix: str | None = None) -> str | None:
+    t = tree_or_refuse(src)
+    for name, m in sorted(ready(art, kind).items()):
+        if (prefix is None or name.startswith(prefix + "-")) and m.get("tree_sha256") == t:
+            return name
+    return None
+
+
+def stage_nodes(work: str, role: str, ext: str, fetched: dict[str, str], recipe: dict) -> str:
+    stage = os.path.join(work, "nodes-" + role)
+    os.makedirs(stage)
+    ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc")
+    shutil.copytree(os.path.join(ext, "worker_ext", "comfyfarm_worker"), os.path.join(stage, "comfyfarm_worker"), ignore=ignore)
+    if role == "ui":
+        shutil.copytree(os.path.join(ext, "ui_ext", "comfyfarm_ui"), os.path.join(stage, "comfyfarm_ui"), ignore=ignore)
+    for n in recipe.get("nodes", []):
+        if role == "gpu" or n.get("ui"):
+            shutil.copytree(fetched[n["name"]], os.path.join(stage, n["name"]), symlinks=True, ignore=ignore)
+    return stage
+
+
+def venv_inputs(recipe: dict, role: str, requirements: list[str]) -> str:
+    """What decides a venv's contents. A venv build is not byte-for-byte repeatable, so reuse goes by its inputs."""
+    v = recipe[role]
+    blob = {"python": recipe.get("python", "3.12"), "accelerator": v["accelerator"], "arch": v.get("arch", []),
+            "index": v["index"], "pip": v.get("pip", []), "requirements": [open(r).read() for r in requirements]}
+    return hashlib.sha256(json.dumps(blob, sort_keys=True).encode()).hexdigest()
+
+
+def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = False, recipes: str | None = None,
+                   ext: str | None = None, log=print) -> dict:
+    """Publish what the recipe names, reusing what is already there with the same content, and write a profile
+    template (<ART>/profiles/<template>.json, ComfyFarm's own — not part of the contract) for the dashboard."""
+    recipe, ext = load_recipe(name, recipes), find_dir("worker_ext", ext)
+    art = os.path.abspath(art)
+    uv = uv or shutil.which("uv") or next((p for p in (os.path.expanduser("~/.local/bin/uv"),) if os.path.exists(p)), None)
+    py = recipe.get("python", "3.12")
+    if uv:
+        subprocess.run([uv, "python", "install", py], check=True)
+    with tempfile.TemporaryDirectory(prefix="comfyfarm-recipe-") as work:
+        c = recipe["comfyui"]
+        core_src = fetch(c["repo"], c["ref"], os.path.join(work, "core"))
+        core = "comfyui-" + c["ref"].lstrip("v")
+        if not NAME.match(core):
+            raise Refused(f"comfyui ref {c['ref']!r} does not make a name")
+        if os.path.exists(os.path.join(art, "core", core)):
+            have = ready(art, "core").get(core)
+            if not have or have.get("tree_sha256") != tree_or_refuse(core_src):
+                raise Refused(f"core/{core} exists with other contents (or unpublished) — not the release {c['ref']}")
+            log(f"core/{core}: already published, reused")
+        else:
+            publish_tree(art, "core", core, core_src)
+            log(f"core/{core}: published")
+        fetched = {n["name"]: fetch(n["repo"], n["commit"], os.path.join(work, "node-" + n["name"]))
+                   for n in recipe.get("nodes", [])}
+        node_reqs = []
+        for n in recipe.get("nodes", []):
+            node_reqs += n.get("requirements", [])
+        req_files = [os.path.join(core_src, "requirements.txt")]
+        if node_reqs:
+            req_files.append(os.path.join(work, "node-requirements.txt"))
+            with open(req_files[-1], "w") as f:
+                f.write("\n".join(node_reqs) + "\n")
+        template = {"recipe": recipe["recipe"], "about": recipe.get("about", ""), "comfyui": c["ref"]}
+        for role in ROLES:
+            stage = stage_nodes(work, role, ext, fetched, recipe)
+            prefix = "farm-" + role
+            nodes = same_tree(art, "nodes", stage, prefix)
+            if nodes:
+                log(f"nodes/{nodes}: same contents already published, reused")
+            else:
+                nodes = next_name(art, "nodes", prefix)
+                publish_tree(art, "nodes", nodes, stage)
+                log(f"nodes/{nodes}: published")
+            v = recipe[role]
+            inputs = venv_inputs(recipe, role, req_files)
+            venv = None if rebuild else next((n for n, m in sorted(ready(art, "venv").items())
+                                              if m.get("inputs_sha256") == inputs), None)
+            if venv:
+                log(f"venv/{venv}: built from the same inputs, reused")
+            else:
+                venv = next_name(art, "venv", v["venv"])
+                log(f"venv/{venv}: building ({v['accelerator']}, {v['index']}) — this takes a while")
+                pip = [f"--index-url={v['index']}", f"--extra-index-url={PYPI}"] + (["--index-strategy=unsafe-best-match"] if uv else [])
+                publish_venv(art, venv, py if uv else f"python{py}", req_files, v["accelerator"], v.get("arch", []),
+                             pip + v.get("pip", []), uv, {"inputs_sha256": inputs, "recipe": recipe["recipe"]})
+                log(f"venv/{venv}: published")
+            template[role] = {"core": core, "venv": venv, "nodes": [nodes], "flags": v.get("flags", []), "env": v.get("env", {})}
+    pdir = os.path.join(art, "profiles")
+    os.makedirs(pdir, exist_ok=True)
+    for f in sorted(glob.glob(os.path.join(pdir, recipe["recipe"] + "-*.json"))):
+        with open(f) as fh:
+            old = json.load(fh)
+        if all(old.get(r) == template[r] for r in ROLES):
+            log(f"profiles/{os.path.basename(f)}: the same template exists")
+            return old
+    n = next_name(art, "profiles", recipe["recipe"]).rsplit("-", 1)[1]
+    template["template"] = f"{recipe['recipe']}-{n}"
+    template["created"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    path = os.path.join(pdir, template["template"] + ".json")
+    with open(path, "x") as f:
+        json.dump(template, f, indent=1)
+    os.chmod(path, 0o444)
+    log(f"profiles/{template['template']}.json: written — Dashboard → System → Rollout → Profiles → From a recipe")
+    return template
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="comfyfarm-publish")
-    ap.add_argument("kind", choices=["core", "nodes", "frontend", "venv"])
+    ap.add_argument("kind", choices=["core", "nodes", "frontend", "venv", "recipe"])
     ap.add_argument("art")
     ap.add_argument("name")
     ap.add_argument("--from", dest="src")
@@ -228,9 +412,13 @@ def main(argv=None) -> int:
     ap.add_argument("--arch", action="append", default=[])
     ap.add_argument("--pip-arg", action="append", default=[])
     ap.add_argument("--uv", help="build with this uv binary instead of venv + pip")
+    ap.add_argument("--rebuild", action="store_true", help="recipe: build new venvs even when the same inputs were built")
+    ap.add_argument("--recipes", help="recipe: the directory holding recipes/ (default: next to this file, or the repository)")
     a = ap.parse_args(argv)
     try:
-        if a.kind == "venv":
+        if a.kind == "recipe":
+            m = publish_recipe(a.art, a.name, a.uv, a.rebuild, a.recipes, log=lambda x: print(x, file=sys.stderr))
+        elif a.kind == "venv":
             m = publish_venv(a.art, a.name, a.python, a.requirements, a.accelerator, a.arch, a.pip_arg, a.uv)
         else:
             if not a.src:

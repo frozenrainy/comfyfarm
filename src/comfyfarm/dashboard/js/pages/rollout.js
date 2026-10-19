@@ -1,6 +1,6 @@
 // Rollout tab (docs/design/07): how each worker is launched (instance), what it should run (profile), and rolling a
 // profile out one worker at a time — drain, restart, wait for the badge, verify, revert that worker on failure.
-import { act, api, button, formDialog, h, namedRow, pill, setPill, setText, syncRows, t, table, when } from "../core.js";
+import { act, api, button, formDialog, h, namedRow, pill, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
 import { checkHost } from "./setup.js";
 
 const ACTIVE = ["running", "aborting", "interrupted"];
@@ -54,7 +54,8 @@ export function rollout(root, { refresh }) {
     h("section", {}, head(t("Instances")), h("p", { class: "muted small" },
       t("How the launcher on each host starts the worker. Badge: match = the worker runs exactly its assigned render; " +
       "differs = it runs something else (not restarted yet, or a failed start).")), instT.el),
-    h("section", {}, head(t("Profiles"), button(t("New profile"), () => editProfile(null), { cls: "primary" })),
+    h("section", {}, head(t("Profiles"), button(t("From a recipe"), () => fromRecipe()),
+                          button(t("New profile"), () => editProfile(null), { cls: "primary" })),
       h("p", { class: "muted small" }, t("A profile in use cannot be changed — copy it and roll the copy out.")), profT.el),
     h("section", {}, head(t("Audit log")), auditT.el));
 
@@ -146,6 +147,41 @@ export function rollout(root, { refresh }) {
                    flags: v.flags.split(/\s+/).filter(Boolean), env, note: v.note || null };
     if (p && !copy) act(() => api("PATCH", `/api/admin/profiles/${p.id}`, body), t("Profile saved"), refresh);
     else act(() => api("POST", "/api/admin/profiles", body), t("Profile created"), refresh);
+  }
+  // A recipe (publish.py recipe) leaves a profile template in the artifact store; a worker host's check reads it.
+  async function fromRecipe() {
+    const via = insts.find((i) => i.instance && ["ssh", "http-agent"].includes(i.instance.restart_backend));
+    if (!via) return toast(t("no worker to read the artifact store through yet — set one up first (System → Workers)"), true);
+    const r = await act(() => api("POST", `/api/admin/instances/${via.worker_id}/check`));
+    if (!r) return;
+    const line = (r.check || []).find((x) => x.name === "recipes");
+    const templates = line?.templates || [];
+    if (!templates.length) return toast(line ? line.detail : t("this worker's tools are older than recipes — run its setup again"), true);
+    let allow = "";
+    try {
+      const last = (await api("GET", "/api/admin/setups")).find((s) => s.spec?.router_url);
+      if (last) allow = new URL(last.spec.router_url).hostname;
+    } catch { /* a guess only */ }
+    const v = await formDialog(t("Profiles from a recipe"), [
+      { name: "template", label: t("Template"), type: "select", value: templates[templates.length - 1].template,
+        options: templates.map((x) => ({ value: x.template, label: x.about ? `${x.template} — ${x.about}` : x.template })) },
+      { name: "allow", label: "COMFYFARM_ALLOW", value: allow,
+        hint: t("the addresses the workers take requests from: the router's and the gateway's, as the workers see them") },
+    ], t("Create both profiles"), { wide: true });
+    if (!v) return;
+    const tpl = templates.find((x) => x.template === v.template);
+    const made = [];
+    for (const [role, what] of [["gpu", t("GPU workers")], ["ui", t("UI worker")]]) {
+      const p = tpl[role];
+      const res = await act(() => api("POST", "/api/admin/profiles", {
+        name: `${tpl.template}-${role}`, core: p.core, venv: p.venv, nodes: p.nodes, frontend: null, flags: p.flags || [],
+        env: { ...(p.env || {}), ...(v.allow.trim() ? { COMFYFARM_ALLOW: v.allow.trim() } : {}) },
+        note: `${what} · ${tpl.template}` }));
+      if (!res) return refresh();
+      made.push(`${tpl.template}-${role}`);
+    }
+    toast(t("Profiles created: {names} — pick them in Set up a worker, or Assign", { names: made.join(", ") }));
+    refresh();
   }
   const profCols = ["name", "core", "venv", "nodes", "flags", "assigned", "note", "actions"];
   function buildProf() {

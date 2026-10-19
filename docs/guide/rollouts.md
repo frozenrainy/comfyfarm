@@ -13,7 +13,23 @@ standard library only and never import router code.
 ## 1. Artifact store
 
 Choose a directory every worker can read at the **same path** (a shared mount, or a copy per host): `<ART>`. Publish
-on a machine with internet access that mounts `<ART>` at that path — `publish.py` needs `launcher.py` next to it:
+on a machine with internet access that mounts `<ART>` at that path.
+
+**From a recipe** (one command, in a ComfyFarm checkout; git and [uv](https://docs.astral.sh/uv/) on that machine):
+
+```sh
+python3 src/comfyfarm/publish.py recipe <ART> rocm-gfx1201
+```
+
+`recipes/rocm-gfx1201.json` names a ComfyUI release, the PyTorch index for the GPU and the custom nodes (pinned
+commits); the command publishes the release, the GPU and UI node sets (with `comfyfarm_worker`, `comfyfarm_ui`), a
+GPU venv and a CPU venv for the UI worker, and writes a profile template to `<ART>/profiles/`. Run again, it reuses
+what has the same contents (a venv: the same inputs) and builds only what changed; `--rebuild` builds new venvs.
+Then *System → Rollout → Profiles → From a recipe* creates the GPU and UI profiles from that template (it reads the
+store through a worker's host check). A recipe of your own: copy one in `recipes/` — the ComfyUI `ref` is a release
+tag, every node a full commit.
+
+**By hand** — what the recipe does, step by step (`publish.py` needs `launcher.py` next to it):
 
 ```sh
 git -C ComfyUI archive v0.41.0 | tar -x -C /tmp/core && python3 publish.py core <ART> comfyui-0.41.0 --from /tmp/core

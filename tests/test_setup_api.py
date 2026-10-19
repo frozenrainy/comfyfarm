@@ -172,7 +172,9 @@ async def test_host_check_through_the_agent_in_dashboard_and_doctor(farm, tmp_pa
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     answer = tmp_path / "answer.json"
+    tpl = {"template": "rocm-gfx1201-1", "gpu": {"core": "c", "venv": "v", "nodes": ["n"]}, "ui": {"core": "c", "venv": "u", "nodes": ["m"]}}
     answer.write_text(json.dumps([{"level": "OK", "name": "router", "detail": "answers"},
+                                  {"level": "OK", "name": "recipes", "detail": "rocm-gfx1201-1", "templates": [tpl]},
                                   {"level": "FAIL", "name": "GPU", "detail": "setup expects an AMD GPU and none is usable here"}]))
     (bin_ / "ssh").write_text(f"#!/bin/sh\ncase \"$*\" in *check*) cat {answer};; *) exit 255;; esac\n")
     (bin_ / "ssh").chmod(0o755)
@@ -183,7 +185,8 @@ async def test_host_check_through_the_agent_in_dashboard_and_doctor(farm, tmp_pa
            "paths": spec()["paths"]}
     assert (await c.put(f"/api/admin/instances/{w['id']}", json=cfg, headers=H)).status_code == 200
     got = (await c.post(f"/api/admin/instances/{w['id']}/check", headers=H)).json()
-    assert [x["level"] for x in got["check"]] == ["OK", "FAIL"]
+    assert [x["level"] for x in got["check"]] == ["OK", "OK", "FAIL"]
+    assert got["check"][1]["templates"] == [tpl]          # what "From a recipe" in the dashboard reads
     from comfyfarm import doctor
     lines = await doctor.run(fast_settings(r.s.dsn, keys_dir=str(keys)))
     host = [x for x in lines if x[1] == "host gpu-1"]

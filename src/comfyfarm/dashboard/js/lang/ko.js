@@ -238,6 +238,14 @@ export default {
   "AMD (ROCm)": "AMD (ROCm)", "NVIDIA (CUDA)": "NVIDIA (CUDA)", "Any / not sure": "상관없음 / 모름", "None (CPU only)": "없음 (CPU만)",
   "ComfyFarm checks the driver; it never installs one": "ComfyFarm은 드라이버를 확인만 하고 설치하지 않습니다",
   "Profile to run": "실행할 프로필", "(assign later)": "(나중에 할당)", "ComfyUI port": "ComfyUI 포트", "ssh port": "ssh 포트",
+  "From a recipe": "레시피로", "Profiles from a recipe": "레시피로 프로필 만들기", "Template": "견본",
+  "Create both profiles": "프로필 두 개 만들기", "GPU workers": "GPU 워커",
+  "no worker to read the artifact store through yet — set one up first (System → Workers)":
+    "아티팩트 저장소를 읽을 워커가 아직 없습니다 — 먼저 워커를 설치하세요 (시스템 → 워커)",
+  "this worker's tools are older than recipes — run its setup again": "이 워커의 도구가 레시피보다 오래됐습니다 — 설치를 다시 실행하세요",
+  "the addresses the workers take requests from: the router's and the gateway's, as the workers see them":
+    "워커가 요청을 받는 주소: 워커에서 본 라우터와 게이트웨이 주소",
+  "Profiles created: {names} — pick them in Set up a worker, or Assign": "프로필을 만들었습니다: {names} — 워커 설치나 배정에서 고르세요",
   "Service account (its own, made by setup)": "서비스 계정 (전용, 설치가 만듦)",
   "not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it":
     "본인 로그인 계정이 아닙니다: 설치가 ComfyUI 실행용으로 만들고, 라우터 키(재시작·조회·점검)만 이 계정으로 접속합니다",

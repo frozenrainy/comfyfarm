@@ -59,8 +59,8 @@ class Check:
         self.user = user or pwd.getpwuid(os.getuid()).pw_name
         self.out: list[dict] = []
 
-    def add(self, level: str, name: str, detail: str):
-        self.out.append({"level": level, "name": name, "detail": detail})
+    def add(self, level: str, name: str, detail: str, **data):
+        self.out.append({"level": level, "name": name, "detail": detail, **data})
 
     def p(self, path: str) -> str:
         return self.root + path
@@ -118,6 +118,24 @@ class Check:
         elif not found and want == "any":
             self.add(WARN, "GPU", "no GPU found — this host can only run ComfyUI on the CPU")
 
+    def recipes(self, art: str):
+        """Profile templates that `publish.py recipe` left in the store: the dashboard makes profiles from them."""
+        templates = []
+        for f in sorted(glob.glob(os.path.join(art, "profiles", "*.json"))):
+            try:
+                with open(f) as fh:
+                    t = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if isinstance(t, dict) and all(isinstance(t.get(k), dict) for k in ("gpu", "ui")) and t.get("template"):
+                templates.append(t)
+        if templates:
+            self.add(OK, "recipes", ", ".join(t["template"] for t in templates) + " — System → Rollout → Profiles → "
+                     "From a recipe", templates=templates)
+        else:
+            self.add(WARN, "recipes", f"no profile template in {art} — on a host with internet that mounts it here: "
+                     f"python3 publish.py recipe {art} rocm-gfx1201 (docs/guide/rollouts.md §1)")
+
     # ---- paths ----------------------------------------------------------------------------------------------------
     def paths(self):
         art, local = self.env.get("COMFY_LAUNCH_ARTIFACTS", ""), self.env.get("COMFY_LAUNCH_LOCAL", "")
@@ -128,6 +146,7 @@ class Check:
         else:
             self.add(OK if published else WARN, "artifact store", f"{art}: {published} published artifact(s)"
                      + ("" if published else " — publish ComfyUI, a venv and the node set before assigning a profile"))
+            self.recipes(art)
         if not local or not os.path.isdir(local) or not os.access(local, os.W_OK):
             self.add(FAIL, "local root", f"{local or '(not set)'} is not writable by {self.user}")
         else:
