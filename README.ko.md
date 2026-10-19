@@ -33,6 +33,18 @@ ComfyUI로 재현한 구체적인 장애에 묶여 있습니다.
   대신 실행) 호스트 점검 결과를 보고 워커를 등록합니다([설계 14](docs/design/14-worker-setup.md)).
 - Postgres 원장. 기본은 한 대, HA는 선택 모듈.
 
+## 스크린샷
+
+설치 리허설(빈 호스트에 라우터 1 + ROCm 워커 2 + UI 워커, 폐쇄망)에서 찍었습니다. 주소는 문서용 주소로 바꿨습니다. 테마는
+기본값이 브라우저를 따르고(자동), 개인 설정에서 라이트/다크를 고를 수 있습니다.
+
+| | |
+|---|---|
+| ![대시보드](docs/images/dashboard-ko.png) **대시보드** — 내 작업, 그룹, 사용량 | ![워크플로](docs/images/workflow.png) **워크플로** — 그룹 선택이 붙은 stock ComfyUI 화면 |
+| ![대기열](docs/images/queue.png) **대기열** — 워커 두 대가 돌고 나머지는 대기 | ![워커](docs/images/workers.png) **시스템 → 워커** |
+| ![워커 설치](docs/images/setup-command.png) **워커 설치** — 빈 호스트에서 실행할 검증된 명령 한 줄 | ![호스트 점검](docs/images/host-check.png) **호스트 점검** — 드라이버, 디렉터리, venv, 시계, 라우터 |
+| ![롤아웃](docs/images/rollout.png) **롤아웃** — 인스턴스, 프로필, 감사 로그 | ![통계](docs/images/statistics.png) **통계** — 그룹·사용자·워커별 |
+
 ## 빠른 시작
 
 ComfyFarm은 콘텐츠를 조직 네트워크 밖으로 내보낼 수 없는 곳을 위한 것입니다. 제어 호스트 한 대, NAS, ComfyUI를 돌리는 GPU

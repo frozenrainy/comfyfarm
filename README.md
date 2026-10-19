@@ -35,6 +35,18 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
   router do it over ssh), read the host check, add the worker ([design 14](docs/design/14-worker-setup.md)).
 - Postgres ledger; single box by default, HA as an optional module.
 
+## Screenshots
+
+From the install rehearsal (1 router + 2 ROCm workers + a UI worker on empty hosts, closed network); addresses replaced
+with documentation ones. The theme follows the browser by default (light/dark in personal settings).
+
+| | |
+|---|---|
+| ![Dashboard](docs/images/dashboard.png) **Dashboard** — the user's jobs, groups and usage | ![Workflow](docs/images/workflow.png) **Workflow** — stock ComfyUI frontend with a group picker |
+| ![Queue](docs/images/queue.png) **Queue** — two workers busy, the rest waiting | ![Workers](docs/images/workers.png) **System → Workers** |
+| ![Set up a worker](docs/images/setup-command.png) **Set up a worker** — one checked command for an empty host | ![Host check](docs/images/host-check.png) **Host check** — driver, directories, venvs, clock, router |
+| ![Rollout](docs/images/rollout.png) **Rollout** — instances, profiles, audit log | ![Statistics](docs/images/statistics.png) **Statistics** — per group, user and worker |
+
 ## Quick start
 
 ComfyFarm is for a site that keeps its content inside its own network: one control-plane host, a NAS, a handful of
