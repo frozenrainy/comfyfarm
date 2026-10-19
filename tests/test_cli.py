@@ -241,3 +241,17 @@ async def test_add_user_checks_the_password_and_keeps_the_role(dsn):
 async def test_doctor_on_an_empty_database_says_what_to_do(dsn):
     results = await doctor.run(fast_settings(dsn))
     assert results[0][0] == "FAIL" and "start the router once" in results[0][2]
+
+
+def test_prepare_makes_the_easy_state_once(tmp_path, capsys):
+    state = tmp_path / "state"
+    state.mkdir()
+    cli.main(["prepare", str(state)])
+    assert {p.name: oct(p.stat().st_mode & 0o777) for p in state.iterdir()} == \
+        {"secrets": "0o711", "keys": "0o700", "backups": "0o700"}       # Postgres reads its file by name, lists nothing
+    secrets = {p.name: p.read_text() for p in (state / "secrets").iterdir()}
+    assert set(secrets) == {"db_password", "gateway_secret", "session_key"}
+    capsys.readouterr()
+    cli.main(["prepare", str(state)])                                    # every later `docker compose up`
+    assert {p.name: p.read_text() for p in (state / "secrets").iterdir()} == secrets
+    assert "nothing changed" in capsys.readouterr().out

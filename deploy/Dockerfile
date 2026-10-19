@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-client 
 WORKDIR /opt/comfyfarm
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-RUN pip install --no-cache-dir . && mkdir -p /var/log/comfyfarm && chown comfyfarm /var/log/comfyfarm
+# /state: the easy deployment's volume — a new volume takes this directory's owner, so its init runs unprivileged
+RUN pip install --no-cache-dir . && mkdir -p /var/log/comfyfarm /state && chown comfyfarm:comfyfarm /var/log/comfyfarm /state
 USER comfyfarm
 # openssh-client: the `ssh` restart backend; postgresql-client: `comfyfarm backup/restore`
 EXPOSE 8188 8080

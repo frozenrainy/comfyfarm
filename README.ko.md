@@ -50,11 +50,17 @@ ComfyUI로 재현한 구체적인 장애에 묶여 있습니다.
 ComfyFarm은 콘텐츠를 조직 네트워크 밖으로 내보낼 수 없는 곳을 위한 것입니다. 제어 호스트 한 대, NAS, ComfyUI를 돌리는 GPU
 머신 몇 대로 이루어집니다. 설치는 엔지니어(또는 AI 어시스턴트)가 오후 한나절이면 되고, 그 뒤 운영은 대시보드에서 합니다.
 
-1. **제어 영역** — 라우터·게이트웨이·Postgres를 컨테이너로(`deploy/compose/`, 바깥에서 빌드해 안에서 `docker load`) 또는
-   systemd 서비스로(`deploy/systemd/`) 띄웁니다.
-2. **워커** — 각 GPU 머신의 stock ComfyUI를 ComfyFarm 런처로 띄우고, `comfyfarm_worker` 확장으로 제어 영역 주소만 받게
-   잠급니다(`COMFYFARM_ALLOW`).
-3. **점검** — `comfyfarm doctor`가 아직 맞지 않은 것을 한 줄씩 알려 줍니다.
+1. **제어 영역** — 라우터·게이트웨이·Postgres. 미리 고칠 파일이 없습니다.
+   ```sh
+   git clone https://github.com/frozenrainy/comfyfarm && cd comfyfarm/deploy/easy
+   docker compose up -d
+   docker compose logs router | grep "setup code"      # http://<이 호스트>:8080 을 열고 이 코드로 관리자를 만듭니다
+   ```
+   보안을 엄격하게(비밀값은 호스트에, 포트는 주소 하나에, 버전 고정): `deploy/compose/`, 컨테이너 없이:
+   `deploy/systemd/` — [설치](docs/guide/install.md) §1.
+2. **워커** — ComfyUI·venv·노드 세트를 한 번 게시하고([롤링 업그레이드](docs/guide/rollouts.md) §1), *시스템 → 워커 →
+   워커 설치*로 빈 리눅스 호스트를 점검된 워커로 만듭니다. UI 워커 먼저, 그다음 GPU 머신.
+3. **점검** — `docker compose exec router comfyfarm doctor`가 아직 맞지 않은 것을 한 줄씩 알려 줍니다.
 
 안내서(영문): [설치](docs/guide/install.md) · [운영](docs/guide/running.md) · [롤링 업그레이드](docs/guide/rollouts.md) ·
 [커스텀 노드](docs/guide/custom-nodes.md) · [백업](docs/guide/backup.md) · 보안 신고: [SECURITY.md](SECURITY.md)

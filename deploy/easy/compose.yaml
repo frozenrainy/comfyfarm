@@ -1,0 +1,85 @@
+# ComfyFarm control plane, the easy way:
+#
+#   docker compose up -d                      (builds the image the first time; -d keeps it running)
+#   docker compose logs router | grep "setup code"
+#   open http://<this host>:8080 — create the administrator with that code, then set up workers in the dashboard
+#
+# Nothing to edit first. Secrets are made on the first start into the `state` volume (files, not environment
+# variables); the router keeps its agent key and backups there too. Postgres is not published.
+# What "easy" leaves to you: ports 8080 (users) and 8188 (workers, monitoring) open on every address of this host —
+# restrict them with your firewall (Docker publishes past ufw), or use ../compose: secrets on the host, ports on one
+# address, pinned image versions (docs/guide/install.md). Optional settings: a .env file next to this one (below).
+name: comfyfarm
+
+services:
+  init:                                     # makes /state once (secrets, keys, backups) and exits; never changes it
+    image: comfyfarm:${COMFYFARM_VERSION:-0.1.0.dev0}
+    build: &build
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    command: ["comfyfarm", "prepare", "/state"]
+    volumes:
+      - state:/state
+    restart: "no"
+
+  db:
+    image: postgres:17                      # major 17 = the client tools in the comfyfarm image (backups)
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: comfyfarm
+      POSTGRES_DB: comfyfarm
+      POSTGRES_PASSWORD_FILE: /state/secrets/db_password
+    volumes:
+      - db:/var/lib/postgresql/data
+      - state:/state:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U comfyfarm -d comfyfarm"]
+      interval: 5s
+      retries: 20
+
+  router:
+    image: comfyfarm:${COMFYFARM_VERSION:-0.1.0.dev0}
+    build: *build
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      COMFYFARM_DSN: postgresql://comfyfarm@db/comfyfarm
+      PGPASSWORD_FILE: /state/secrets/db_password
+      COMFYFARM_GATEWAY_SECRET_FILE: /state/secrets/gateway_secret
+      COMFYFARM_KEYS_DIR: /state/keys
+      COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}
+      COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:+/artifacts}
+    ports:
+      - "${ROUTER_PORT:-8188}:8188"         # workers' launchers, /metrics — not for users' browsers
+    volumes:
+      - state:/state
+      - logs:/var/log/comfyfarm
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:/artifacts:ro   # optional: the artifact store, read-only
+      - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # optional: the UI worker's user directory (backups)
+
+  gateway:
+    image: comfyfarm:${COMFYFARM_VERSION:-0.1.0.dev0}
+    build: *build
+    restart: unless-stopped
+    depends_on:
+      - router
+    command: ["comfyfarm-gateway", "--router", "http://router:8188", "--ui", "${UI_WORKER_URL:-auto}",
+              "--port", "8080", "--log-dir", "/var/log/comfyfarm"]
+    environment:
+      COMFYFARM_GATEWAY_SECRET_FILE: /state/secrets/gateway_secret
+      COMFYFARM_SESSION_KEY_FILE: /state/secrets/session_key
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"        # the address users open
+    volumes:
+      - state:/state:ro
+      - logs:/var/log/comfyfarm
+
+volumes:
+  state:
+  db:
+  logs:

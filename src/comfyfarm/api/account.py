@@ -64,6 +64,50 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(401, "bad credentials")
         return {"user": u["username"], "epoch": u["session_epoch"]}
 
+    # ---- first administrator (a fresh install, easy deployment) -------------------------------------------------------
+    @api.get("/api/internal/first-admin")
+    async def first_admin_needed(request: Request):
+        """Does the login page offer to create the first administrator? Only while the router holds a setup code and
+        no administrator exists (one made with `comfyfarm add-user` meanwhile ends it)."""
+        gateway_only(request)
+        if ctx.router.setup_code is not None:
+            async with db.conn() as c:
+                if await c.fetchval("SELECT count(*) FROM users WHERE 'admin' = ANY(roles) AND disabled_at IS NULL"):
+                    ctx.router.setup_code = None
+        return {"needed": ctx.router.setup_code is not None}
+
+    @api.post("/api/internal/first-admin")
+    async def first_admin(request: Request):
+        """Create the first administrator with the setup code from the router's log; the code ends with it."""
+        gateway_only(request)
+        from ..rollout.engine import audit
+        from .admin import USERNAME
+        body = await request.json()
+        code = ctx.router.setup_code
+        if code is None:
+            raise HTTPException(409, "an administrator exists — log in")
+        given = str(body.get("code", "")).strip().upper().replace(" ", "")
+        if not hmac.compare_digest(given.encode(), code.encode()):
+            raise HTTPException(403, "wrong setup code")
+        name, password = str(body.get("username", "")), str(body.get("password", ""))
+        if not USERNAME.match(name):
+            raise HTTPException(400, "user name: letters, digits and . _ @ - (max 64), starting with a letter or digit")
+        if problem := password_problem(password):
+            raise HTTPException(400, f"password: {problem}")
+        async with db.conn() as c:
+            async with c.transaction():
+                await c.execute("SELECT pg_advisory_xact_lock(hashtext('comfyfarm first administrator'))")
+                if await c.fetchval("SELECT count(*) FROM users WHERE 'admin' = ANY(roles) AND disabled_at IS NULL"):
+                    ctx.router.setup_code = None
+                    raise HTTPException(409, "an administrator exists — log in")
+                if await c.fetchval("SELECT 1 FROM users WHERE username = $1", name):
+                    raise HTTPException(409, "that user name is taken")
+                epoch = await c.fetchval("INSERT INTO users(username, password_hash, roles) VALUES ($1, $2, '{admin}') "
+                                         "RETURNING session_epoch", name, hash_password(password))
+                await audit(c, name, "first administrator created", name)
+        ctx.router.setup_code = None
+        return {"user": name, "epoch": epoch}
+
     @api.get("/api/internal/login-options")
     async def login_options(request: Request):
         """For the gateway's login form: the user names, only if an admin enabled the drop-down."""

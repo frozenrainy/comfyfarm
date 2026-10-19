@@ -6,6 +6,8 @@
   comfyfarm backup <dir> [--user-dir PATH] [--pg-bin DIR]              ledger dump + user data + artifact list
   comfyfarm restore <backup-dir> --yes [--user-dir PATH] [--pg-bin DIR]
   comfyfarm doctor [--ui URL]                                          health of ledger, workers, groups, storage, disk
+  comfyfarm prepare <state-dir>                                        easy deployment: secrets/, keys/, backups/ in one
+                                                                       directory (made once, kept on every later run)
   comfyfarm secrets [--write DIR]                                      fresh gateway secret and session key (--write: also a
                                                                        database password, as files for compose secrets)
 
@@ -232,6 +234,21 @@ def write_secret_files(directory: str) -> list[str]:
     return written
 
 
+def prepare_state(root: str) -> list[str]:
+    """The easy deployment's state directory (a volume): secrets/ (0711 — Postgres, another user, reads its file by
+    name; nobody can list it), keys/ and backups/ (0700). Run by the compose `init` service as the image's user before
+    anything else starts; idempotent."""
+    made = []
+    for sub, mode in (("secrets", 0o711), ("keys", 0o700), ("backups", 0o700)):
+        path = os.path.join(root, sub)
+        if not os.path.isdir(path):
+            os.makedirs(path)
+            made.append(sub + "/")
+        os.chmod(path, mode)
+    made += ["secrets/" + n for n in write_secret_files(os.path.join(root, "secrets"))]
+    return made
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="comfyfarm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -258,11 +275,17 @@ def main(argv=None):
     d = sub.add_parser("doctor", help="check ledger, workers, groups, storage, disk")
     d.add_argument("--ui", help="UI worker URL: verifies that GPU workers see files uploaded there (shared storage)")
     d.add_argument("--pg-bin")
+    pr = sub.add_parser("prepare", help="easy deployment: make the state directory (secrets, keys, backups) once")
+    pr.add_argument("dir")
     sc = sub.add_parser("secrets", help="print a fresh COMFYFARM_GATEWAY_SECRET and COMFYFARM_SESSION_KEY")
     sc.add_argument("--write", metavar="DIR", help="write db_password, gateway_secret and session_key into DIR instead "
                                                    "(files for compose secrets; existing files are kept)")
     args = ap.parse_args(argv)
 
+    if args.cmd == "prepare":
+        made = prepare_state(args.dir)
+        print("state: " + (", ".join(made) + " made" if made else "already prepared, nothing changed"))
+        return
     if args.cmd == "secrets":
         if args.write:
             for name in write_secret_files(args.write):

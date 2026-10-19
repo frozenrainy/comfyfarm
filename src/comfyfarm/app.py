@@ -41,13 +41,32 @@ class Router:
         from .rollout.engine import Engine
         self.rollout = Engine(self)
         self.tasks: list[asyncio.Task] = []
+        self.setup_code: str | None = None      # set while the farm has no administrator (first_admin_code)
 
     async def start(self, loops: bool = True):
         await self.db.start()
+        await self.first_admin_code()
         if loops:
             self.tasks = [asyncio.create_task(x.run()) for x in (self.health, self.dispatcher, self.reconciler, self.events,
                                                                   self.rollout)]
             self.tasks.append(asyncio.create_task(self.listen()))
+
+    async def first_admin_code(self) -> str | None:
+        """A fresh install has no administrator: a one-time setup code lets whoever has it create the first one on the
+        gateway's login page (easy deployment: no command line). The code goes to this log only — reading the router's
+        log needs the host already — and is new on every start until an administrator exists."""
+        async with self.db.conn() as c:
+            admins = await c.fetchval("SELECT count(*) FROM users WHERE 'admin' = ANY(roles) AND disabled_at IS NULL")
+        if admins:
+            self.setup_code = None
+            return None
+        import secrets
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"            # no 0/O, 1/I: it is typed from a log
+        raw = "".join(secrets.choice(alphabet) for _ in range(12))
+        self.setup_code = "-".join(raw[i:i + 4] for i in range(0, 12, 4))
+        log.warning("no administrator yet — open the gateway in a browser and create one with setup code %s "
+                    "(valid until an administrator exists; a new code on every start)", self.setup_code)
+        return self.setup_code
 
     async def listen(self):
         """Wake the dispatcher on NOTIFY from any router sharing the ledger. Only an accelerator (docs/design/01):

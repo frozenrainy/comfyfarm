@@ -20,6 +20,37 @@ A ComfyFarm site has four kinds of machines. They can share hosts on a small far
 
 ## 1. Control plane (containers)
 
+Two compose files, the same images:
+
+| | `deploy/easy/` | `deploy/compose/` (strict) |
+|---|---|---|
+| first start | `docker compose up -d`, nothing to edit | secrets, `.env`, state directories by hand (below) |
+| secrets | made on first start, files in the `state` volume | files on the host (`/srv/comfyfarm/secrets`, 0700) |
+| ports | 8080 and 8188 on every address of the host | `<host-ip>:<port>` you choose |
+| image tag | the release's default | required (`COMFYFARM_VERSION`) |
+| first administrator | in the browser, with the setup code from `docker compose logs router` | the same, or `comfyfarm add-user` |
+| keys, backups | in the `state` volume | `/srv/comfyfarm/{keys,backups}` |
+
+Neither puts a secret into the environment (`docker inspect` shows none) or publishes Postgres. Easy is for a farm
+behind a firewall you control; restrict 8188 to the worker hosts there — Docker publishes past ufw.
+
+### Easy
+
+```sh
+git clone https://github.com/frozenrainy/comfyfarm && cd comfyfarm/deploy/easy    # or the release tarball
+docker compose up -d                                   # builds the image the first time
+docker compose logs router | grep "setup code"
+```
+
+Open `http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
+start until one exists). Optional settings go into a `.env` next to `compose.yaml`: `GATEWAY_PORT`, `ROUTER_PORT`,
+`COMFYFARM_ARTIFACTS_MOUNT`, `COMFYFARM_USER_DIR`, `UI_WORKER_URL`, `COMFYFARM_DEFAULT_GROUP` (as in the strict file).
+Closed network: build the image outside (`docker compose build`, then `docker save comfyfarm:<version> postgres:17`),
+`docker load` it inside next to the repository. Backups: `docker compose exec router comfyfarm backup /state/backups
+--user-dir /userdata`, then copy them off the host (`docker compose cp router:/state/backups .`).
+
+### Strict
+
 On a machine with internet access, build the image with a version tag (never `latest`: the tag in `.env` is what
 an upgrade changes) and carry it in:
 
@@ -47,7 +78,8 @@ sudo editor .env      # COMFYFARM_VERSION=$V; ROUTER_PORT/GATEWAY_PORT as <host-
 sudo mkdir -p /srv/comfyfarm/keys /srv/comfyfarm/backups && sudo chown 10001 /srv/comfyfarm/keys /srv/comfyfarm/backups
 sudo chmod 700 /srv/comfyfarm/keys
 docker compose up -d                                          # (the router keeps its agent key and backups there)
-docker compose exec router comfyfarm add-user <you> --admin   # asks for the password
+docker compose exec router comfyfarm add-user <you> --admin   # asks for the password (or: the browser, with the
+                                                              # setup code from `docker compose logs router`)
 ```
 
 The secrets are mounted into the containers as compose secrets (`/run/secrets/…`, read through `PGPASSWORD_FILE`,

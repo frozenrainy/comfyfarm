@@ -462,3 +462,56 @@ async def test_ui_worker_auto_is_the_one_set_up_in_the_dashboard(dsn, fakes):
             await task
         for r in runners:
             await r.cleanup()
+
+
+async def test_first_administrator_from_the_login_page(dsn, caplog):
+    """Easy deployment: no command line for the first administrator — the setup code from the router's log."""
+    import logging
+    started = []
+    router_app = create_app(fast_settings(dsn, dev_identity=None, gateway_secret=SECRET))
+    with caplog.at_level(logging.WARNING):
+        router_port = await serve_asgi(router_app, started)
+    code = router_app.state.router.setup_code
+    assert code and code in caplog.text                                   # where the operator finds it
+    gw = f"http://127.0.0.1:{await serve_asgi(create_gateway(GatewaySettings(f'http://127.0.0.1:{router_port}', 'auto', SECRET, b'k' * 32)), started)}"
+    try:
+        async with httpx.AsyncClient() as c:
+            assert "action=/comfyfarm/setup" in (await c.get(f"{gw}/comfyfarm/login")).text
+
+            async def setup(**kw):
+                form = {"code": code, "username": "boss", "password": "password-1", "again": "password-1", **kw}
+                return (await c.post(f"{gw}/comfyfarm/setup", data=form)).headers["location"]
+            assert (await setup(code="AAAA-BBBB-CCCC")).endswith("s=code")
+            assert (await setup(again="password-2")).endswith("s=differ")
+            assert (await setup(password="short", again="short")).endswith("s=short")
+            assert (await setup(username="-x")).endswith("s=name")
+            assert await setup(code=f" {code.lower()} ") == "/comfyfarm/dashboard/"     # typed from a log: case, spaces
+            me = (await c.get(f"{gw}/api/farm/me")).json()
+            assert me["user"] == "boss" and me["admin"]
+        async with httpx.AsyncClient() as other:                              # the offer is gone, the code is spent
+            assert "action=/comfyfarm/login" in (await other.get(f"{gw}/comfyfarm/login")).text
+            r = await other.post(f"{gw}/comfyfarm/setup", data={"code": code, "username": "eve", "password": "password-1",
+                                                                "again": "password-1"})
+            assert r.headers["location"] == "/comfyfarm/login"
+        async with router_app.state.router.db.conn() as conn:
+            assert await conn.fetchval("SELECT count(*) FROM users") == 1
+            assert await conn.fetchval("SELECT count(*) FROM audit_log WHERE action = 'first administrator created'") == 1
+        assert await router_app.state.router.first_admin_code() is None     # a restart offers nothing either
+    finally:
+        for server, task in started:
+            server.should_exit = True
+            await task
+
+
+async def test_first_administrator_only_once_when_two_try_at_once(dsn):
+    app = create_app(fast_settings(dsn, gateway_secret=SECRET))
+    G = {"x-comfyfarm-gateway-login": SECRET}
+    async with app.router.lifespan_context(app):
+        code = app.state.router.setup_code
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            assert (await c.get("/api/internal/first-admin")).status_code == 403              # the gateway only
+            assert (await c.get("/api/internal/first-admin", headers=G)).json() == {"needed": True}
+            rs = await asyncio.gather(*(c.post("/api/internal/first-admin", headers=G, json={
+                "code": code, "username": f"admin{i}", "password": "password-1"}) for i in range(4)))
+            assert sorted(r.status_code for r in rs) == [200, 409, 409, 409]
+            assert (await c.get("/api/internal/first-admin", headers=G)).json() == {"needed": False}

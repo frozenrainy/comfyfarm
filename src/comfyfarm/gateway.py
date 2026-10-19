@@ -67,9 +67,16 @@ input, select {{ font:inherit; color:var(--text); background:var(--panel); borde
 button {{ font:inherit; padding:.5rem; border:0; border-radius:6px; background:var(--accent); color:var(--panel); cursor:pointer; font-weight:600 }}
 p {{ margin:0 }} .bad {{ color:var(--bad) }} .note {{ color:var(--muted) }}
 </style></head><body>
-<form method=post action=/comfyfarm/login><h1>ComfyFarm</h1>{msg}<input type=hidden name=next value="{next}">
-{user_field}<input name=password type=password placeholder="{password}" autocomplete=current-password><button>{login}</button></form>
+{form}
 </body></html>"""
+LOGIN_FORM = """<form method=post action=/comfyfarm/login><h1>ComfyFarm</h1>{msg}<input type=hidden name=next value="{next}">
+{user_field}<input name=password type=password placeholder="{password}" autocomplete=current-password><button>{login}</button></form>"""
+# A fresh install (no administrator): the first one is made here with the setup code from the router's log.
+SETUP_FORM = """<form method=post action=/comfyfarm/setup><h1>{title}</h1><p class=note>{note}</p>{msg}
+<input name=code placeholder="{code}" autocomplete=off autofocus spellcheck=false>
+<input name=username placeholder="{user}" autocomplete=username>
+<input name=password type=password placeholder="{password}" autocomplete=new-password>
+<input name=again type=password placeholder="{again}" autocomplete=new-password><button>{create}</button></form>"""
 IDENTITY_HEADERS = {"x-comfyfarm-user", "x-comfyfarm-roles", "x-comfyfarm-gateway", "comfy-user",
                     "x-comfyfarm-gateway-login"}
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
@@ -82,9 +89,18 @@ COOKIE = "comfyfarm_session"
 # The login page in the language the dashboard was last set to (cookie comfyfarm_lang), else the browser's.
 LOGIN_TEXT = {
     "en": {"user": "User", "password": "Password", "login": "Log in", "failed": "Login failed",
-           "down": "The farm is not answering — try again shortly", "pw": "Password changed. Log in again."},
+           "down": "The farm is not answering — try again shortly", "pw": "Password changed. Log in again.",
+           "setup": "Create the administrator", "code": "Setup code", "again": "Password again", "create": "Create and log in",
+           "setup_note": "No administrator yet. The setup code is in the router's log "
+                         "(docker compose logs router).",
+           "s_code": "Wrong setup code", "s_differ": "The passwords differ", "s_short": "Password: at least 8 characters",
+           "s_name": "User name: letters, digits and . _ @ -, starting with a letter or digit"},
     "ko": {"user": "사용자", "password": "비밀번호", "login": "로그인", "failed": "로그인하지 못했습니다",
-           "down": "팜이 응답하지 않습니다 — 잠시 뒤 다시 시도하세요", "pw": "비밀번호를 바꿨습니다. 다시 로그인하세요."},
+           "down": "팜이 응답하지 않습니다 — 잠시 뒤 다시 시도하세요", "pw": "비밀번호를 바꿨습니다. 다시 로그인하세요.",
+           "setup": "관리자 만들기", "code": "설정 코드", "again": "비밀번호 확인", "create": "만들고 로그인",
+           "setup_note": "아직 관리자가 없습니다. 설정 코드는 라우터 로그에 있습니다 (docker compose logs router).",
+           "s_code": "설정 코드가 맞지 않습니다", "s_differ": "두 비밀번호가 다릅니다", "s_short": "비밀번호: 8자 이상",
+           "s_name": "사용자 이름: 영문·숫자·. _ @ -, 영문이나 숫자로 시작"},
 }
 
 
@@ -266,9 +282,25 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         except (httpx.HTTPError, ValueError):
             return None
 
+    async def first_admin_needed() -> bool:
+        try:
+            r = await http.get(f"{s.router_url}/api/internal/first-admin", headers={"x-comfyfarm-gateway-login": s.secret},
+                               timeout=3)
+            return r.status_code == 200 and r.json().get("needed") is True
+        except (httpx.HTTPError, ValueError):
+            return False
+
     async def login_page(request: Request):
         lang = login_lang(request)
         tx = LOGIN_TEXT[lang]
+        if s.provider == "local" and await first_admin_needed():
+            err = request.query_params.get("s")
+            msg = f'<p class=bad>{tx["s_" + err]}</p>' if err in ("code", "differ", "short", "name") else ""
+            if request.query_params.get("e") == "2":
+                msg = f'<p class=bad>{tx["down"]}</p>'
+            return HTMLResponse(LOGIN_PAGE.format(lang=lang, form=SETUP_FORM.format(
+                title=tx["setup"], note=html.escape(tx["setup_note"]), msg=msg, code=tx["code"], user=tx["user"],
+                password=tx["password"], again=tx["again"], create=tx["create"])))
         err = request.query_params.get("e")
         note = tx["pw"] if request.query_params.get("m") == "pw" else ""
         nxt = safe_next(request.query_params.get("next"))
@@ -280,8 +312,34 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             user_field = f'<input name=username placeholder="{tx["user"]}" autocomplete=username autofocus>'
         msg = (f'<p class=bad>{tx["down"] if err == "2" else tx["failed"]}</p>' if err else "") \
             + (f'<p class=note>{html.escape(note)}</p>' if note else "")
-        return HTMLResponse(LOGIN_PAGE.format(next=html.escape(nxt), user_field=user_field, msg=msg, lang=lang,
-                                              password=tx["password"], login=tx["login"]))
+        return HTMLResponse(LOGIN_PAGE.format(lang=lang, form=LOGIN_FORM.format(
+            next=html.escape(nxt), user_field=user_field, msg=msg, password=tx["password"], login=tx["login"])))
+
+    async def setup(request: Request):
+        """The first administrator (fresh install): the router checks the setup code; on success the new administrator
+        is logged in like after a password login."""
+        if not same_origin_ok(request) or s.provider != "local":
+            return Response(status_code=403)
+        form = await request.form()
+        if form.get("password", "") != form.get("again", ""):
+            return RedirectResponse("/comfyfarm/login?s=differ", status_code=303)
+        try:
+            r = await http.post(f"{s.router_url}/api/internal/first-admin", headers={"x-comfyfarm-gateway-login": s.secret},
+                                json={k: form.get(k, "") for k in ("code", "username", "password")})
+        except httpx.HTTPError:
+            return RedirectResponse("/comfyfarm/login?e=2", status_code=303)
+        if r.status_code == 403:
+            return RedirectResponse("/comfyfarm/login?s=code", status_code=303)
+        if r.status_code == 400:
+            detail = str((r.json() if r.headers.get("content-type", "").startswith("application/json") else {}).get("detail", ""))
+            return RedirectResponse(f"/comfyfarm/login?s={'short' if detail.startswith('password') else 'name'}", status_code=303)
+        if r.status_code != 200:
+            return RedirectResponse("/comfyfarm/login", status_code=303)      # an administrator exists: the login form
+        d = r.json()
+        resp = RedirectResponse(DASHBOARD, status_code=303)
+        resp.set_cookie(COOKIE, sign_session(Identity(d["user"], frozenset(), d["epoch"]), s.session_key),
+                        httponly=True, samesite="lax", secure=s.secure_cookie, max_age=7 * 86400)
+        return resp
 
     async def login(request: Request):
         if not same_origin_ok(request):
@@ -449,6 +507,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
     return Starlette(routes=[
         Route("/comfyfarm/login", login_page, methods=["GET"]),
         Route("/comfyfarm/login", login, methods=["POST"]),
+        Route("/comfyfarm/setup", setup, methods=["POST"]),
         Route("/comfyfarm/logout", logout, methods=["GET", "POST"]),
         WebSocketRoute("/ws", ws_endpoint),
         Route("/{path:path}", handle, methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]),

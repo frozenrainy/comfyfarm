@@ -53,11 +53,18 @@ ComfyFarm is for a site that keeps its content inside its own network: one contr
 GPU machines running ComfyUI. Installing takes an engineer (or an AI assistant) an afternoon; running it afterwards
 is the dashboard.
 
-1. **Control plane** — router, gateway and Postgres as containers: `deploy/compose/` (build outside, `docker load`
-   inside), or as systemd services: `deploy/systemd/`.
-2. **Workers** — stock ComfyUI on each GPU machine, started by ComfyFarm's launcher, with the `comfyfarm_worker`
-   extension locked to the control plane (`COMFYFARM_ALLOW`).
-3. **Check** — `comfyfarm doctor` tells you, line by line, what is not right yet.
+1. **Control plane** — router, gateway and Postgres, nothing to edit first:
+   ```sh
+   git clone https://github.com/frozenrainy/comfyfarm && cd comfyfarm/deploy/easy
+   docker compose up -d
+   docker compose logs router | grep "setup code"      # open http://<this host>:8080 and create the administrator
+   ```
+   Hardened instead (secrets on the host, ports on one address, pinned versions): `deploy/compose/`; without
+   containers: `deploy/systemd/` — [install](docs/guide/install.md) §1.
+2. **Workers** — publish ComfyUI, a venv and node sets once ([rolling upgrades](docs/guide/rollouts.md) §1), then
+   *System → Workers → Set up a worker* turns each empty Linux host into a checked worker: the UI worker first, then
+   the GPU machines.
+3. **Check** — `docker compose exec router comfyfarm doctor` tells you, line by line, what is not right yet.
 
 Guides: [install](docs/guide/install.md) · [running](docs/guide/running.md) · [rolling upgrades](docs/guide/rollouts.md) ·
 [custom nodes](docs/guide/custom-nodes.md) · [backup](docs/guide/backup.md) · security reports: [SECURITY.md](SECURITY.md)
