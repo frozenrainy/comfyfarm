@@ -6,11 +6,13 @@
   comfyfarm backup <dir> [--user-dir PATH] [--pg-bin DIR]              ledger dump + user data + artifact list
   comfyfarm restore <backup-dir> --yes [--user-dir PATH] [--pg-bin DIR]
   comfyfarm doctor [--ui URL]                                          health of ledger, workers, groups, storage, disk
-  comfyfarm secrets                                                    print fresh gateway secret and session key
+  comfyfarm secrets [--write DIR]                                      fresh gateway secret and session key (--write: also a
+                                                                       database password, as files for compose secrets)
 
 Configuration comes from the environment: COMFYFARM_DSN (required), COMFYFARM_INSTANCE, COMFYFARM_GATEWAY_SECRET,
 COMFYFARM_DEFAULT_GROUP, COMFYFARM_ARTIFACTS_DIR, COMFYFARM_KEYS_DIR (ssh keys and agent token files the restart
 backends may reference; default /etc/comfyfarm/keys), COMFYFARM_DEV_IDENTITY (loopback development only).
+Secrets may come from files instead: PGPASSWORD_FILE, COMFYFARM_GATEWAY_SECRET_FILE (compose secrets).
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 from .core import access
 from .core.settings import Settings
 from .db import Database
+from .envfile import load_secret_files
 from .identity import hash_password
 
 ENV_PREFIX = "COMFYFARM_"
@@ -207,6 +210,28 @@ def restore_user_dir(tar: str, user_dir: str) -> None:
 
 
 # ---- entry point --------------------------------------------------------------------------------------------------------
+SECRET_FILES = {"db_password": 24, "gateway_secret": 32, "session_key": 48}   # file → bytes of randomness
+
+
+def write_secret_files(directory: str) -> list[str]:
+    """Fresh secrets as files, readable by the containers that mount them (0444 — keep DIR itself 0700). An existing
+    file is never replaced: a new database password would not match the initialised database, and a new session key
+    logs everyone out."""
+    import secrets as _s
+    written = []
+    for name, size in SECRET_FILES.items():
+        path = os.path.join(directory, name)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(_s.token_urlsafe(size) + "\n")
+        os.chmod(path, 0o444)                                       # the umask must not take the containers' read away
+        written.append(name)
+    return written
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="comfyfarm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -233,14 +258,21 @@ def main(argv=None):
     d = sub.add_parser("doctor", help="check ledger, workers, groups, storage, disk")
     d.add_argument("--ui", help="UI worker URL: verifies that GPU workers see files uploaded there (shared storage)")
     d.add_argument("--pg-bin")
-    sub.add_parser("secrets", help="print a fresh COMFYFARM_GATEWAY_SECRET and COMFYFARM_SESSION_KEY")
+    sc = sub.add_parser("secrets", help="print a fresh COMFYFARM_GATEWAY_SECRET and COMFYFARM_SESSION_KEY")
+    sc.add_argument("--write", metavar="DIR", help="write db_password, gateway_secret and session_key into DIR instead "
+                                                   "(files for compose secrets; existing files are kept)")
     args = ap.parse_args(argv)
 
     if args.cmd == "secrets":
+        if args.write:
+            for name in write_secret_files(args.write):
+                print(f"wrote {os.path.join(args.write, name)}")
+            return
         import secrets as _s
         print(f"COMFYFARM_GATEWAY_SECRET={_s.token_urlsafe(32)}")
         print(f"COMFYFARM_SESSION_KEY={_s.token_urlsafe(48)}")
         return
+    load_secret_files()
     if args.cmd == "serve":
         import uvicorn
         if os.environ.get("COMFYFARM_DEV_IDENTITY") and args.host not in ("127.0.0.1", "::1", "localhost"):

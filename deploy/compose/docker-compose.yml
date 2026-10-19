@@ -1,15 +1,26 @@
 # ComfyFarm control plane: Postgres + router + gateway on one host. Workers (GPU machines running ComfyUI) and the
-# UI worker are separate — see docs/guide/install.md. Settings come from .env next to this file (cp env.example .env).
+# UI worker are separate — see docs/guide/install.md. Settings come from .env next to this file (cp env.example .env);
+# the three secrets are files in COMFYFARM_SECRETS_DIR (`comfyfarm secrets --write`), never values in the environment,
+# where `docker inspect` would show them.
 name: comfyfarm
+
+secrets:
+  db_password:
+    file: ${COMFYFARM_SECRETS_DIR:-/srv/comfyfarm/secrets}/db_password
+  gateway_secret:
+    file: ${COMFYFARM_SECRETS_DIR:-/srv/comfyfarm/secrets}/gateway_secret
+  session_key:
+    file: ${COMFYFARM_SECRETS_DIR:-/srv/comfyfarm/secrets}/session_key
 
 services:
   db:
-    image: postgres:17                # the same major version as the client tools in the comfyfarm image (backups)
+    image: postgres:${POSTGRES_VERSION:-17}   # major 17 = the client tools in the comfyfarm image (backups)
     restart: unless-stopped
     environment:
       POSTGRES_USER: comfyfarm
       POSTGRES_DB: comfyfarm
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
     volumes:
       - db:/var/lib/postgresql/data
     healthcheck:
@@ -18,7 +29,7 @@ services:
       retries: 20
 
   router:
-    image: comfyfarm:${COMFYFARM_VERSION:-latest}
+    image: comfyfarm:${COMFYFARM_VERSION:?set COMFYFARM_VERSION in .env (the tag you built and loaded)}
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
@@ -27,18 +38,19 @@ services:
       db:
         condition: service_healthy
     environment:
-      # the password goes separately (libpq reads PGPASSWORD): in the URL, a / or # in it would break the DSN
+      # the password goes separately (read into PGPASSWORD at start): in the URL, a / or # would break the DSN
       COMFYFARM_DSN: postgresql://comfyfarm@db/comfyfarm
-      PGPASSWORD: ${DB_PASSWORD}
+      PGPASSWORD_FILE: /run/secrets/db_password
       COMFYFARM_KEYS_DIR: /keys
-      COMFYFARM_GATEWAY_SECRET: ${COMFYFARM_GATEWAY_SECRET:?run comfyfarm secrets and put the values in .env}
+      COMFYFARM_GATEWAY_SECRET_FILE: /run/secrets/gateway_secret
       COMFYFARM_INSTANCE: ${COMFYFARM_INSTANCE:-comfyfarm-1}
       COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}
       COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:+/artifacts}
+    secrets: [db_password, gateway_secret]
     # Launchers on the workers fetch their render here; /metrics and /api/health/dispatch are here too.
     # Browsers never come here — firewall this port to the worker hosts and your monitoring.
     ports:
-      - "${ROUTER_PORT:-8188}:8188"
+      - "${ROUTER_PORT:-8188}:8188"       # <host-ip>:<port> publishes on one address only (Docker bypasses ufw)
     volumes:
       - logs:/var/log/comfyfarm
       - ${COMFYFARM_KEYS_DIR:-./keys}:/keys                          # agent key, known_hosts, token files (owned by uid 10001)
@@ -47,15 +59,16 @@ services:
       - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # the UI worker's user directory (backup --user-dir)
 
   gateway:
-    image: comfyfarm:${COMFYFARM_VERSION:-latest}
+    image: comfyfarm:${COMFYFARM_VERSION}
     restart: unless-stopped
     depends_on:
       - router
     command: ["comfyfarm-gateway", "--router", "http://router:8188", "--ui", "${UI_WORKER_URL:-auto}",
               "--port", "8080", "--log-dir", "/var/log/comfyfarm"]
     environment:
-      COMFYFARM_GATEWAY_SECRET: ${COMFYFARM_GATEWAY_SECRET}
-      COMFYFARM_SESSION_KEY: ${COMFYFARM_SESSION_KEY:?run comfyfarm secrets and put the values in .env}
+      COMFYFARM_GATEWAY_SECRET_FILE: /run/secrets/gateway_secret
+      COMFYFARM_SESSION_KEY_FILE: /run/secrets/session_key
+    secrets: [gateway_secret, session_key]
     ports:
       - "${GATEWAY_PORT:-8080}:8080"        # the only address users need
     volumes:

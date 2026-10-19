@@ -20,37 +20,51 @@ A ComfyFarm site has four kinds of machines. They can share hosts on a small far
 
 ## 1. Control plane (containers)
 
-On a machine with internet access, build the image and carry it in:
+On a machine with internet access, build the image with a version tag (never `latest`: the tag in `.env` is what
+an upgrade changes) and carry it in:
 
 ```sh
-docker build -f deploy/Dockerfile -t comfyfarm:latest .
+V=0.1.0.dev0                                                  # the version you build (pyproject.toml)
+docker build -f deploy/Dockerfile -t comfyfarm:$V .
 docker pull postgres:17
-docker save comfyfarm:latest postgres:17 | gzip > comfyfarm-images.tar.gz
+docker save comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
 ```
 
 The control-plane host needs Docker with the Compose v2 plugin (`docker compose version`; tested with Docker 29 and
 Compose 2.40, Ubuntu 24.04's `docker.io` and `docker-compose-v2`), and an ssh server if the UI worker will run on it
-(§2). Carry in the images and the release tarball, then:
+(§2). Carry in the images and the release (the tarball, or a `git clone` of the repository at that version), then:
 
 ```sh
 docker load < comfyfarm-images.tar.gz
 sudo tar xzf comfyfarm-<version>.tar.gz -C /opt                # → /opt/comfyfarm; keep it there (upgrades go over it)
+sudo install -d -m 700 /srv/comfyfarm/secrets                  # the three secrets, as files (never in .env)
+sudo docker run --rm -u 0 -v /srv/comfyfarm/secrets:/s comfyfarm:$V comfyfarm secrets --write /s
 cd /opt/comfyfarm/deploy/compose && sudo cp env.example .env && sudo chmod 600 .env
-docker run --rm comfyfarm:latest comfyfarm secrets | sudo tee -a .env >/dev/null
-sudo editor .env      # set DB_PASSWORD (letters/digits); COMFYFARM_ARTIFACTS_MOUNT=<ART> (the artifact store as mounted on
-                      # this host: the dashboard then lists and checks published artifacts); COMFYFARM_USER_DIR=<the UI
-                      # worker's user directory on this host> so that backups include the users' workflows (backup.md)
+sudo editor .env      # COMFYFARM_VERSION=$V; ROUTER_PORT/GATEWAY_PORT as <host-ip>:<port>; COMFYFARM_ARTIFACTS_MOUNT=<ART>
+                      # (the artifact store as mounted on this host: the dashboard then lists and checks published
+                      # artifacts); COMFYFARM_USER_DIR=<the UI worker's user directory on this host> so that backups
+                      # include the users' workflows (backup.md)
 sudo mkdir -p /srv/comfyfarm/keys /srv/comfyfarm/backups && sudo chown 10001 /srv/comfyfarm/keys /srv/comfyfarm/backups
+sudo chmod 700 /srv/comfyfarm/keys
 docker compose up -d                                          # (the router keeps its agent key and backups there)
 docker compose exec router comfyfarm add-user <you> --admin   # asks for the password
 ```
 
-**Upgrading the control plane**: `docker load` the new images, then unpack the new release **over** the old one
-(`sudo tar xzf comfyfarm-<version>.tar.gz -C /opt`) — never delete `/opt/comfyfarm` first: `.env` with the secrets
-lives there — and run `docker compose up -d`. Migrations run when the router starts; take a backup before (backup.md).
+The secrets are mounted into the containers as compose secrets (`/run/secrets/…`, read through `PGPASSWORD_FILE`,
+`COMFYFARM_GATEWAY_SECRET_FILE`, `COMFYFARM_SESSION_KEY_FILE`), so `docker inspect` does not show them. `--write` never
+replaces an existing file: the database password is fixed when Postgres first initialises its volume, and a new session
+key logs everyone out. Keep a copy of `/srv/comfyfarm/secrets` and `/srv/comfyfarm/keys` where you keep backups
+(backup.md) — a reinstall needs them.
 
-Not `docker compose build`/`run` for the first two steps: compose refuses to read its file until DB_PASSWORD and the
-two secrets are set. The database is PostgreSQL 17 because the image's `pg_dump` is 17 — a dump only restores into
+**Upgrading the control plane**: `docker load` the new images, then unpack the new release **over** the old one
+(`sudo tar xzf comfyfarm-<version>.tar.gz -C /opt`) — never delete `/opt/comfyfarm` first: your `.env` lives there —
+set `COMFYFARM_VERSION` to the new tag and run `docker compose up -d`. Migrations run when the router starts; take a
+backup before (backup.md). From a release that kept the secrets in `.env`: write each value into its file in
+`/srv/comfyfarm/secrets` (`DB_PASSWORD` → `db_password`, `COMFYFARM_GATEWAY_SECRET` → `gateway_secret`,
+`COMFYFARM_SESSION_KEY` → `session_key`, mode 0444, the directory 0700) and remove the three lines from `.env`.
+
+Not `docker compose build`/`run` for the first steps: compose refuses to read its file until COMFYFARM_VERSION is set
+and the three secret files exist. The database is PostgreSQL 17 because the image's `pg_dump` is 17 — a dump only restores into
 a server of the same major version (`comfyfarm doctor` checks this).
 
 Users open `http://<control-plane>:8080`. Port 8188 (router) is for the workers' launchers and for monitoring

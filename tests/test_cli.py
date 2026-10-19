@@ -22,6 +22,36 @@ def test_settings_from_env():
         cli.settings_from_env({})
 
 
+
+def test_secrets_from_files(tmp_path):
+    from comfyfarm.envfile import env_secret, load_secret_files
+    (tmp_path / "gw").write_text("s3cret-value\n")
+    (tmp_path / "pw").write_text("db pass/#\n")
+    (tmp_path / "empty").write_text("\n")
+    env = {"COMFYFARM_DSN": "postgresql://comfyfarm@db/comfyfarm", "COMFYFARM_GATEWAY_SECRET_FILE": str(tmp_path / "gw"),
+           "PGPASSWORD_FILE": str(tmp_path / "pw")}
+    load_secret_files(env)
+    assert env["PGPASSWORD"] == "db pass/#" and "PGPASSWORD_FILE" not in env          # the driver reads PGPASSWORD
+    assert cli.settings_from_env(env).gateway_secret == "s3cret-value"
+    assert env_secret("X", {"X": "plain"}) == "plain" and env_secret("X", {}) is None
+    for bad in ({"X": "a", "X_FILE": str(tmp_path / "gw")},                           # both: which wins would be a guess
+                {"X_FILE": str(tmp_path / "missing")}, {"X_FILE": str(tmp_path / "empty")}):
+        with pytest.raises(SystemExit):
+            env_secret("X", bad)
+
+
+def test_secrets_write_keeps_existing_files(tmp_path, capsys):
+    (tmp_path / "db_password").write_text("chosen-before\n")
+    cli.main(["secrets", "--write", str(tmp_path)])
+    assert (tmp_path / "db_password").read_text() == "chosen-before\n"             # Postgres was initialised with it
+    for name in ("gateway_secret", "session_key"):
+        f = tmp_path / name
+        assert len(f.read_text().strip()) >= 32 and f.stat().st_mode & 0o777 == 0o444
+    first = (tmp_path / "session_key").read_text()
+    capsys.readouterr()
+    cli.main(["secrets", "--write", str(tmp_path)])                              # a second run writes nothing
+    assert (tmp_path / "session_key").read_text() == first and capsys.readouterr().out == ""
+
 async def test_backup_and_restore_round_trip(dsn, tmp_path):
     r = Router(fast_settings(dsn))
     await r.start(loops=False)

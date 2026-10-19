@@ -462,7 +462,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="comfyfarm-gateway",
                                  description="Browser entry point: login, ComfyUI frontend, routing to the router and workers. "
                                              "Needs COMFYFARM_GATEWAY_SECRET (same as the router) and COMFYFARM_SESSION_KEY "
-                                             "(see `comfyfarm secrets`).")
+                                             "(see `comfyfarm secrets`), or each as a file: NAME_FILE=<path>.")
     ap.add_argument("--router", required=True, help="router URL, e.g. http://127.0.0.1:8188")
     ap.add_argument("--ui", default="auto", help="UI worker URL (a stock ComfyUI with the comfyfarm_ui extension), or "
                                                  "auto: the UI worker set up in the dashboard (default)")
@@ -474,6 +474,8 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--log-dir")
     a = ap.parse_args(argv)
+    from .envfile import load_secret_files
+    load_secret_files()                                  # COMFYFARM_GATEWAY_SECRET_FILE / COMFYFARM_SESSION_KEY_FILE
     secret = os.environ.get("COMFYFARM_GATEWAY_SECRET") or ap.error("COMFYFARM_GATEWAY_SECRET is not set")
     key = (os.environ.get("COMFYFARM_SESSION_KEY") or ap.error("COMFYFARM_SESSION_KEY is not set")).encode()
     if len(key) < 32:
