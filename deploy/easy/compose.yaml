@@ -1,6 +1,6 @@
 # ComfyFarm control plane, the easy way:
 #
-#   docker compose up -d                      (builds the image the first time; -d keeps it running)
+#   docker compose up -d                      (pulls the image from ghcr.io; -d keeps it running)
 #   docker compose logs router | grep "setup code"
 #   open http://<this host>:8080 — create the administrator with that code, then set up workers in the dashboard
 #
@@ -13,10 +13,11 @@ name: comfyfarm
 
 services:
   init:                                     # makes /state once (secrets, keys, backups) and exits; never changes it
-    image: comfyfarm:${COMFYFARM_VERSION:-0.1.0.dev0}
-    build: &build
+    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.1}
+    build: &build                           # only for `docker compose build` (a change of your own, a closed network)
       context: ../..
       dockerfile: deploy/Dockerfile
+    pull_policy: missing
     command: ["comfyfarm", "prepare", "/state"]
     volumes:
       - state:/state
@@ -41,8 +42,9 @@ services:
       retries: 20
 
   router:
-    image: comfyfarm:${COMFYFARM_VERSION:-0.1.0.dev0}
+    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.1}
     build: *build
+    pull_policy: missing
     restart: unless-stopped
     depends_on:
       db:
@@ -63,8 +65,9 @@ services:
       - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # optional: the UI worker's user directory (backups)
 
   gateway:
-    image: comfyfarm:${COMFYFARM_VERSION:-0.1.0.dev0}
+    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.1}
     build: *build
+    pull_policy: missing
     restart: unless-stopped
     depends_on:
       - router

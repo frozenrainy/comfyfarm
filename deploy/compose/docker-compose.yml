@@ -29,7 +29,7 @@ services:
       retries: 20
 
   router:
-    image: comfyfarm:${COMFYFARM_VERSION:?set COMFYFARM_VERSION in .env (the tag you built and loaded)}
+    image: ${COMFYFARM_IMAGE:-ghcr.io/frozenrainy/comfyfarm}:${COMFYFARM_VERSION:?set COMFYFARM_VERSION in .env (the image tag)}
     build:
       context: ../..
       dockerfile: deploy/Dockerfile
@@ -59,7 +59,7 @@ services:
       - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # the UI worker's user directory (backup --user-dir)
 
   gateway:
-    image: comfyfarm:${COMFYFARM_VERSION}
+    image: ${COMFYFARM_IMAGE:-ghcr.io/frozenrainy/comfyfarm}:${COMFYFARM_VERSION}
     restart: unless-stopped
     depends_on:
       - router

@@ -1,5 +1,6 @@
-# ComfyFarm router + gateway image (one image, two commands). Build outside the closed network, then
-#   docker save comfyfarm:<version> | gzip > comfyfarm.tar.gz   →   docker load < comfyfarm.tar.gz   inside.
+# ComfyFarm router + gateway image (one image, two commands). Published as ghcr.io/frozenrainy/comfyfarm:<version>
+# (.github/workflows/image.yml); for a closed network pull or build it outside, then
+#   docker save <image>:<version> | gzip > comfyfarm.tar.gz   →   docker load < comfyfarm.tar.gz   inside.
 FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-client postgresql-client \
  && rm -rf /var/lib/apt/lists/* \

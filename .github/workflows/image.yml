@@ -1,0 +1,63 @@
+# The control-plane image (router + gateway) on GitHub Container Registry, for a version tag (v0.1.0, v0.1.0-dev.1):
+# ghcr.io/<owner>/comfyfarm:<tag without v>, linux/amd64, with a signed build provenance. No `latest`: both compose
+# files name a version. Actions are pinned by commit.
+name: image
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write          # push to ghcr.io with the workflow's own token
+  id-token: write          # sign the provenance (Sigstore)
+  attestations: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+
+      - name: The tag is the package version
+        id: v
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          python3 - "$tag" <<'PY'
+          import re, sys, tomllib
+          tag, ver = sys.argv[1], tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          # PEP 440 spelling of the tag: 0.1.0-dev.1 → 0.1.0.dev1, 1.2.0-rc.2 → 1.2.0rc2
+          pep = re.sub(r"-(dev)\.?(\d+)$", r".\1\2", re.sub(r"-(a|b|rc)\.?(\d+)$", r"\1\2", tag))
+          if pep != ver:
+              sys.exit(f"tag v{tag} does not match pyproject.toml version {ver} (expected {pep})")
+          PY
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/comfyfarm" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069   # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f   # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc   # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.v.outputs.image }}:${{ steps.v.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.v.outputs.tag }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8   # v4.2.2
+        with:
+          subject-name: ${{ steps.v.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

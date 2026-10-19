@@ -38,28 +38,31 @@ behind a firewall you control; restrict 8188 to the worker hosts there — Docke
 
 ```sh
 git clone https://github.com/frozenrainy/comfyfarm && cd comfyfarm/deploy/easy    # or the release tarball
-docker compose up -d                                   # builds the image the first time
+docker compose up -d                                   # pulls the release image from ghcr.io
 docker compose logs router | grep "setup code"
 ```
 
 Open `http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
 start until one exists). Optional settings go into a `.env` next to `compose.yaml`: `GATEWAY_PORT`, `ROUTER_PORT`,
 `COMFYFARM_ARTIFACTS_MOUNT`, `COMFYFARM_USER_DIR`, `UI_WORKER_URL`, `COMFYFARM_DEFAULT_GROUP` (as in the strict file).
-Closed network: build the image outside (`docker compose build`, then `docker save comfyfarm:<version> postgres:17`),
-`docker load` it inside next to the repository. Backups: `docker compose exec router comfyfarm backup /state/backups
+Closed network: pull (or `docker compose build`) outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version>
+postgres:17`, and `docker load` it inside next to the repository. Backups: `docker compose exec router comfyfarm backup /state/backups
 --user-dir /userdata`, then copy them off the host (`docker compose cp router:/state/backups .`).
 
 ### Strict
 
-On a machine with internet access, build the image with a version tag (never `latest`: the tag in `.env` is what
-an upgrade changes) and carry it in:
+On a machine with internet access, take the image of a release (never `latest`: the tag in `.env` is what an upgrade
+changes) and carry it in:
 
 ```sh
-V=0.1.0.dev0                                                  # the version you build (pyproject.toml)
-docker build -f deploy/Dockerfile -t comfyfarm:$V .
+V=0.1.0-dev.1                                                 # a release tag without the v
+docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
-docker save comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
+docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
 ```
+
+The published image carries a signed build provenance: `gh attestation verify oci://ghcr.io/frozenrainy/comfyfarm:$V
+-R frozenrainy/comfyfarm` shows that it was built by this repository's workflow from the tagged commit.
 
 The control-plane host needs Docker with the Compose v2 plugin (`docker compose version`; tested with Docker 29 and
 Compose 2.40, Ubuntu 24.04's `docker.io` and `docker-compose-v2`), and an ssh server if the UI worker will run on it
@@ -69,7 +72,7 @@ Compose 2.40, Ubuntu 24.04's `docker.io` and `docker-compose-v2`), and an ssh se
 docker load < comfyfarm-images.tar.gz
 sudo tar xzf comfyfarm-<version>.tar.gz -C /opt                # → /opt/comfyfarm; keep it there (upgrades go over it)
 sudo install -d -m 700 /srv/comfyfarm/secrets                  # the three secrets, as files (never in .env)
-sudo docker run --rm -u 0 -v /srv/comfyfarm/secrets:/s comfyfarm:$V comfyfarm secrets --write /s
+sudo docker run --rm -u 0 -v /srv/comfyfarm/secrets:/s ghcr.io/frozenrainy/comfyfarm:$V comfyfarm secrets --write /s
 cd /opt/comfyfarm/deploy/compose && sudo cp env.example .env && sudo chmod 600 .env
 sudo editor .env      # COMFYFARM_VERSION=$V; ROUTER_PORT/GATEWAY_PORT as <host-ip>:<port>; COMFYFARM_ARTIFACTS_MOUNT=<ART>
                       # (the artifact store as mounted on this host: the dashboard then lists and checks published
