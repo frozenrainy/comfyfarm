@@ -74,7 +74,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.7                                                 # a release tag without the v
+V=0.1.0-dev.8                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
@@ -158,7 +158,9 @@ host-checked and rolled out with the others, so its ComfyUI and frontend follow 
 
 What a worker host needs before setup: Linux with systemd, Python ≥ 3.10, an ssh server, the GPU driver (ComfyFarm checks
 it, never installs it), the system libraries the GPU wheels load (ROCm PyTorch: `libatomic1`; the host check names any
-that is missing), and — for NFS mounts written by setup — `nfs-common`. Everything else comes from the router.
+that is missing), and its storage **already mounted**: the shared directories and the artifact store. Setup never
+mounts anything or edits `/etc/fstab` — storage is infrastructure, the site's (NFS, SMB, a local disk for a single
+host); the host check verifies the paths. Everything else comes from the router.
 
 The service account is its own: keep the default `comfyfarm` and setup creates it. It runs ComfyUI, and its
 `authorized_keys` holds only the router's restart key — setup refuses a person's login account (home under `/home`,
@@ -171,9 +173,8 @@ says so.
 
 **In the dashboard: System → Workers → Set up a worker** (docs/design/14). Describe the host — address, instance name,
 GPU, group, the profile to run, the router's address as the worker reaches it (`http://<router>:8188`), the paths (the
-artifact store at the **same path on every host**) and NFS mounts **only if setup should write them** (leave the box
-empty where the site has mounted the share; setup also leaves an existing mount alone). Then choose how setup gets
-root on the host:
+artifact store at the **same path on every host**). Hover the **?** next to a field for what it is for. Then choose
+how setup gets root on the host:
 
 - **Run a command yourself** (recommended): copy the one line the dashboard shows and run it on the host as a user who
   may use `sudo`. It downloads the setup script, checks it against the checksum shown, and runs it. The router never
@@ -187,8 +188,24 @@ Closed the dialog while the host was running the script? *Set up a worker* offer
 a reported one goes straight to *Add the worker*; for the others the dashboard makes a new command (the old one stops
 working).
 
+A value was wrong — the router address, a path? **Correct the values** (in the setup dialog, before the script has run
+or after it failed) opens the form again with everything filled in; the corrected setup replaces the old one, whose
+command stops working. Fixing the *host* instead (a package, a permission) needs no new setup: run the same command
+again.
+
+What setup does with what is already on the host — it never overwrites or deletes something it did not make:
+
+- **Service account**: an existing service account is used (the log says so); a different uid stops setup. A person's
+  login account is refused before anything changes.
+- **Directories**: existing ones are used as they are — never emptied, never given to another owner; the host check
+  says whether the service account can write them.
+- **`authorized_keys`**: setup's own file is replaced; one it did not write stops setup.
+- **Artifact store with builds on**: an empty one is handed to the build account; one with contents stops setup with
+  the command to hand it over.
+- **ComfyFarm's own files** (tools, unit, configuration): rewritten every run — that is how *Set up again* upgrades.
+
 The script creates the service account (`render`/`video` groups), installs the worker tools root-owned (the router
-cannot replace them), writes the unit and instance configuration, mounts NFS, installs the router's agent key with a
+cannot replace them), writes the unit and instance configuration, installs the router's agent key with a
 forced command, enables lingering — and runs the **host check**, which the dashboard shows line by line: driver and
 device access, directories, every published venv runs here, clock, the router answers, the port is free. Fix what it
 says and run the same command again (it is idempotent). When it is green, **Add the worker**: the dashboard adds it,
@@ -202,7 +219,8 @@ after a router upgrade (new worker tools), to change its address, group, profile
 
 **Allow builds from the dashboard on this host** (in *Set up a worker*): the host then builds recipes on request from
 *System → Rollout → Profiles → From a recipe* ([rollouts.md](rollouts.md) §1) — as a separate build account that
-owns the artifact store, never as the service account. It needs internet, git and uv on that host, and an artifact
+owns the artifact store, never as the service account. It needs internet and git on that host (setup brings a pinned uv, checked against its release
+checksum, into `/opt/comfyfarm/worker/bin`), and an artifact
 store that is empty or already that account's ([design 14](../design/14-worker-setup.md)).
 
 Worker access control: put `COMFYFARM_ALLOW=<control-plane address>` in the profile's environment (with containers

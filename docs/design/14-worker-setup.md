@@ -52,15 +52,27 @@ setup finishes). The script embeds the worker tools of this router version and t
    uses the same one): system user, home `/var/lib/comfyfarm`, groups `render` and `video` when present.
 3. Tools to `/opt/comfyfarm/worker/` (root, 0755/0644); unit to `/etc/systemd/user/`; instance environment and agent
    configuration to `/etc/comfyfarm/` (root, 0644 — no secrets in them).
-4. Optional mounts: `server:/export → mountpoint` lines become NFS entries in `/etc/fstab` (`_netdev,nofail`) and are
-   mounted now.
-5. Directories — after the mounts: `<LOCAL>` (owned by the account), the instance's input/output/user/temp
-   (created if missing; on shared storage they normally exist and must be writable by the account's uid).
-6. The router's agent public key into the account's `authorized_keys` (root-owned) with the forced command and every
+4. Directories: `<LOCAL>` (owned by the account), the instance's input/output/user/temp (created if missing; on
+   shared storage they normally exist and must be writable by the account's uid). An existing one is used as it is —
+   never emptied, never given to another owner — and the log says so.
+5. The router's agent public key into the account's `authorized_keys` (root-owned) with the forced command and every
    forwarding off.
-7. `loginctl enable-linger`; the unit is **not** started (nothing is assigned yet).
-8. `hostcheck` as the account; the result, the host's ssh host keys and the tool versions are POSTed back to
+6. `loginctl enable-linger`; the unit is **not** started (nothing is assigned yet).
+7. `hostcheck` as the account; the result, the host's ssh host keys and the tool versions are POSTed back to
    `/api/worker_setup/<token>/report`. The router pins the host keys (no trust-on-first-use later).
+
+Storage is not setup's (since 0.1.0-dev.8): shared storage and `<ART>` are mounted by the site before setup runs, and
+setup never writes `/etc/fstab` — mounts are infrastructure, with the site's own options, servers and failure modes.
+(Earlier setups could write NFS lines; the rehearsal found them stacking on a site's own mount, and a directory made
+before its mount hides under it.) A setup made before then that still carries mounts stops at its parameters and asks
+for *Correct the values*. Lines setup wrote earlier stay in `/etc/fstab` — they are the site's now.
+
+What exists is used, never overwritten: an account (a different uid stops setup; a person's login account is refused
+before any change), directories, an `authorized_keys` setup wrote (one it did not write stops setup), an artifact store
+(empty → handed to the build account; with contents → stop). Only ComfyFarm's own files — tools, unit, configuration —
+are rewritten on every run. There is no "overwrite" choice: what setup did not make, it does not replace. A wrong value
+is fixed with **Correct the values** (a setup that has not run or failed): a new setup with the form filled in replaces
+the old one (status `replaced`), whose token stops working.
 
 ## The host check (`hostcheck.py`, standard library, read-only)
 
@@ -114,7 +126,9 @@ any name that is not an installed recipe and runs `publish.py recipe` as `comfyf
 So the router can *name* a recipe root installed — never send one, never a path — and the service account that runs
 ComfyUI still cannot write the store (D-37 holds: what the launcher accepts is still only what root's recipes
 produced). The store must belong to `comfyfarm-build` (setup hands over an empty one, and stops with the command for
-one with contents); the host needs git and uv in `/usr/local/bin` or `/usr/bin`.
+one with contents); the host needs git. Setup installs uv itself: a pinned release, checked against its
+published SHA-256 before it is unpacked, to `/opt/comfyfarm/worker/bin/uv` (root-owned; fetched again only when the pin
+changes) — no system uv, no install script piped into a shell.
 
 What runs as root (the path unit's service) writes only into directories root owns and the build account cannot:
 `/var/lib/comfyfarm-build` (0711), its `status/` and `requests/`; the build account's own home is `home/` below.
@@ -144,5 +158,5 @@ interpreter inside the artifact (`<ART>/venv/<name>/.python/`) and refuses a ven
 
 ## Not in this round
 
-Windows workers (contract §9.2), driver installation, non-NFS mounts written by setup (SMB/CIFS: mount it yourself, the
-check still verifies it), a fleet view of host checks over time.
+Windows workers (contract §9.2), driver installation, mounting storage (the site's — above), a fleet view of host checks
+over time.

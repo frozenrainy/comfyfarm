@@ -30,12 +30,6 @@ GPU = ("amd", "nvidia", "none", "any")
 REPORT_LIMIT = 256 * 1024
 
 
-class MountIn(BaseModel):
-    source: str
-    target: str
-    options: str | None = None
-
-
 class SetupIn(BaseModel):
     role: str = "gpu"                           # gpu | ui (the UI worker: the screen and the users' files, no jobs)
     name: str                                   # the worker's name in the dashboard
@@ -51,8 +45,9 @@ class SetupIn(BaseModel):
     profile_id: int | None = None
     router_url: str                             # the router as the worker sees it
     paths: dict[str, str]                       # art, local, models, input, output, user, temp
-    mounts: list[MountIn] = []
+    mounts: list | None = None                  # gone in 0.1.0-dev.8 (storage is the site's): refused, not ignored
     builds: bool = False                        # allow builds from the dashboard on this host (build.py)
+    replaces: int | None = None                 # an unfinished setup this one corrects: its token stops working
     worker_id: int | None = None                # set up an existing worker again (new tools, other options)
 
 
@@ -97,11 +92,8 @@ def check_spec(body: SetupIn) -> None:
     if bad := rd.path_problems(body.paths, False):
         raise HTTPException(400, "; ".join(bad) + " — directories users write to must not overlap the store or the code "
                                  "under the local root (contract §4)")
-    for m in body.mounts:
-        if not re.fullmatch(r"[A-Za-z0-9._-]+:/\S*", m.source) or not m.target.startswith("/") or " " in m.target:
-            raise HTTPException(400, f"mount {m.source} → {m.target}: server:/export → /absolute/mountpoint")
-        if m.options and not re.fullmatch(r"[A-Za-z0-9_=,.-]+", m.options):
-            raise HTTPException(400, f"mount options {m.options!r}")
+    if body.mounts:
+        raise HTTPException(400, "setup no longer mounts storage: mount it on the host yourself, then set the paths")
 
 
 def instance_config(spec: dict, extra: dict) -> dict:
@@ -163,7 +155,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         spec = {"instance": body.instance, "role": body.role, "account": body.account, "uid": body.uid, "router_url": base,
                 "art": body.paths["art"], "local": body.paths["local"], "gpu": "none" if body.role == "ui" else body.gpu, "port": body.port, "listen": body.listen,
                 "paths": {k: v for k, v in body.paths.items() if k not in ("art", "local")},
-                "mounts": [m.model_dump(exclude_none=True) for m in body.mounts], "agent_pubkey": pub,
+                "agent_pubkey": pub,
                 "builds": body.builds, **({"previous_account": previous_account} if previous_account else {})}
         extra = {"name": body.name.strip(), "host": body.host, "ssh_port": body.ssh_port, "group": body.group,
                  "profile_id": body.profile_id, "again": body.worker_id}
@@ -178,6 +170,12 @@ def make_router(ctx: Ctx) -> APIRouter:
                     "VALUES ($1,$2,$3,$4,$5,$6, now() + $7::interval) RETURNING id",
                     hashlib.sha256(token.encode()).hexdigest(), spec, extra, script, sha, who, TOKEN_TTL)
                 await audit(c, who, "worker setup created", body.instance, host=body.host, setup=sid)
+                if body.replaces is not None:
+                    old = await c.fetchval("UPDATE worker_setups SET status = 'replaced', expires_at = now() WHERE id = $1 "
+                                           "AND status IN ('waiting', 'failed', 'reported') RETURNING id", body.replaces)
+                    if old is None:
+                        raise HTTPException(409, "the setup to correct is running, finished or unknown")
+                    await audit(c, who, "worker setup replaced", body.instance, setup=body.replaces, by=sid)
         url = f"{base}/api/worker_setup/{token}/script"
         return {"id": sid, "script_url": url, "script_sha256": sha, "command": hostsetup.operator_command(url, sha),
                 "expires_in": int(TOKEN_TTL.total_seconds())}
@@ -290,7 +288,7 @@ def make_router(ctx: Ctx) -> APIRouter:
     async def by_token(c, token: str, lock: bool = False):
         r = await c.fetchrow("SELECT * FROM worker_setups WHERE token_sha256 = $1" + (" FOR UPDATE" if lock else ""),
                              hashlib.sha256(token.encode()).hexdigest())
-        if r is None or r["status"] == "finished" or r["expires_at"] < dt.datetime.now(dt.timezone.utc):
+        if r is None or r["status"] in ("finished", "replaced") or r["expires_at"] < dt.datetime.now(dt.timezone.utc):
             raise HTTPException(404, "unknown or expired setup — make a new one in the dashboard")
         return r
 

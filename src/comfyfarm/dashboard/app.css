@@ -188,3 +188,14 @@ pre.code.wrap { white-space: pre-wrap; word-break: break-all; }
 /* setup dialog: the state row and a pane's own action button are not glued to what precedes them */
 .setup-status { margin-top: .9rem; }
 .pane-actions button { font-size: .9rem; padding: .3rem .9rem; }
+.tip { display: inline-flex; align-items: center; justify-content: center; width: 1.05rem; height: 1.05rem; margin-left: .35rem;
+       border: 1px solid var(--line); border-radius: 50%; font-size: .7rem; color: var(--muted); cursor: help; vertical-align: 1px; }
+.tip:hover, .tip:focus { color: var(--text); border-color: var(--muted); outline: none; }
+/* the explanation shows at once on hover and on keyboard focus (a title shows late, and never on focus) */
+.tip { position: relative; }
+.tip::after { content: attr(data-tip); position: absolute; left: -.4rem; top: calc(100% + .35rem); z-index: 20;
+              width: max-content; max-width: min(24rem, 70vw); padding: .45rem .6rem; border: 1px solid var(--line);
+              border-radius: 6px; background: var(--panel); color: var(--text); box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
+              font-size: .8rem; font-weight: normal; line-height: 1.4; text-align: left; white-space: normal;
+              word-break: keep-all; overflow-wrap: anywhere; pointer-events: none; opacity: 0; visibility: hidden; }
+.tip:hover::after, .tip:focus::after { opacity: 1; visibility: visible; }

@@ -199,7 +199,10 @@ export function formDialog(title, fields, submitLabel = t("Save"), { wide = fals
         inputs[f.name] = () => (f.type === "number" ? (inp.value === "" ? null : Number(inp.value)) : inp.value);
         control = inp;
       }
-      return h("div", { class: "field" }, h("div", { class: "label" }, f.label), control, f.hint ? h("div", { class: "hint" }, f.hint) : null);
+      if (f.tip && control.setAttribute) control.setAttribute("title", f.tip);
+      const label = h("div", { class: "label" }, f.label,
+        f.tip ? h("span", { class: "tip", "data-tip": f.tip, tabindex: "0", role: "img", "aria-label": f.tip }, "?") : null);
+      return h("div", { class: "field" }, label, control, f.hint ? h("div", { class: "hint" }, f.hint) : null);
     });
     const dlg = h("dialog", { class: wide ? "form wide" : "form" });
     const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };

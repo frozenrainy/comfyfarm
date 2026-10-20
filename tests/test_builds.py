@@ -107,10 +107,36 @@ def build_payload(**spec_kw):
 
 def builder_root(tmp_path):
     root = fake_root(tmp_path)
-    for tool in ("usr/local/bin/uv", "usr/bin/git"):
-        (root / tool).parent.mkdir(parents=True, exist_ok=True)
-        (root / tool).write_text("")
+    (root / "usr" / "bin").mkdir(parents=True, exist_ok=True)
+    (root / "usr" / "bin" / "git").write_text("")
     return root
+
+
+def uv_tarball(arch: str, binary: bytes = b"#!/bin/sh\necho uv\n") -> bytes:
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in ((f"uv-{arch}-unknown-linux-gnu/uv", binary), (f"uv-{arch}-unknown-linux-gnu/uvx", b"x")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+@pytest.fixture(autouse=True)
+def pinned_uv(monkeypatch, request):
+    """The pinned uv comes from a fake release: its checksum is pinned for this test, downloads are counted."""
+    import hashlib
+    if "shipped_uv_pin" in request.node.name:             # that one looks at the real pins
+        return None
+    import platform
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(platform.machine(), platform.machine())
+    blob = uv_tarball(arch)
+    monkeypatch.setattr(ws, "UV_SHA256", {arch: hashlib.sha256(blob).hexdigest()})
+    calls = []
+    monkeypatch.setattr(ws, "fetch_url", lambda url, timeout=120: calls.append(url) or blob)
+    return {"arch": arch, "calls": calls, "blob": blob}
 
 
 def test_setup_with_builds_installs_the_builder_and_without_removes_its_units(tmp_path):
@@ -129,7 +155,9 @@ def test_setup_with_builds_installs_the_builder_and_without_removes_its_units(tm
     assert oct(os.stat(root / "var/lib/comfyfarm-build/home").st_mode & 0o777) == "0o700"
     assert "COMFYFARM_AGENT_BUILD=1" in (root / "etc" / "comfyfarm" / "agent.env").read_text()
     svc = (root / "etc" / "systemd" / "system" / "comfyfarm-build.service").read_text()
-    assert "build.py run /srv/art /usr/local/bin/uv" in svc
+    assert "build.py run /srv/art /opt/comfyfarm/worker/bin/uv" in svc
+    uv = root / "opt" / "comfyfarm" / "worker" / "bin" / "uv"
+    assert uv.read_bytes().startswith(b"#!/bin/sh") and oct(uv.stat().st_mode & 0o777) == "0o755"
     assert "DirectoryNotEmpty=/var/lib/comfyfarm-build/requests" in (root / "etc/systemd/system/comfyfarm-build.path").read_text()
     assert ["systemctl", "enable", "--now", "comfyfarm-build.path"] in rec.calls
     assert ["chgrp", "comfyfarm", "/var/lib/comfyfarm-build/requests"] in rec.calls
@@ -144,14 +172,8 @@ def test_setup_with_builds_installs_the_builder_and_without_removes_its_units(tm
 
 
 def test_setup_with_builds_refuses_what_it_should(tmp_path):
-    res = ws.setup(build_payload(), ws.Host(root=str(fake_root(tmp_path / "a")), run=Recorder()))   # no uv
-    assert not res["ok"] and "uv" in res["error"]
-    assert "\n    curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh" in res["error"]
-    root = fake_root(tmp_path / "a2")                    # uv in someone's ~/.local/bin: copying it is offered first
-    (root / "home" / "op" / ".local" / "bin").mkdir(parents=True)
-    (root / "home" / "op" / ".local" / "bin" / "uv").write_text("")
-    res = ws.setup(build_payload(), ws.Host(root=str(root), run=Recorder()))
-    assert "\n    sudo install -m 755 /home/op/.local/bin/uv /usr/local/bin/uv\n" in res["error"]
+    res = ws.setup(build_payload(), ws.Host(root=str(fake_root(tmp_path / "a")), run=Recorder()))   # no git
+    assert not res["ok"] and "git" in res["error"]
     p = build_payload()
     p["build_files"]["../../etc/cron.d/x"] = base64.b64encode(b"* * * * * root sh").decode()
     res = ws.setup(p, ws.Host(root=str(builder_root(tmp_path / "b")), run=Recorder()))
@@ -165,6 +187,31 @@ def test_setup_with_builds_refuses_what_it_should(tmp_path):
     rec = Recorder()
     res = ws.setup(build_payload(), ws.Host(root=str(root), run=rec))
     assert res["ok"] and ["chown", "comfyfarm-build", "/srv/art"] in rec.calls
+
+
+def test_the_pinned_uv_is_checked_installed_once_and_never_taken_unverified(tmp_path, pinned_uv, monkeypatch):
+    """Field: uv had to be put on every account's PATH by hand. Setup now brings the version pinned with this release
+    — the release's checksum checked before anything is unpacked."""
+    root = builder_root(tmp_path)
+    assert ws.setup(build_payload(), ws.Host(root=str(root), run=Recorder()))["ok"]
+    assert len(pinned_uv["calls"]) == 1 and f"/{ws.UV_VERSION}/uv-{pinned_uv['arch']}-unknown-linux-gnu.tar.gz" in pinned_uv["calls"][0]
+    assert pinned_uv["calls"][0].startswith("https://github.com/astral-sh/uv/releases/download/")
+    assert ws.setup(build_payload(), ws.Host(root=str(root), run=Recorder()))["ok"] and len(pinned_uv["calls"]) == 1   # once
+    # another download (a tampered mirror, a new release under the same name): refused, nothing installed
+    monkeypatch.setattr(ws, "fetch_url", lambda url, timeout=120: uv_tarball(pinned_uv["arch"], b"evil"))
+    root2 = builder_root(tmp_path / "b")
+    res = ws.setup(build_payload(), ws.Host(root=str(root2), run=Recorder()))
+    assert not res["ok"] and "pinned checksum" in res["error"] and not (root2 / "opt/comfyfarm/worker/bin/uv").exists()
+
+    def offline(url, timeout=120):
+        raise OSError("Network is unreachable")
+    monkeypatch.setattr(ws, "fetch_url", offline)
+    res = ws.setup(build_payload(), ws.Host(root=str(builder_root(tmp_path / "c")), run=Recorder()))
+    assert not res["ok"] and "need internet" in res["error"]
+
+
+def test_the_shipped_uv_pin_is_the_release_checksum_format():
+    assert all(len(v) == 64 and int(v, 16) >= 0 for v in ws.UV_SHA256.values()) and set(ws.UV_SHA256) == {"x86_64", "aarch64"}
 
 
 def test_the_router_sends_build_tools_only_to_a_host_that_allows_builds():

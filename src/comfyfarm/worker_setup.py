@@ -6,22 +6,26 @@ parameters, the worker tools of its version, where to report); nothing here talk
 
 What it does, each step idempotent: the service account (render/video groups), the worker tools in /opt/comfyfarm/worker
 (root-owned — the router cannot replace them, D-40), the systemd user unit and the instance configuration in /etc,
-the instance directories, optional NFS mounts, the router's agent key with its forced command, lingering, the host
-check as the account — then it reports the result and this host's ssh host keys to the router.
+the instance directories, the router's agent key with its forced command, lingering, the host
+check as the account — then it reports the result and this host's ssh host keys to the router. Storage is the
+site's: setup never mounts anything or edits /etc/fstab — mount shared storage and the artifact store first.
 """
 from __future__ import annotations
 
 import base64
-import glob
 import grp
+import hashlib
+import io
 import json
 import os
+import platform
 import pwd
 import re
 import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import urllib.request
 
 PAYLOAD = None   # filled in by the router: {"spec": {...}, "files": {name: base64}, "report_url": "...", "version": "..."}
@@ -34,6 +38,54 @@ ACCOUNT = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 MARK = "# managed by ComfyFarm worker setup — changes are overwritten"
 BUILD_USER, BUILD_HOME = "comfyfarm-build", "/var/lib/comfyfarm-build"     # BUILD_HOME: root; the account's own home: /home below
 BUILD_UNITS = ("/etc/systemd/system/comfyfarm-build.path", "/etc/systemd/system/comfyfarm-build.service")
+# uv for builds, pinned with this ComfyFarm version: the release's own checksums (astral-sh/uv), checked before
+# anything is unpacked. Root-owned under TOOLS, used only by the build service — not put on anyone's PATH.
+UV_VERSION = "0.13.3"
+UV_SHA256 = {"x86_64": "e4f169ec380f1793b898a6f1fcbacd22db25cf7ca0349a6e96ffb85b69998d04",
+             "aarch64": "611ff684f193a84d2fdad29c5f12505d02ece94984c7c982cdde950eba5c95b9"}
+UV = f"{TOOLS}/bin/uv"
+
+
+def fetch_url(url: str, timeout: float = 120) -> bytes:
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return r.read()
+
+
+def install_uv(h: "Host") -> str:
+    """The pinned uv into TOOLS/bin, once per version; refuses a download whose checksum is not the pinned one."""
+    stamp = f"{TOOLS}/bin/uv.version"
+    if os.path.exists(h.p(UV)) and h.read(stamp).strip() == UV_VERSION:
+        h.log(f"uv {UV_VERSION}: already installed")
+        return UV
+    arch = platform.machine()
+    arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(arch, arch)
+    if arch not in UV_SHA256:
+        raise Failed(f"builds from the dashboard: no pinned uv for {arch} — set the host up without builds and publish "
+                     "with publish.py recipe on another machine")
+    name = f"uv-{arch}-unknown-linux-gnu"
+    url = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{name}.tar.gz"
+    if h.dry:
+        h.log(f"would download uv {UV_VERSION} ({arch}) from {url}, check its SHA-256 and install it as {UV}")
+        return UV
+    try:
+        data = fetch_url(url)
+    except Exception as e:                                       # noqa: BLE001 — said, not hidden
+        raise Failed(f"could not download uv {UV_VERSION} ({type(e).__name__}: {e}) — builds need internet on this host")
+    got = hashlib.sha256(data).hexdigest()
+    if got != UV_SHA256[arch]:
+        raise Failed(f"the uv download does not match its pinned checksum (got {got[:16]}…) — not installed")
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        member = tf.getmember(f"{name}/uv")
+        if not member.isfile():
+            raise Failed("the uv archive does not hold a plain uv binary")
+        binary = tf.extractfile(member).read()
+    h.mkdir(f"{TOOLS}/bin")
+    h.write(UV, binary, 0o755)
+    h.write(stamp, UV_VERSION + "\n", 0o644)
+    h.log(f"uv {UV_VERSION} ({arch}) installed as {UV} — checksum verified")
+    return UV
+
+
 BUILD_FILE = re.compile(r"^(publish\.py|build\.py|recipes/[A-Za-z0-9][A-Za-z0-9._-]*\.json|"
                         r"(worker_ext/comfyfarm_worker|ui_ext/comfyfarm_ui)(/[A-Za-z0-9_][A-Za-z0-9._-]*)+)$")
 
@@ -170,6 +222,9 @@ def validate(spec: dict):
             raise Failed(f"{key}: not an absolute path: {path!r}")
     if not re.match(r"^https?://[^\s/]+", spec["router_url"]):
         raise Failed(f"router_url: {spec['router_url']!r}")
+    if spec.get("mounts"):                                       # a setup made before 0.1.0-dev.8
+        raise Failed("this setup asks for NFS mounts, which worker setup no longer writes: mount the shared storage on "
+                     "this host yourself, then correct the setup in the dashboard (Correct the values) and run it again")
 
 
 def preconditions(h: Host):
@@ -238,6 +293,8 @@ def account(h: Host, spec: dict):
         raise Failed(f"{user} is {why} — the service account must be its own: it runs ComfyUI and only the router's "
                      "restart key logs in as it. Keep the default 'comfyfarm' (setup creates it) or name an unused account")
     home = pw.pw_dir if pw is not None else spec.get("home") or f"/var/lib/{user}"    # an existing account: its own home
+    if pw is not None:
+        h.log(f"using the existing account {user} (uid {pw.pw_uid}, home {home})")
     keys = f"{home}/.ssh/authorized_keys"
     if pw is not None and os.path.exists(h.p(keys)) and MARK not in h.read(keys):      # before the first change
         raise Failed(f"{keys} holds keys ComfyFarm did not write — {user} is someone's account, not replaced. "
@@ -322,42 +379,19 @@ def configure(h: Host, spec: dict, home: str):
 
 
 def directories(h: Host, spec: dict):
-    """After the mounts: an instance directory on shared storage is created there, not hidden under the mount point."""
+    """The instance directories. Shared storage must be mounted before setup runs — a directory made here first would
+    be hidden under the mount later (rehearsal). One that exists is used as it is — never emptied, never given to another owner; the host check says whether the
+    service account can write it."""
     user, paths = spec["account"], spec.get("paths", {})
-    h.mkdir(spec["local"], 0o755, owner=user)
-    for key in ("input", "output", "user", "temp"):
-        if paths.get(key):
-            h.mkdir(paths[key], 0o775, owner=user)
-
-
-def mounts(h: Host, spec: dict):
-    entries = spec.get("mounts") or []
-    if not entries:
-        return
-    have = any(os.path.exists(h.p(p)) for p in ("/sbin/mount.nfs", "/usr/sbin/mount.nfs")) or (not h.root and shutil.which("mount.nfs"))
-    if not have and not h.dry:
-        raise Failed("NFS mounts were asked for but mount.nfs is missing: install nfs-common from your local mirror")
-    fstab = h.read("/etc/fstab")
-    for m in entries:
-        src, target = m["source"], m["target"]
-        if not re.fullmatch(r"[A-Za-z0-9._-]+:/[^\s]*", src) or not target.startswith("/") or " " in target:
-            raise Failed(f"bad mount {src} → {target}")
-        opts = ",".join(["defaults", "_netdev", "nofail"] + ([m["options"]] if m.get("options") else []))
-        listed = any(line.split()[:2] == [src, target] for line in fstab.splitlines() if line.strip() and not line.startswith("#"))
-        code, _ = h.run(["mountpoint", "-q", target], check=False)
-        if code == 0 and not listed:
-            # the site mounted something there already (rehearsal: a mount line carried over from another host's setup
-            # would have stacked an NFS mount on the site's own after the next boot)
-            h.log(f"{target} is already mounted by this host — left as it is, nothing added to /etc/fstab")
-            continue
-        h.mkdir(target)
-        if not listed:
-            fstab = fstab.rstrip("\n") + f"\n{src} {target} nfs {opts} 0 0  {MARK}\n"
-            h.write("/etc/fstab", fstab)
-        code, _ = h.run(["mountpoint", "-q", target], check=False)
-        if code != 0:
-            h.run(["mount", target])
-            h.log(f"mounted {src} on {target}")
+    for key, path, mode in [("local", spec["local"], 0o755)] + [(k, paths[k], 0o775) for k in ("input", "output", "user", "temp")
+                                                                 if paths.get(k)]:
+        if not h.mkdir(path, mode, owner=user) and not h.dry:
+            st = os.stat(h.p(path))
+            try:
+                owner = pwd.getpwuid(st.st_uid).pw_name
+            except KeyError:
+                owner = f"uid {st.st_uid}"
+            h.log(f"using the existing {key} directory {path} (owner {owner}, {oct(st.st_mode & 0o777)[2:]}, left as it is)")
 
 
 def ssh_access(h: Host, spec: dict, home: str):
@@ -399,13 +433,6 @@ def builds(h: Host, spec: dict, files: dict):
         return
     if not files:
         raise Failed("this router sent no build tools — upgrade the router, or set the host up without builds")
-    uv = next((u for u in ("/usr/local/bin/uv", "/usr/bin/uv") if os.path.exists(h.p(u))), None)
-    if not uv:
-        have = sorted(glob.glob(h.p("/home/*/.local/bin/uv")) + glob.glob(h.p("/root/.local/bin/uv")))
-        copy = (f"\n    sudo install -m 755 {have[0][len(h.root):]} /usr/local/bin/uv" if have else "")
-        raise Failed("builds need uv in /usr/local/bin or /usr/bin (every account finds it there). Run one of these on "
-                     "this host, each on one line, then run setup again:" + copy +
-                     "\n    curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh")
     if not os.path.exists(h.p("/usr/bin/git")):
         raise Failed("builds need git (apt install git)")
     for rel, b64 in sorted(files.items()):
@@ -453,6 +480,7 @@ def builds(h: Host, spec: dict, files: dict):
     h.mkdir(f"{BUILD_HOME}/requests", 0o730)
     h.run(["chgrp", spec["account"], f"{BUILD_HOME}/requests"])
     h.run(["chmod", "0730", f"{BUILD_HOME}/requests"])
+    uv = install_uv(h)
     h.write(BUILD_UNITS[0], f"""{MARK}
 [Unit]
 Description=ComfyFarm: a build requested from the dashboard
@@ -511,7 +539,6 @@ def setup(payload: dict, h: Host) -> dict:
                          ("account", lambda: result.__setitem__("home", account(h, spec))),
                          ("worker tools", lambda: tools(h, payload.get("files", {}), payload.get("version", ""))),
                          ("configuration", lambda: configure(h, spec, result["home"])),
-                         ("mounts", lambda: mounts(h, spec)),
                          ("directories", lambda: directories(h, spec)),
                          ("router access", lambda: ssh_access(h, spec, result["home"])),
                          ("user manager", lambda: user_manager(h, spec)),

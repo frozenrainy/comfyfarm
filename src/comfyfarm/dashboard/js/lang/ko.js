@@ -258,9 +258,45 @@ export default {
   "profile {name} exists — kept": "프로필 {name}이(가) 이미 있어 그대로 둡니다",
   "Build {recipe} on {name} first (a new template after a recipe update)": "먼저 {name}에서 {recipe}를 빌드 (레시피 갱신 뒤 새 견본)",
   "Allow builds from the dashboard on this host": "이 호스트에서 대시보드 빌드 허용", "Builds": "빌드",
-  "the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet, git and uv on the host":
-    "대시보드가 이 호스트에 설치된 레시피의 빌드를 요청할 수 있습니다(이름만 고르고 내용은 보내지 않음). 빌드 계정이 아티팩트 저장소를 소유하고, 서비스 계정은 계속 읽기만 합니다. 호스트에 인터넷·git·uv가 필요합니다",
   "Update the worker": "워커 갱신",
+  "the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet and git on the host; setup brings a pinned uv":
+    "대시보드가 이 호스트에 설치된 레시피의 빌드를 요청할 수 있습니다(이름만 고르고 내용은 보내지 않음). 빌드 계정이 아티팩트 저장소를 소유하고, 서비스 계정은 계속 읽기만 합니다. 호스트에 인터넷과 git이 필요하고, uv는 설치가 고정된 버전을 가져옵니다",
+  "Correct the setup of {name}": "{name} 설치 값 고치기", "Correct the values": "값 고쳐서 다시",
+  // ---- setup form tooltips ----
+  "How this worker appears in System → Workers and in the job history.": "시스템 → 워커와 작업 기록에 보이는 이 워커의 이름입니다.",
+  "The address (IP or host name) the router and the gateway reach this host at: the router logs in here over ssh, the gateway opens ComfyUI here.":
+    "라우터와 게이트웨이가 이 호스트에 닿는 주소(IP나 호스트명)입니다. 라우터는 여기로 ssh 접속하고, 게이트웨이는 여기서 ComfyUI를 엽니다.",
+  "Names this ComfyUI on the host — a host can run several, each with its own port and GPU. Used in the unit comfyfarm@<instance> and wherever a path says {instance}.":
+    "이 호스트에서 이 ComfyUI의 이름입니다. 한 호스트에 여러 개를 각자의 포트와 GPU로 돌릴 수 있습니다. 유닛 comfyfarm@<인스턴스>와 경로의 {instance}에 쓰입니다.",
+  "The kind of GPU this host should have. The host check fails when none of that kind is usable. ComfyFarm checks the driver; it never installs one.":
+    "이 호스트에 있어야 할 GPU 종류입니다. 그 종류가 하나도 쓸 수 없으면 호스트 점검이 실패합니다. ComfyFarm은 드라이버를 점검만 하고 설치하지 않습니다.",
+  "Jobs run on the workers of a group, and users are allowed groups. Workers of one group must have the same custom nodes and models.":
+    "작업은 그룹의 워커에서 돌고, 사용자는 그룹 단위로 권한을 받습니다. 한 그룹의 워커들은 커스텀 노드와 모델이 같아야 합니다.",
+  "What this worker runs: a ComfyUI release, a venv and node sets. Leave it for later while nothing is published — System → Rollout → Profiles → From a recipe makes profiles.":
+    "이 워커가 돌릴 것: ComfyUI 릴리스, venv, 노드 세트. 아직 게시된 게 없으면 나중에 정하세요 — 시스템 → 롤아웃 → 프로필 → 레시피로에서 프로필을 만듭니다.",
+  "The port this ComfyUI listens on — one per instance on a host, and not the router's port when they share a host.":
+    "이 ComfyUI가 여는 포트입니다. 호스트의 인스턴스마다 하나씩이고, 라우터와 같은 호스트라면 라우터 포트와 달라야 합니다.",
+  "The host's ssh server: the router's restart key logs in here.": "호스트의 ssh 서버 포트입니다. 라우터의 재시작 키가 여기로 접속합니다.",
+  "A dedicated account that runs ComfyUI; setup creates it (or uses one that exists). Never a person's login account: its authorized_keys gets the router's key.":
+    "ComfyUI를 돌리는 전용 계정입니다. 설치가 만들거나 이미 있는 계정을 씁니다. 사람의 로그인 계정은 안 됩니다 — 그 계정의 authorized_keys에 라우터 키가 들어갑니다.",
+  "The same number on every host, so that files on shared storage belong to one owner everywhere.":
+    "모든 호스트에서 같은 번호여야 공유 스토리지의 파일이 어디서나 같은 소유자가 됩니다.",
+  "The router as this host reaches it: http://<control-plane address>:<router port>. The launcher fetches what to run from here.":
+    "이 호스트에서 본 라우터 주소: http://<제어 서버 주소>:<라우터 포트>. 런처가 여기서 실행할 내용을 받아 갑니다.",
+  "Where published ComfyUI releases, venvs and node sets live — at the same path on every host (a shared mount or a copy).":
+    "게시된 ComfyUI 릴리스·venv·노드 세트가 있는 곳입니다. 모든 호스트에서 같은 경로여야 합니다(공유 마운트나 복사본).",
+  "This host's own disk: its copies of ComfyUI and the node sets, and run files.": "이 호스트 자신의 디스크: ComfyUI와 노드 세트의 로컬 복사본, 실행 파일.",
+  "The models ComfyUI reads (checkpoints, LoRAs, VAE …). Read only.": "ComfyUI가 읽는 모델(체크포인트, LoRA, VAE …). 읽기만 합니다.",
+  "Uploads. Shared by every worker and the UI worker: the same storage everywhere — never {instance}. Mount it before setup: setup never mounts storage.":
+    "업로드. 모든 워커와 UI 워커가 함께 쓰는 같은 스토리지여야 합니다 — {instance}를 넣지 마세요. 설치 전에 직접 마운트하세요. 설치는 스토리지를 마운트하지 않습니다.",
+  "Results. Shared by every worker and the UI worker: the same storage everywhere — never {instance}. Mount it before setup: setup never mounts storage.":
+    "결과물. 모든 워커와 UI 워커가 함께 쓰는 같은 스토리지여야 합니다 — {instance}를 넣지 마세요. 설치 전에 직접 마운트하세요. 설치는 스토리지를 마운트하지 않습니다.",
+  "Users' workflows and settings. Shared by every worker and the UI worker — never {instance}. Mount it before setup: setup never mounts storage.":
+    "사용자의 워크플로와 설정. 모든 워커와 UI 워커가 함께 씁니다 — {instance}를 넣지 마세요. 설치 전에 직접 마운트하세요. 설치는 스토리지를 마운트하지 않습니다.",
+  "Previews and other temporary files of this instance, on this host. {instance} becomes the instance name.":
+    "이 인스턴스의 미리보기 등 임시 파일(이 호스트). {instance}는 인스턴스 이름으로 바뀝니다.",
+  "Lets System → Rollout → Profiles → From a recipe ask this host to build a recipe installed here. A separate build account owns the artifact store; ComfyUI's account only reads it. Needs internet and git; setup brings a pinned uv.":
+    "시스템 → 롤아웃 → 프로필 → 레시피로에서 이 호스트에 설치된 레시피를 빌드하게 합니다. 별도 빌드 계정이 아티팩트 저장소를 소유하고, ComfyUI 계정은 읽기만 합니다. 인터넷과 git이 필요하고, uv는 설치가 고정 버전을 가져옵니다.",
   "Worker updated — the new worker tools are used from its next start (Rollout → Render, or a rollout)":
     "워커를 갱신했습니다 — 새 워커 도구는 다음 시작부터 쓰입니다 (롤아웃 → 렌더, 또는 롤아웃)",
   "this worker was not set up from the dashboard — Set up a worker, with another name":
@@ -280,9 +316,6 @@ export default {
   "Local root <LOCAL> (this host's disk)": "로컬 루트 <LOCAL> (이 호스트의 디스크)",
   "Input directory (shared)": "입력 디렉터리 (공유)", "Output directory (shared)": "출력 디렉터리 (공유)",
   "User directory (shared)": "사용자 디렉터리 (공유)", "Temp directory (this host)": "임시 디렉터리 (이 호스트)",
-  "NFS mounts (optional, one per line: server:/export /mountpoint [options])": "NFS 마운트 (선택, 한 줄에 하나: 서버:/export /마운트지점 [옵션])",
-  "written to /etc/fstab and mounted by setup; needs nfs-common on the host. Other storage: mount it yourself, the host check verifies it":
-    "설치가 /etc/fstab에 적고 마운트합니다. 호스트에 nfs-common이 필요합니다. 다른 스토리지는 직접 마운트하면 호스트 점검이 확인합니다",
   "Next": "다음",
   "Run a command yourself (recommended)": "직접 명령 실행 (권장)",
   "You paste one line on the host. Nothing on the router ever gets root on your workers.":
@@ -298,7 +331,7 @@ export default {
   "account and password, please": "계정과 비밀번호를 입력하세요",
   "The router logs in with this account and runs the same script with sudo. The password is used for this run only: it is not stored, logged or shown again. While setup runs, the router has root on this host.":
     "라우터가 이 계정으로 로그인해 같은 스크립트를 sudo로 실행합니다. 비밀번호는 이번 실행에만 쓰고 저장·기록·재표시하지 않습니다. 설치가 도는 동안 라우터가 이 호스트의 root 권한을 갖습니다.",
-  "reported": "보고됨", "finished": "완료",
+  "reported": "보고됨", "finished": "완료", "replaced": "교체됨",
   "waiting for the host to run the script…": "호스트에서 스크립트가 실행되기를 기다리는 중…",
   "the router is running the script on the host…": "라우터가 호스트에서 스크립트를 실행하는 중…",
   "the host is ready": "호스트 준비 완료",

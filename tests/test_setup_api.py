@@ -30,8 +30,7 @@ def spec(**kw):
     base = {"name": "gpu one", "host": "10.0.0.21", "instance": "gpu-1", "gpu": "amd", "router_url": "http://10.0.0.5:8188",
             "paths": {"art": "/srv/art", "local": "/var/lib/comfyfarm/local", "models": "/srv/models",
                       "input": "/mnt/farm/input", "output": "/mnt/farm/output", "user": "/mnt/farm/user",
-                      "temp": "/var/lib/comfyfarm/temp/gpu-1"},
-            "mounts": [{"source": "nas:/export/farm", "target": "/mnt/farm"}]}
+                      "temp": "/var/lib/comfyfarm/temp/gpu-1"}}
     base.update(kw)
     return base
 
@@ -108,7 +107,8 @@ async def test_setup_input_is_checked(farm):
     assert (await c.post("/api/admin/setups", json=spec(), headers={"X-ComfyFarm-User": "ann"})).status_code == 403
     for bad in [spec(instance="../x"), spec(host="-oProxyCommand=x"), spec(account="root"), spec(gpu="tpu"),
                 spec(router_url="file:///etc"), spec(paths=dict(spec()["paths"], input="/var/lib/comfyfarm/local/nodes/x")),
-                spec(mounts=[{"source": "nas:/x", "target": "rel"}]), spec(paths=dict(spec()["paths"], art="art"))]:
+                spec(mounts=[{"source": "nas:/x", "target": "/mnt/farm"}]),      # gone: refused, never ignored
+                spec(paths=dict(spec()["paths"], art="art"))]:
         resp = await c.post("/api/admin/setups", json=bad, headers=H)
         assert resp.status_code == 400, (bad, resp.text)
     assert (await c.get("/api/worker_setup/not-a-token/script")).status_code == 404
@@ -238,3 +238,36 @@ async def test_an_unfinished_setup_gets_a_new_command(farm):
     assert (await c.get(old)).status_code == 404 and (await c.get(new)).status_code == 200
     await c.post(new.replace("/script", "/report"), content=json.dumps({"ok": True, "host_keys": ["ssh-ed25519 AAAAhostkey"]}))
     assert (await c.post(f"/api/admin/setups/{made['id']}/renew", headers=H)).status_code == 409    # reported: add it instead
+
+
+async def test_correcting_a_setup_replaces_it(farm, tmp_path):
+    """Correct the values: a new setup with the fixed values; the old one's token stops working and it leaves the
+    Continue list. Only a setup nobody is running or has added can be corrected."""
+    r, c, keys = farm
+    old = (await c.post("/api/admin/setups", json=spec(router_url="http://10.0.0.5:9999"), headers=H)).json()
+    old_path = "/" + old["script_url"].split("/", 3)[3]
+    await c.post(old_path.replace("/script", "/report"), content=json.dumps(
+        {"ok": False, "error": "router unreachable", "host_keys": ["ssh-ed25519 AAAAhostkey"]}))
+    assert (await c.get(f"/api/admin/setups/{old['id']}", headers=H)).json()["status"] == "failed"
+    new = await c.post("/api/admin/setups", json=spec(replaces=old["id"]), headers=H)       # same instance, fixed url
+    assert new.status_code == 200, new.text
+    new = new.json()
+    assert (await c.get(f"/api/admin/setups/{old['id']}", headers=H)).json()["status"] == "replaced"
+    assert (await c.get(old_path)).status_code == 404
+    assert (await c.post(old_path.replace("/script", "/report"), content="{}")).status_code == 404
+    assert (await c.post(f"/api/admin/setups/{old['id']}/renew", headers=H)).status_code == 409
+    assert (await c.get("/" + new["script_url"].split("/", 3)[3])).status_code == 200
+    # a replaced setup is not corrected twice; a finished one is not corrected at all — and a refused correction
+    # leaves nothing behind
+    before = len((await c.get("/api/admin/setups", headers=H)).json())
+    assert (await c.post("/api/admin/setups", json=spec(replaces=old["id"]), headers=H)).status_code == 409
+    assert (await c.post("/api/admin/setups", json=spec(replaces=999999), headers=H)).status_code == 409
+    assert len((await c.get("/api/admin/setups", headers=H)).json()) == before
+    path = "/" + new["script_url"].split("/", 3)[3]
+    await c.post(path.replace("/script", "/report"), content=json.dumps({"ok": True, "host_keys": ["ssh-ed25519 AAAAhostkey"]}))
+    s = (await c.get(f"/api/admin/setups/{new['id']}", headers=H)).json()
+    w = (await c.post("/api/admin/workers", json=s["worker"], headers=H)).json()
+    assert (await c.put(f"/api/admin/instances/{w['id']}", json=s["instance_config"], headers=H)).status_code == 200
+    assert (await c.post(f"/api/admin/setups/{new['id']}/finished?worker_id={w['id']}", headers=H)).status_code == 200
+    assert (await c.post("/api/admin/setups", json=spec(name="other", instance="gpu-9", host="10.0.0.29",
+                                                        replaces=new["id"]), headers=H)).status_code == 409
