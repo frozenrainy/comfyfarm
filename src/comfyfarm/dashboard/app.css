@@ -185,3 +185,6 @@ pre.code.log { max-height: 14rem; overflow: auto; white-space: pre-wrap; }
 /* `hidden` must win over every display rule (.stack, .badge, … set display themselves) */
 [hidden] { display: none !important; }
 pre.code.wrap { white-space: pre-wrap; word-break: break-all; }
+/* setup dialog: the state row and a pane's own action button are not glued to what precedes them */
+.setup-status { margin-top: .9rem; }
+.pane-actions button { font-size: .9rem; padding: .3rem .9rem; }

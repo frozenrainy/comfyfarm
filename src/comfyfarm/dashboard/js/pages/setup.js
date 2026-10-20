@@ -51,57 +51,68 @@ export async function setupWorker(refresh, again = null) {
     return (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
   };
   const keep = again ? t("kept: setting a worker up again changes its host settings, not its identity") : "";
-  const v = await formDialog(again ? t("Set up {name} again", { name: lastX.name }) : ui ? t("Set up the UI worker") : t("Set up a GPU worker"), [
-    { name: "name", label: t("Worker name (shown in the dashboard)"), value: again ? lastX.name : ui ? "ui" : "", hint: keep },
-    { name: "host", label: t("Host address"), value: lastX.host ?? "", placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
-    { name: "instance", label: t("Instance name"), value: again ? last.instance : ui ? "ui-1" : "gpu-1", hint: keep || t("one ComfyUI on this host; letters, digits, . _ -") },
-    ...(ui ? [] : [
-      { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
-        options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })), hint: t("ComfyFarm checks the driver; it never installs one") },
-      { name: "group", label: t("Group"), type: "select", value: again ? lastX.group ?? "" : groups[0]?.name ?? "",
-        options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] }]),
-    { name: "profile", label: t("Profile to run"), type: "select", value: "",
-      options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))],
-      hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
-    { name: "port", label: t("ComfyUI port"), type: "number", value: again ? last.port : ui ? 8189 : 8188,
-      hint: ui ? t("not 8188 when it shares the host with the router") : "" },
-    { name: "ssh_port", label: t("ssh port"), type: "number", value: lastX.ssh_port ?? 22 },
-    { name: "account", label: t("Service account (its own, made by setup)"), value: last?.account ?? "comfyfarm",
-      hint: t("not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it") },
-    { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
-      hint: t("the same number on every host: shared storage checks numbers, not names") },
-    { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188",
-      hint: t("http://<router address>:<router port> — the address the launcher fetches its render from") },
-    ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
-    { name: "mounts", label: t("NFS mounts (optional, one per line: server:/export /mountpoint [options])"), type: "textarea", rows: 2,
-      value: "",                                            // per host: never carried over from another host's setup
-      hint: t("written to /etc/fstab and mounted by setup; needs nfs-common on the host. Other storage: mount it yourself, the host check verifies it") },
-    { name: "builds", type: "checkbox", value: !!last?.builds, text: t("Allow builds from the dashboard on this host"),
-      label: t("Builds"),
-      hint: t("the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet, git and uv on the host") },
-  ], t("Next"), { wide: true });
-  if (!v) return;
-  const inst = v.instance.trim();
-  const body = {
-    role: ui ? "ui" : "gpu", name: v.name.trim() || inst, host: v.host.trim(), instance: inst,
-    gpu: ui ? "none" : v.gpu, group: ui ? null : v.group || null,
-    profile_id: v.profile ? Number(v.profile) : null, port: v.port || 8188, ssh_port: v.ssh_port || 22,
-    account: v.account.trim(), uid: v.uid || null, router_url: v.router_url.trim(),
-    paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),
-    mounts: v.mounts.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
-      const [source, target, options] = l.split(/\s+/);
-      return options ? { source, target, options } : { source, target };
-    }),
-    builds: !!v.builds, worker_id: again ? again.worker_id : null,
-  };
-  const made = await act(() => api("POST", "/api/admin/setups", body));
+  // The form comes back with what was typed when the router refuses it (a name taken, a bad path): nothing to retype.
+  let typed = null, made = null, v = null, body = null, inst = null;
+  while (!made) {
+    const fields = [
+      { name: "name", label: t("Worker name (shown in the dashboard)"), value: again ? lastX.name : ui ? "ui" : "", hint: keep },
+      { name: "host", label: t("Host address"), value: lastX.host ?? "", placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
+      { name: "instance", label: t("Instance name"), value: again ? last.instance : ui ? "ui-1" : "gpu-1", hint: keep || t("one ComfyUI on this host; letters, digits, . _ -") },
+      ...(ui ? [] : [
+        { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
+          options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })), hint: t("ComfyFarm checks the driver; it never installs one") },
+        { name: "group", label: t("Group"), type: "select", value: again ? lastX.group ?? "" : groups[0]?.name ?? "",
+          options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] }]),
+      { name: "profile", label: t("Profile to run"), type: "select", value: "",
+        options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))],
+        hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
+      { name: "port", label: t("ComfyUI port"), type: "number", value: again ? last.port : ui ? 8189 : 8188,
+        hint: ui ? t("not 8188 when it shares the host with the router") : "" },
+      { name: "ssh_port", label: t("ssh port"), type: "number", value: lastX.ssh_port ?? 22 },
+      { name: "account", label: t("Service account (its own, made by setup)"), value: last?.account ?? "comfyfarm",
+        hint: t("not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it") },
+      { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
+        hint: t("the same number on every host: shared storage checks numbers, not names") },
+      { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188",
+        hint: t("http://<router address>:<router port> — the address the launcher fetches its render from") },
+      ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
+      { name: "mounts", label: t("NFS mounts (optional, one per line: server:/export /mountpoint [options])"), type: "textarea", rows: 2,
+        value: "",                                            // per host: never carried over from another host's setup
+        hint: t("written to /etc/fstab and mounted by setup; needs nfs-common on the host. Other storage: mount it yourself, the host check verifies it") },
+      { name: "builds", type: "checkbox", value: !!last?.builds, text: t("Allow builds from the dashboard on this host"),
+        label: t("Builds"),
+        hint: t("the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet, git and uv on the host") },
+    ];
+    if (typed) for (const f of fields) if (f.name in typed) f.value = typed[f.name];
+    v = await formDialog(again ? t("Set up {name} again", { name: lastX.name }) : ui ? t("Set up the UI worker") : t("Set up a GPU worker"), fields, t("Next"), { wide: true });
+    if (!v) return;
+    inst = v.instance.trim();
+    body = {
+      role: ui ? "ui" : "gpu", name: v.name.trim() || inst, host: v.host.trim(), instance: inst,
+      gpu: ui ? "none" : v.gpu, group: ui ? null : v.group || null,
+      profile_id: v.profile ? Number(v.profile) : null, port: v.port || 8188, ssh_port: v.ssh_port || 22,
+      account: v.account.trim(), uid: v.uid || null, router_url: v.router_url.trim(),
+      paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),
+      mounts: v.mounts.split("\n").map((l) => l.trim()).filter(Boolean).map((l) => {
+        const [source, target, options] = l.split(/\s+/);
+        return options ? { source, target, options } : { source, target };
+      }),
+      builds: !!v.builds, worker_id: again ? again.worker_id : null,
+    };
+    try {
+      made = await api("POST", "/api/admin/setups", body);
+    } catch (e) {
+      toast(e.message, true);
+      typed = v;
+    }
+  }
   if (made) runSetup({ ...made, instance: inst, account: body.account, again: body.worker_id }, refresh);
 }
 
 // Step 2: get root on the host — the operator picks the way; then watch the report come in.
 function runSetup(made, refresh) {
   let mode = "command", timer = null, closed = false;
-  const status = h("div", { class: "section-head" });
+  const status = h("div", { class: "section-head setup-status" });
   const log = h("pre", { class: "code log", hidden: true });
   const checks = h("div");
   const finish = h("button", { type: "button", class: "primary", hidden: true, onclick: () => addWorker() },
@@ -125,7 +136,7 @@ function runSetup(made, refresh) {
     h("div", { class: "field" }, h("div", { class: "label" }, t("Your admin account on the host (may use sudo)")), user),
     h("div", { class: "field" }, h("div", { class: "label" }, t("Password")), pw),
     h("p", { class: "muted small" }, t("The router logs in with this account and runs the same script with sudo. The password is used for this run only: it is not stored, logged or shown again. While setup runs, the router has root on this host.")),
-    h("div", {}, runSsh));
+    h("div", { class: "pane-actions" }, runSsh));
   const choice = (key, title, text) => h("div", { class: `choice${key === mode ? " on" : ""}`, "data-k": key, onclick: () => pick(key) },
     h("h4", {}, title), h("p", {}, text));
   const choices = h("div", { class: "choices" },
