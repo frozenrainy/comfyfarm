@@ -49,7 +49,8 @@ production farm. Those decisions and their reasons are in [decisions.md](decisio
 4. **Safe rolling restarts and version upgrades** that follow the shared upgrade contract `comfy-upgrade/1`
    ([07](07-rollout-and-upgrades.md)).
 5. **Mixed hardware.** CUDA and ROCm workers in one farm, routed by group and capability ([10](10-heterogeneous-gpus.md)).
-6. **Small-site friendly.** One process + Postgres on a single box is the default; HA is an optional module.
+6. **Small-site friendly.** One process + Postgres on a single box is the default; HA is an optional module, designed
+   (01, C) and not built yet.
 
 ## Non-goals (for now)
 

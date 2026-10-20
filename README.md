@@ -33,7 +33,8 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
   ([setup](docs/guide/rollouts.md)).
 - Guided worker setup: describe an empty Linux host in the dashboard, run one checked command on it (or let the
   router do it over ssh), read the host check, add the worker ([design 14](docs/design/14-worker-setup.md)).
-- Postgres ledger; single box by default, HA as an optional module.
+- Postgres ledger on a single box. High availability (two routers, Postgres replication) is designed, not built yet
+  ([architecture](docs/design/01-architecture.md) C).
 
 ## Screenshots
 
