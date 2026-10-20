@@ -13,10 +13,11 @@ A ComfyFarm site has four kinds of machines. They can share hosts on a small far
 
 | Part | What it is | Where |
 |---|---|---|
-| **control plane** | router + gateway + Postgres | one Linux host (containers or systemd) |
-| **UI worker** | a stock ComfyUI, CPU is enough, with the `comfyfarm_ui` extension; serves the screen and user files | any host; it must not be busy (no GPU jobs) |
+| **control plane** | router + gateway + Postgres, and with compose the builder and the UI worker container | one Linux host (containers) |
+| **UI worker** | a stock ComfyUI, CPU is enough, with the `comfyfarm_ui` extension; serves the screen and user files | with compose: the `ui` container on the control plane; else any host that is not busy (no GPU jobs) |
 | **GPU workers** | stock ComfyUI with the `comfyfarm_worker` extension, started by the launcher | each GPU machine (≤ ~20 is the design target) |
 | **shared storage** | one filesystem for `input`, `output`, `user` on every ComfyUI | a NAS (NFS/SMB) — required; models may be local NVMe |
+| **artifact store** | ComfyUI, venvs and node sets the builder publishes; read by every worker | at the **same absolute path** everywhere (a share or a copy) |
 
 ## 1. Control plane (containers)
 
@@ -42,6 +43,30 @@ docker compose up -d                                   # pulls the release image
 docker compose logs router | grep "setup code"
 ```
 
+What the first start does by itself (docs/design/15), in about a minute or two:
+
+1. `init` makes the secrets and gives each directory to its account: the artifact store to the builder (uid 10002),
+   the shared storage to the workers' account (uid 47800) — only directories that are new or already theirs; one that
+   holds someone else's files is left alone and named in `docker compose logs init`.
+2. The **builder** builds ComfyUI on the CPU for the UI worker (this host needs internet for it: ~2.5 GB).
+3. The router registers the **UI worker container**, gives it that profile and starts it. Workflows open in the
+   browser now — before any GPU worker exists, with the node definitions of the UI worker.
+
+Where things live, all changeable in a `.env` next to `compose.yaml`:
+
+| Setting | Default | What |
+|---|---|---|
+| `COMFYFARM_ARTIFACTS_MOUNT` | `/srv/comfyfarm/art` | the artifact store — GPU workers must see it at this **same path** |
+| `COMFYFARM_SHARED` | `/srv/comfyfarm/shared` | `input`, `output`, `user` below it — the storage GPU workers use too, at the same path |
+| `COMFYFARM_UID` | `47800` | the workers' service account uid (*Set up a worker*): the shared storage belongs to it |
+| `COMFYFARM_BUILD_NODE_SOURCES` | `https://github.com/` | where node packs picked in the dashboard may come from; empty = none |
+| `COMFYFARM_FIRST_RECIPE` | `rocm-gfx1201` | whose UI half the first start builds (the UI half is the same in every recipe) |
+| `ROUTER_PORT`, `GATEWAY_PORT` | `8188`, `8080` | `<host-ip>:<port>` publishes on one address only |
+
+On one machine with a GPU, that machine is also the GPU worker (§3) and nothing needs sharing. With more machines,
+mount the artifact store and the shared storage on every GPU worker at the same paths (NFS, SMB — the site's), or put
+them on a NAS and point both settings there.
+
 Bind mounts instead of the volumes work as they are: `init` gives `./state` and `./logs` to the image's account
 (uid 10001) on every start. Put them into `compose.override.yaml` next to `compose.yaml` rather than editing it —
 compose merges the two (by mount target), and an upgrade is then just the new `compose.yaml`:
@@ -54,18 +79,21 @@ services:
   gateway: { volumes: ["./state:/state:ro", "./logs:/var/log/comfyfarm"] }
 ```
 
+(The builder's and the UI worker's own volumes — `builder-home`, `ui-home` — hold caches and local copies only; the
+artifact store and the shared storage are host paths already.)
+
 Open `http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
 start until one exists). Optional settings go into a `.env` next to `compose.yaml`: `GATEWAY_PORT`, `ROUTER_PORT`,
-`COMFYFARM_ARTIFACTS_MOUNT`, `COMFYFARM_USER_DIR`, `UI_WORKER_URL`, `COMFYFARM_DEFAULT_GROUP` (as in the strict file).
+`COMFYFARM_DEFAULT_GROUP`, `UI_WORKER_URL` and those above.
 Closed network: pull (or `docker compose build`) outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version>
 postgres:17`, and `docker load` it inside next to the repository.
 
 The `state` volume holds the secrets, the router's agent key (every worker trusts it) and the backups; `db` the
 ledger. `docker compose down` keeps them, **`docker compose down -v` deletes them** — then every worker must be set up
 again. Upgrade: check out the new release (`git fetch --tags && git checkout v<version>`) and `docker compose up -d`;
-`init` runs again and changes nothing. Backups: `docker compose exec router comfyfarm backup /state/backups`, with
-`--user-dir /userdata` once `COMFYFARM_USER_DIR` in `.env` names the UI worker's user directory on this host (without
-it, that flag would archive an empty placeholder); copy them off the host (`docker compose cp router:/state/backups .`).
+`init` runs again and changes nothing. Backups: `docker compose exec router comfyfarm backup /state/backups --user-dir /userdata` (the users'
+workflows: `COMFYFARM_SHARED/user`, mounted read-only into the router); copy them off the host
+(`docker compose cp router:/state/backups .`).
 With bind mounts the state directory is the service account's alone (0700): read it as root.
 
 ### Strict
@@ -74,7 +102,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.8                                                 # a release tag without the v
+V=0.1.0-dev.9                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
@@ -137,10 +165,18 @@ Without containers: `pip install` the package into `/opt/comfyfarm/venv`, put th
 
 ## 2. UI worker
 
-A stock ComfyUI that serves the screen and the users' files. It needs no GPU and never runs a job; it usually lives on
-the control-plane host (port 8189 there, 8188 is the router). Its host needs what §3 lists for any worker host — an ssh
-server included: the router starts and checks it over ssh like the others. Set it up like a GPU worker (§3) — *Set up
-a worker → UI worker* — after publishing what it runs and creating its profile (setup offers the profiles that exist):
+A stock ComfyUI that serves the screen and the users' files. It needs no GPU and never runs a job.
+
+**With compose it is the `ui` container** (easy; strict with `COMPOSE_PROFILES=farm`) and needs nothing from you: the
+first start builds and starts it (§1). It is reachable only from the router and the gateway, on the compose network;
+the router restarts, checks and rolls it out through its agent like any worker. Removed in the dashboard, it is not
+added again — to run the UI worker on a host instead, remove it, then set the host up as below (`docker compose stop
+ui` then frees its resources).
+
+**On a host** (the strict deployment without the profile, or a machine of its own): port 8189 on the control-plane host
+(8188 is the router). Its host needs what §3 lists for any worker host — an ssh server included: the router starts and
+checks it over ssh like the others. Set it up like a GPU worker (§3) — *Set up a worker → UI worker* — after
+publishing what it runs and creating its profile (setup offers the profiles that exist):
 
 - a node set with the two extensions: `python3 publish.py nodes <ART> farm-ui-1 --from <dir>` where `<dir>` holds
   `ui_ext/comfyfarm_ui` and `worker_ext/comfyfarm_worker` (the latter locks it to the farm's addresses);
@@ -222,6 +258,8 @@ Later: *Check host* on the instance (System → Rollout) and `comfyfarm doctor` 
 after a router upgrade (new worker tools), to change its address, group, profile or service account, or to turn
 *builds from the dashboard* on or off. Its name and instance stay; the last step is *Update the worker*.
 
+With compose, the artifact store is the builder's (`COMFYFARM_ARTIFACTS_MOUNT`): give the GPU host that path, and
+*Set up a worker* the same path as its artifact store. The rest of this paragraph is for farms without the builder.
 **Allow builds from the dashboard on this host** (in *Set up a worker*): the host then builds recipes on request from
 *System → Rollout → Profiles → From a recipe* ([rollouts.md](rollouts.md) §1) — as a separate build account that
 owns the artifact store, never as the service account. It needs internet and git on that host (setup brings a pinned uv, checked against its release
@@ -245,8 +283,11 @@ The router's keys directory (`COMFYFARM_KEYS_DIR`; with containers `/srv/comfyfa
 ## 4. In the dashboard
 
 In this order: System → Groups (one per set of identical workers; requirements are optional — leave them empty unless
-a group must only take workers with a backend or enough VRAM) → Rollout → Profiles (one for the UI worker, one per kind
-of GPU worker) → *Set up a worker*: the UI worker, then each GPU host → Users (accounts, which groups each may use).
+a group must only take workers with a backend or enough VRAM) → Rollout → **Node packs** (the custom nodes, optional;
+[custom-nodes.md](custom-nodes.md)) → **Build** for your kind of GPU → *From a recipe* (the GPU and UI profiles) →
+roll the UI profile out to the UI worker → *Set up a worker*: each GPU host, with the GPU profile → Users (accounts,
+which groups each may use). Without the builder: Profiles (one for the UI worker, one per kind of GPU worker) → *Set up
+a worker*: the UI worker, then each GPU host.
 A group's node list is read from its workers the first time someone needs it; *Refresh nodes* is for later, after
 custom nodes change. `COMFYFARM_DEFAULT_GROUP` (optional) is the group whose nodes a user sees before picking one;
 without it, the first group the user may use.

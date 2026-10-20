@@ -114,7 +114,11 @@ def ssh_main() -> int:
     return rc
 
 
-def serve(port: int, token: str, host: str = "0.0.0.0"):
+def serve(port: int, token: str, host: str = "0.0.0.0", handler=None):
+    """The agent over HTTP. `handler(verb, instance)` answers (default: systemd on this host; the UI worker container
+    passes its supervisor's)."""
+    act = handler or do
+
     class H(BaseHTTPRequestHandler):
         def _go(self, verb: str):
             # bytes: compare_digest raises on non-ASCII str, and the header is whatever the client sent
@@ -123,7 +127,7 @@ def serve(port: int, token: str, host: str = "0.0.0.0"):
                 return self._send(401, "unauthorized")
             q = parse_qs(urlparse(self.path).query)
             try:
-                rc, out = do(verb, (q.get("instance") or [""])[0])
+                rc, out = act(verb, (q.get("instance") or [""])[0])
             except Refused as e:
                 return self._send(403, str(e))
             self._send(200 if rc == 0 else 500, out)

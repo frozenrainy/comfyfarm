@@ -45,7 +45,9 @@ def settings_from_env(env=None) -> Settings:
     dsn = env.get("COMFYFARM_DSN") or sys.exit("COMFYFARM_DSN is not set (postgresql://user:pass@host/db)")
     kw = {"dsn": dsn}
     for key, attr in (("INSTANCE", "instance"), ("GATEWAY_SECRET", "gateway_secret"), ("DEFAULT_GROUP", "default_group"),
-                      ("ARTIFACTS_DIR", "artifacts_dir"), ("DEV_IDENTITY", "dev_identity"), ("KEYS_DIR", "keys_dir")):
+                      ("ARTIFACTS_DIR", "artifacts_dir"), ("DEV_IDENTITY", "dev_identity"), ("KEYS_DIR", "keys_dir"),
+                      ("BUILDS_DIR", "builds_dir"), ("UI_SERVICE", "ui_service"), ("UI_AGENT", "ui_agent"),
+                      ("UI_HOME", "ui_home"), ("UI_SHARED", "ui_shared"), ("FIRST_RECIPE", "first_recipe")):
         if env.get(ENV_PREFIX + key):
             kw[attr] = env[ENV_PREFIX + key]
     if env.get("COMFYFARM_DEV_ADMINS"):
@@ -251,6 +253,55 @@ def give_to_service(paths: list[str], owner: tuple[int, int] = SERVICE_OWNER) ->
                          f"chown -R {owner[0]}:{owner[1]} it where it is stored, or use a Docker volume")
 
 
+BUILDER_OWNER = (10002, 10002)              # the builder service: owns the artifact store (deploy/easy/compose.yaml)
+
+
+def take_dir(path: str, owner: tuple[int, int]) -> str:
+    """Give a directory to an account when it is new (empty — Docker made it for a bind mount) or already that
+    account's. A directory holding someone else's files is left alone: never another owner's data."""
+    os.makedirs(path, exist_ok=True)
+    st = os.stat(path)
+    if (st.st_uid, st.st_gid) == owner:
+        return f"{path}: uid {owner[0]}'s"
+    if os.listdir(path):
+        return (f"{path}: LEFT ALONE — it holds files and belongs to uid {st.st_uid}, not {owner[0]}; "
+                f"if it is meant for this farm: chown -R {owner[0]}:{owner[1]} {path}")
+    give_to_service([path], owner)
+    return f"{path}: given to uid {owner[0]}"
+
+
+def prepare_compose(keys: str, builds: str | None, ui_token: str | None, art: str | None, shared: str | None,
+                    builder_home: str | None, ui_home: str | None, farm_owner: tuple[int, int]) -> list[str]:
+    """The compose deployment's builder and UI worker container (docs/design/15), made ready by `init` (root):
+    the request/status directories, the UI worker's agent token, and who owns the store and the shared storage."""
+    said = []
+    if builds:
+        for sub, owner in (("requests", SERVICE_OWNER), ("status", BUILDER_OWNER)):
+            path = os.path.join(builds, sub)
+            os.makedirs(path, exist_ok=True)
+            os.chmod(path, 0o755)                          # each side reads the other's, writes only its own
+            give_to_service([path], owner)
+        os.chmod(builds, 0o755)
+    if ui_token:
+        import secrets as _s
+        keep = os.path.join(keys, "ui_agent_token")                 # the router's keys directory
+        token = open(keep).read().strip() if os.path.exists(keep) else _s.token_urlsafe(32)
+        for path, owner in ((keep, SERVICE_OWNER), (os.path.join(ui_token, "token"), farm_owner)):
+            with open(path, "w") as f:
+                f.write(token + "\n")
+            os.chmod(path, 0o400)
+            os.chown(path, *owner)
+        os.chmod(ui_token, 0o755)
+    for path, owner in ((art, BUILDER_OWNER), (builder_home, BUILDER_OWNER), (ui_home, farm_owner)):
+        if path:
+            said.append(take_dir(path, owner))
+    if shared:
+        os.makedirs(shared, exist_ok=True)
+        for sub in ("input", "output", "user"):
+            said.append(take_dir(os.path.join(shared, sub), farm_owner))
+    return said
+
+
 def prepare_state(root: str, chown: list[str] = ()) -> list[str]:
     """The easy deployment's state directory (a volume or a bind mount): secrets/, keys/ and backups/, 0700, the
     secrets 0400 — the owner's alone (Postgres reads its file as root). Run by the compose `init` service before
@@ -304,17 +355,43 @@ def main(argv=None):
     d.add_argument("--ui", help="UI worker URL: verifies that GPU workers see files uploaded there (shared storage)")
     d.add_argument("--pg-bin")
     pr = sub.add_parser("prepare", help="easy deployment: make the state directory (secrets, keys, backups) once")
-    pr.add_argument("dir")
+    pr.add_argument("dir", help="the state directory, or - for none (the strict deployment keeps its secrets on the host)")
+    pr.add_argument("--keys", help="the router's keys directory (default: <dir>/keys)")
     pr.add_argument("--chown", action="append", default=[], metavar="DIR",
                     help="as root: also give DIR (recursively) to the service account, e.g. the log directory")
+    pr.add_argument("--builds", help="the builder's request/status directory (docs/design/15)")
+    pr.add_argument("--ui-token", help="the UI worker container's token directory")
+    pr.add_argument("--art", help="the artifact store: the builder's when it is new")
+    pr.add_argument("--shared", help="the shared storage: input/output/user, the farm account's when new")
+    pr.add_argument("--builder-home", help="the builder's own directory (uv's cache and interpreters)")
+    pr.add_argument("--ui-home", help="the UI worker container's own directory")
+    pr.add_argument("--farm-uid", type=int, default=47800, help="the uid of the workers' service account (default 47800)")
+    sub.add_parser("builder", help="the compose deployment's builder (docs/design/15)", add_help=False)
+    sub.add_parser("ui-worker", help="the compose deployment's UI worker container (docs/design/15)", add_help=False)
     sc = sub.add_parser("secrets", help="print a fresh COMFYFARM_GATEWAY_SECRET and COMFYFARM_SESSION_KEY")
     sc.add_argument("--write", metavar="DIR", help="write db_password, gateway_secret and session_key into DIR instead "
                                                    "(files for compose secrets; existing files are kept)")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["builder"]:
+        from . import builder
+        sys.exit(builder.main(argv[1:]))
+    if argv[:1] == ["ui-worker"]:
+        from . import uiworker
+        sys.exit(uiworker.main(argv[1:]))
     args = ap.parse_args(argv)
 
     if args.cmd == "prepare":
-        made = prepare_state(args.dir, args.chown)
-        print("state: " + (", ".join(made) + " made" if made else "already prepared, nothing changed"))
+        if args.dir != "-":
+            made = prepare_state(args.dir, args.chown)
+            print("state: " + (", ".join(made) + " made" if made else "already prepared, nothing changed"))
+        if args.dir == "-" and not (args.art and args.shared):
+            sys.exit("prepare: COMFYFARM_ARTIFACTS_MOUNT and COMFYFARM_SHARED must be set for the builder and the UI worker "
+                     "(.env, docs/guide/install.md)")
+        if os.geteuid() == 0 and any((args.builds, args.ui_token, args.art, args.shared, args.builder_home, args.ui_home)):
+            keys = args.keys or os.path.join(args.dir, "keys")
+            for line in prepare_compose(keys, args.builds, args.ui_token, args.art, args.shared, args.builder_home,
+                                        args.ui_home, (args.farm_uid, args.farm_uid)):
+                print(line)
         return
     if args.cmd == "secrets":
         if args.write:

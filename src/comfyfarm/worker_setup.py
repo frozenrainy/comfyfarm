@@ -51,6 +51,25 @@ def fetch_url(url: str, timeout: float = 120) -> bytes:
         return r.read()
 
 
+def uv_binary(arch: str) -> bytes:
+    """The pinned uv release for `arch`, checked against its pinned SHA-256 (worker setup, and the router image's
+    builder: deploy/Dockerfile)."""
+    name = f"uv-{arch}-unknown-linux-gnu"
+    url = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{name}.tar.gz"
+    try:
+        data = fetch_url(url)
+    except Exception as e:                                       # noqa: BLE001 — said, not hidden
+        raise Failed(f"could not download uv {UV_VERSION} ({type(e).__name__}: {e}) — builds need internet on this host")
+    got = hashlib.sha256(data).hexdigest()
+    if got != UV_SHA256[arch]:
+        raise Failed(f"the uv download does not match its pinned checksum (got {got[:16]}…) — not installed")
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        member = tf.getmember(f"{name}/uv")
+        if not member.isfile():
+            raise Failed("the uv archive does not hold a plain uv binary")
+        return tf.extractfile(member).read()
+
+
 def install_uv(h: "Host") -> str:
     """The pinned uv into TOOLS/bin, once per version; refuses a download whose checksum is not the pinned one."""
     stamp = f"{TOOLS}/bin/uv.version"
@@ -67,18 +86,7 @@ def install_uv(h: "Host") -> str:
     if h.dry:
         h.log(f"would download uv {UV_VERSION} ({arch}) from {url}, check its SHA-256 and install it as {UV}")
         return UV
-    try:
-        data = fetch_url(url)
-    except Exception as e:                                       # noqa: BLE001 — said, not hidden
-        raise Failed(f"could not download uv {UV_VERSION} ({type(e).__name__}: {e}) — builds need internet on this host")
-    got = hashlib.sha256(data).hexdigest()
-    if got != UV_SHA256[arch]:
-        raise Failed(f"the uv download does not match its pinned checksum (got {got[:16]}…) — not installed")
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-        member = tf.getmember(f"{name}/uv")
-        if not member.isfile():
-            raise Failed("the uv archive does not hold a plain uv binary")
-        binary = tf.extractfile(member).read()
+    binary = uv_binary(arch)
     h.mkdir(f"{TOOLS}/bin")
     h.write(UV, binary, 0o755)
     h.write(stamp, UV_VERSION + "\n", 0o644)

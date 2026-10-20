@@ -15,6 +15,11 @@ standard library only and never import router code.
 Choose a directory every worker can read at the **same path** (a shared mount, or a copy per host): `<ART>`. Publish
 on a machine with internet access that mounts `<ART>` at that path.
 
+**From the dashboard** (the compose deployment's builder, [design 15](../design/15-control-plane-builds.md)): *System →
+Rollout → Node packs* lists the farm's custom nodes; *Build* publishes a recipe — the kind of GPU — with them, for the
+GPU workers, the UI worker or both, and *From a recipe* turns the result into profiles. Roll the UI profile out first
+(it names a pack that fails to import there), then the group's.
+
 **From a recipe** (one command, in a ComfyFarm checkout; git and [uv](https://docs.astral.sh/uv/) on that machine):
 
 ```sh

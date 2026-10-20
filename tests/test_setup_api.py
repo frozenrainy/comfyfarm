@@ -62,6 +62,9 @@ async def test_setup_from_command_to_worker(farm, tmp_path):
     s = (await c.get(f"/api/admin/setups/{made['id']}", headers=H)).json()
     assert s["status"] == "reported" and s["result"]["pinned_host_keys"] == 1
     assert (keys / "known_hosts").read_text() == "10.0.0.21 ssh-ed25519 AAAAhostkey\n"
+    # the report came from another address than the host's own (here the test client; on one host with the router:
+    # Docker's bridge): the launcher's requests will come from there too
+    assert s["instance_config"]["hosts"] == ["10.0.0.21", "127.0.0.1"] and s["result"]["seen_from"] == "127.0.0.1"
     # the dashboard adds the worker with what the setup computed; the instance passes the usual checks
     w = (await c.post("/api/admin/workers", json=s["worker"], headers=H)).json()
     put = await c.put(f"/api/admin/instances/{w['id']}", json=s["instance_config"], headers=H)

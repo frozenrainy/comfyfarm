@@ -459,7 +459,9 @@ def make_router(ctx: Ctx) -> APIRouter:
                 raise HTTPException(404, "no such instance")
             caller = request.client.host if request.client else ""
             if caller not in inst["hosts"]:
-                raise HTTPException(403, "not this instance's host")
+                from .builds import resolve_hosts          # a name in hosts (the compose UI worker is `ui`): its addresses
+                if caller not in await resolve_hosts(list(inst["hosts"])):
+                    raise HTTPException(403, "not this instance's host")
             if inst["profile_id"] is None:
                 raise HTTPException(404, "nothing assigned")
             prof = await profile_doc(c, inst["profile_id"])

@@ -96,13 +96,17 @@ def check_spec(body: SetupIn) -> None:
         raise HTTPException(400, "setup no longer mounts storage: mount it on the host yourself, then set the paths")
 
 
-def instance_config(spec: dict, extra: dict) -> dict:
+def instance_config(spec: dict, extra: dict, seen: str | None = None) -> dict:
     """What PUT /api/admin/instances/{id} gets once the host is set up: the ssh backend with the router's agent key and
-    the host keys the setup script reported (pinned in known_hosts)."""
+    the host keys the setup script reported (pinned in known_hosts). `seen`: the address the report came from, when it
+    is not the host's own — the launcher's requests come from there too (a worker on the router's own host reaches the
+    router's container through Docker's bridge, a host behind NAT through its NAT). The report proved it with the
+    one-time token, so that address is this host's."""
     cfg = {"host": extra["host"], "user": spec["account"], "key": hostsetup.AGENT_KEY, "known_hosts": hostsetup.KNOWN_HOSTS}
     if extra.get("ssh_port", 22) != 22:
         cfg["port"] = extra["ssh_port"]
-    return {"instance": spec["instance"], "role": spec.get("role", "gpu"), "platform": "posix", "hosts": [extra["host"]],
+    hosts = [extra["host"]] + ([seen] if seen and seen != extra["host"] else [])
+    return {"instance": spec["instance"], "role": spec.get("role", "gpu"), "platform": "posix", "hosts": hosts,
             "listen": spec["listen"], "port": spec["port"], "paths": dict(spec["paths"], art=spec["art"], local=spec["local"]),
             "restart_backend": "ssh", "restart_config": cfg}
 
@@ -119,7 +123,7 @@ def make_router(ctx: Ctx) -> APIRouter:
             d[k] = r[k].isoformat() if r[k] else None
         d["expired"] = r["status"] in ("waiting", "running") and r["expires_at"] < dt.datetime.now(dt.timezone.utc)
         if r["status"] in ("reported", "finished"):
-            d["instance_config"] = instance_config(r["spec"], r["extra"])
+            d["instance_config"] = instance_config(r["spec"], r["extra"], (r["result"] or {}).get("seen_from"))
             d["worker"] = {"name": r["extra"]["name"], "base_url": f"http://{r['extra']['host']}:{r['spec']['port']}",
                            "group": r["extra"].get("group"), "kind": r["spec"].get("role", "gpu")}
         return d
@@ -320,7 +324,8 @@ def make_router(ctx: Ctx) -> APIRouter:
                 ok = bool(body.get("ok")) and pinned > 0
                 result = {"ok": ok, "check": body.get("check") or [], "steps": body.get("steps") or [],
                           "error": body.get("error") or note or None, "hostname": body.get("hostname"),
-                          "version": body.get("version"), "pinned_host_keys": pinned}
+                          "version": body.get("version"), "pinned_host_keys": pinned,
+                          "seen_from": request.client.host if request.client else None}
                 await c.execute("UPDATE worker_setups SET status = $2, result = $3, reported_at = now() WHERE id = $1",
                                 r["id"], "reported" if ok else "failed", result)
                 await audit(c, "worker setup", "worker setup reported", r["spec"]["instance"], ok=ok, host=r["extra"]["host"])

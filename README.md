@@ -33,6 +33,8 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
   ([setup](docs/guide/rollouts.md)).
 - Guided worker setup: describe an empty Linux host in the dashboard, run one checked command on it (or let the
   router do it over ssh), read the host check, add the worker ([design 14](docs/design/14-worker-setup.md)).
+- Node packs from the dashboard: add a repository, build, roll out — requirements resolved together, one OpenCV,
+  submodules, pinned commits, from the sources the operator allows ([design 15](docs/design/15-control-plane-builds.md)).
 - Postgres ledger on a single box. High availability (two routers, Postgres replication) is designed, not built yet
   ([architecture](docs/design/01-architecture.md) C).
 
@@ -54,17 +56,17 @@ ComfyFarm is for a site that keeps its content inside its own network: one contr
 GPU machines running ComfyUI. Installing takes an engineer (or an AI assistant) an afternoon; running it afterwards
 is the dashboard.
 
-1. **Control plane** — router, gateway and Postgres, nothing to edit first:
+1. **Control plane** — router, gateway, Postgres, the builder and the UI worker, nothing to edit first:
    ```sh
    git clone https://github.com/frozenrainy/comfyfarm && cd comfyfarm/deploy/easy
    docker compose up -d
    docker compose logs router | grep "setup code"      # open http://<this host>:8080 and create the administrator
    ```
+   The first start builds ComfyUI for the UI worker and starts it: workflows open before any GPU worker exists.
    Hardened instead (secrets on the host, ports on one address, pinned versions): `deploy/compose/`; without
-   containers: `deploy/systemd/` — [install](docs/guide/install.md) §1.
-2. **Workers** — publish ComfyUI, a venv and node sets once ([rolling upgrades](docs/guide/rollouts.md) §1), then
-   *System → Workers → Set up a worker* turns each empty Linux host into a checked worker: the UI worker first, then
-   the GPU machines.
+   containers: `deploy/systemd/` (no builder or UI worker container there) — [install](docs/guide/install.md) §1.
+2. **Node packs and GPU workers** — *System → Rollout*: add node packs, *Build* for your kind of GPU, make the profiles;
+   then *System → Workers → Set up a worker* turns each empty Linux host into a checked worker.
 3. **Check** — `docker compose exec router comfyfarm doctor` tells you, line by line, what is not right yet.
 
 Guides: [install](docs/guide/install.md) · [running](docs/guide/running.md) · [rolling upgrades](docs/guide/rollouts.md) ·

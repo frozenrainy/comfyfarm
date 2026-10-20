@@ -17,7 +17,7 @@ from aiohttp import web
 
 from .allow import from_env, make_middleware
 
-EXT_VERSION = "0.4"
+EXT_VERSION = "0.5"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")

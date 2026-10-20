@@ -291,3 +291,18 @@ def test_prepare_as_root_gives_bind_mounts_to_the_service(tmp_path, monkeypatch)
     monkeypatch.setattr(cli.os, "lchown", squashed)
     with pytest.raises(SystemExit, match="root_squash"):
         cli.prepare_state(str(state))
+
+
+def test_init_gives_only_new_directories_to_the_builder_and_the_ui_worker(tmp_path):
+    """The compose init (root) hands the store and the shared storage to their accounts — but never a directory that
+    already holds someone else's files (an operator's existing store, a NAS export with data)."""
+    from comfyfarm import cli
+    me = (os.getuid(), os.getgid())
+    assert "given to" in cli.take_dir(str(tmp_path / "new"), me) or "'s" in cli.take_dir(str(tmp_path / "new"), me)
+    full = tmp_path / "full"
+    full.mkdir()
+    (full / "data.bin").write_text("x")
+    other = (me[0] + 1, me[1] + 1)
+    said = cli.take_dir(str(full), other)
+    assert "LEFT ALONE" in said and f"chown -R {other[0]}:{other[1]}" in said
+    assert os.stat(full).st_uid == me[0]                                         # untouched

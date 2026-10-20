@@ -22,7 +22,7 @@ import sys
 import time
 import urllib.request
 
-ETC = "/etc/comfyfarm"
+ETC = os.environ.get("COMFYFARM_ETC", "/etc/comfyfarm")     # the UI worker container keeps them in its home
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 LOCAL_FREE_WARN = 30 * 2**30                # a core + node copies + run files; venvs stay on the store
 MIN_PYTHON = (3, 10)
@@ -70,6 +70,8 @@ class Check:
         v = sys.version_info
         self.add(OK if v[:2] >= MIN_PYTHON else FAIL, "python", f"{v[0]}.{v[1]}.{v[2]} for the launcher"
                  + ("" if v[:2] >= MIN_PYTHON else f" — needs {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer"))
+        if self.cfg.get("container"):        # the UI worker container: its supervisor is the service manager
+            return
         linger = os.path.exists(self.p(f"/var/lib/systemd/linger/{self.user}"))
         self.add(OK if linger else FAIL, "lingering", f"{self.user}: " + ("on — the instance starts at boot" if linger else
                  "off — the user manager stops at logout (setup runs `loginctl enable-linger`)"))
@@ -142,8 +144,9 @@ class Check:
                     t = json.load(fh)
             except (OSError, ValueError):
                 continue
-            if isinstance(t, dict) and all(isinstance(t.get(k), dict) for k in ("gpu", "ui")) and isinstance(t.get("template"), str):
-                missing = sorted({f"{kind}/{n}" for role in ("gpu", "ui")
+            roles = [k for k in ("gpu", "ui") if isinstance(t, dict) and isinstance(t.get(k), dict)]
+            if roles and isinstance(t.get("template"), str):                  # a template may hold one half (ui only)
+                missing = sorted({f"{kind}/{n}" for role in roles
                                   for kind, names in (("core", [t[role].get("core")]), ("venv", [t[role].get("venv")]),
                                                       ("nodes", t[role].get("nodes") or []))
                                   for n in names if isinstance(n, str) and not os.path.exists(os.path.join(art, kind, n, "READY"))})
@@ -291,14 +294,19 @@ class Check:
                 s.bind((listen, int(port)))
                 self.add(OK, "port", f"{listen}:{port} is free")
             except OSError:
-                code, out = self.cmd(["systemctl", "--user", "is-active", f"comfyfarm@{self.cfg.get('instance', '')}"])
-                mine = out.strip() == "active"
+                if self.cfg.get("container"):    # in its own network namespace only this instance listens there
+                    mine = True
+                else:
+                    code, out = self.cmd(["systemctl", "--user", "is-active", f"comfyfarm@{self.cfg.get('instance', '')}"])
+                    mine = out.strip() == "active"
                 self.add(OK if mine else FAIL, "port", f"{listen}:{port} is in use" + (" by this instance" if mine else
                          " by something else — pick another port for the instance"))
             finally:
                 s.close()
 
     def groups(self):
+        if self.cfg.get("container"):
+            return
         names = {g.gr_name for g in grp.getgrall() if self.user in g.gr_mem}
         try:
             names.add(grp.getgrgid(pwd.getpwnam(self.user).pw_gid).gr_name)

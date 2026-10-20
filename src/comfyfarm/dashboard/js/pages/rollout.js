@@ -20,11 +20,14 @@ const head = (title, ...right) => h("div", { class: "section-head" }, h("h2", {}
 const words = (s) => s.split(/[\s,]+/).filter(Boolean);
 
 export function rollout(root, { refresh }) {
-  let profiles = [], insts = [], artifacts = null;
+  let profiles = [], insts = [], artifacts = null, builder = null, packs = [];
   const banner = h("div");
+  const firstStart = h("div");
+  const packInfo = h("p", { class: "muted small" });
   const active = h("div");
   const instT = table([[t("Worker")], [t("Instance")], [t("Profile")], [t("Badge")], [t("Rev")], [t("Running")], [t("Restart via")], ["", "actions"]]);
   const profT = table([[t("Profile")], [t("Core")], [t("Venv")], [t("Nodes")], [t("Flags")], [t(t("Assigned")), "num"], [t("Note")], ["", "actions"]]);
+  const packT = table([[t("Node pack")], [t("Repository")], [t("Commit")], [t("UI worker")], [t("Note")], ["", "actions"]]);
   const auditT = table([[t("When")], [t("Who")], [t("What")], [t("Target")], [t("Detail")]]);
   const history = h("div");
 
@@ -50,13 +53,15 @@ export function rollout(root, { refresh }) {
   }, { cls: "primary" });
 
   root.append(
-    h("section", {}, head(t("Rollout"), startBtn), banner, active, history),
+    h("section", {}, head(t("Rollout"), startBtn), firstStart, banner, active, history),
     h("section", {}, head(t("Instances")), h("p", { class: "muted small" },
       t("How the launcher on each host starts the worker. Badge: match = the worker runs exactly its assigned render; " +
       "differs = it runs something else (not restarted yet, or a failed start).")), instT.el),
     h("section", {}, head(t("Profiles"), button(t("From a recipe"), () => fromRecipe()),
                           button(t("New profile"), () => editProfile(null), { cls: "primary" })),
       h("p", { class: "muted small" }, t("A profile in use cannot be changed — copy it and roll the copy out.")), profT.el),
+    h("section", {}, head(t("Node packs"), button(t("Build"), () => buildOnPlane()),
+                          button(t("Add node pack"), () => addPack(), { cls: "primary" })), packInfo, packT.el),
     h("section", {}, head(t("Audit log")), auditT.el));
 
   // ---- instances ---------------------------------------------------------------------------------------------
@@ -163,30 +168,37 @@ export function rollout(root, { refresh }) {
     if (p && !copy) act(() => api("PATCH", `/api/admin/profiles/${p.id}`, body), t("Profile saved"), refresh);
     else act(() => api("POST", "/api/admin/profiles", body), t("Profile created"), refresh);
   }
-  // A recipe (publish.py recipe) leaves a profile template in the artifact store; a worker host's check reads it.
-  // Read through a GPU worker that is enabled and online when there is one: it mounts the store the GPU hosts use.
-  async function fromRecipe() {
+  // A recipe (publish.py recipe) leaves a profile template in the artifact store. With the control-plane builder the
+  // router reads the store itself; otherwise a worker host's check reads it (through a GPU worker when there is one).
+  async function storeTemplates() {
+    if (builder?.artifacts) {
+      return { all: await api("GET", "/api/admin/templates"), buildable: builder.up ? builder.recipes : [], via: null };
+    }
     const rank = (i) => (i.instance.role !== "ui" ? 0 : 4) + (i.enabled ? 0 : 2) + (i.state === "online" ? 0 : 1);
     const via = insts.filter((i) => i.instance && ["ssh", "http-agent"].includes(i.instance.restart_backend))
                      .sort((x, y) => rank(x) - rank(y))[0];
-    if (!via) return toast(t("no worker to read the artifact store through yet — set one up first (System → Workers)"), true);
-    const r = await act(() => api("POST", `/api/admin/instances/${via.worker_id}/check`));
-    if (!r) return;
-    const check = r.check || [];
+    if (!via) throw new Error(t("no worker to read the artifact store through yet — set one up first (System → Workers)"));
+    const check = (await api("POST", `/api/admin/instances/${via.worker_id}/check`)).check || [];
     const line = check.find((x) => x.name === "recipes"), store = check.find((x) => x.name === "artifact store");
     if (!line) {
-      if (store?.level === "FAIL") return toast(t("the artifact store on {name} is not usable: {detail}", { name: via.worker, detail: store.detail }), true);
-      return toast(t("this worker's tools are older than recipes — Set up again (System → Workers)"), true);
+      if (store?.level === "FAIL") throw new Error(t("the artifact store on {name} is not usable: {detail}", { name: via.worker, detail: store.detail }));
+      throw new Error(t("this worker's tools are older than recipes — Set up again (System → Workers)"));
     }
-    const all = line.templates || [];
+    return { all: line.templates || [], buildable: check.find((x) => x.name === "builds")?.recipes || [], via, detail: line.detail };
+  }
+  async function fromRecipe(pick = null) {
+    let got;
+    try { got = await storeTemplates(); } catch (e) { return toast(e.message, true); }
+    const { all, buildable, via } = got;
     const templates = all.filter((x) => !(x.missing || []).length), stale = all.filter((x) => (x.missing || []).length);
-    const buildable = check.find((x) => x.name === "builds")?.recipes || [];
+    const where = via ? via.worker : t("the control plane");
     if (!templates.length && !buildable.length) {
       return toast(stale.length ? t("no template is usable: {names}", { names: stale.map((x) => `${x.template} ${t("(artifacts missing)")}`).join(", ") })
-                                : line.detail, true);
+                                : got.detail || t("no template in the artifact store yet"), true);
     }
     const buildFirst = async () => {
-      const b = await formDialog(t("Build a recipe on {name}", { name: via.worker }), [
+      if (!via) return buildOnPlane();
+      const b = await formDialog(t("Build a recipe on {name}", { name: where }), [
         { name: "recipe", label: t("Recipe"), type: "select", value: buildable[0], options: buildable.map((x) => ({ value: x, label: x })),
           hint: t("the host downloads ComfyUI, PyTorch and the nodes and publishes them to its artifact store — minutes, mostly the PyTorch download") },
       ], t("Build"));
@@ -199,19 +211,21 @@ export function rollout(root, { refresh }) {
       const host = last ? new URL(last.spec.router_url).hostname : "";
       if (/^[0-9.]+$/.test(host)) allow = host;                 // the allow-list takes addresses, not names
     } catch { /* a guess only */ }
-    const v = await formDialog(t("Profiles from a recipe (read through {name})", { name: via.worker }), [
-      { name: "template", label: t("Template"), type: "select", value: templates[templates.length - 1].template,
-        options: templates.map((x) => ({ value: x.template, label: x.about ? `${x.template} — ${x.about}` : x.template })) },
+    const v = await formDialog(via ? t("Profiles from a recipe (read through {name})", { name: via.worker }) : t("Profiles from a recipe"), [
+      { name: "template", label: t("Template"), type: "select", value: pick || templates[templates.length - 1].template,
+        options: templates.map((x) => ({ value: x.template, label: (x.about ? `${x.template} — ${x.about}` : x.template)
+          + ((x.roles || ["gpu", "ui"]).length < 2 ? ` (${(x.roles || []).map((r) => r === "ui" ? t("UI worker") : t("GPU workers")).join("")})` : "") })) },
       { name: "allow", label: "COMFYFARM_ALLOW", value: allow,
         hint: t("the addresses the workers take requests from: the router's and the gateway's, as the workers see them") },
       ...(buildable.length ? [{ name: "build", type: "checkbox", value: false, label: t("Build"),
-                               text: t("Build {recipe} on {name} first (a new template after a recipe update)", { recipe: buildable[0], name: via.worker }) }] : []),
-    ], t("Create both profiles"), { wide: true });
+                               text: t("Build {recipe} on {name} first (a new template after a recipe update)", { recipe: buildable[0], name: where }) }] : []),
+    ], t("Create the profiles"), { wide: true });
     if (!v) return;
     if (v.build) return buildFirst();
     const tpl = templates.find((x) => x.template === v.template);
     const made = [];
     for (const [role, what] of [["gpu", t("GPU workers")], ["ui", t("UI worker")]]) {
+      if (!tpl[role]) continue;                                // a template may hold one half (the first start's: UI only)
       const name = `${tpl.template}-${role}`, p = tpl[role];
       try {
         await api("POST", "/api/admin/profiles", {
@@ -224,40 +238,144 @@ export function rollout(root, { refresh }) {
         return refresh();
       }
     }
-    if (made.length) toast(t("Profiles created: {names} — pick them in Set up a worker, or Assign", { names: made.join(", ") }));
+    if (made.length) toast(t("Profiles created: {names} — roll them out (UI worker first), or pick them in Set up a worker", { names: made.join(", ") }));
     refresh();
   }
-  // A build on a host that allows it (its setup): request, then follow its state until done or failed. The host
-  // answers "queued" until its build service takes the request, so the last run's state is never read as this one's.
+  // A build, followed until done or failed. On a worker host (its setup allowed builds) the host answers "queued" until
+  // its build service takes the request, so the last run's state is never read as this one's; on the control plane
+  // each request has its own id.
   async function runBuild(via, recipe) {
     if (!await act(() => api("POST", `/api/admin/instances/${via.worker_id}/build`, { recipe }))) return false;
+    return followBuild(t("Building {recipe} on {name}", { recipe, name: via.worker }),
+      () => api("GET", `/api/admin/instances/${via.worker_id}/build?recipe=${encodeURIComponent(recipe)}`));
+  }
+  async function followBuild(title, read) {
     const LOOK = { queued: "pending", none: "pending", running: "running", done: "done", failed: "failed" };
     const state = h("div", { class: "section-head" }), log = h("pre", { class: "code log" });
     const dlg = h("dialog", { class: "form wide" });
     let timer = null, result = null, closed = false, done;
     const finished = new Promise((r) => (done = r));
     const close = () => { closed = true; clearTimeout(timer); dlg.close(); dlg.remove(); done(result); };
-    dlg.append(h("h3", {}, t("Building {recipe} on {name}", { recipe, name: via.worker })), state, log,
-      h("div", { class: "dialog-actions" }, button(t("Close"), close)));
+    dlg.append(h("h3", {}, title), state, log, h("div", { class: "dialog-actions" }, button(t("Close"), close)));
     dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });
     document.body.append(dlg);
     dlg.showModal();
     const poll = async () => {
       if (closed) return;
       try {
-        const s = await api("GET", `/api/admin/instances/${via.worker_id}/build?recipe=${encodeURIComponent(recipe)}`);
+        const s = await read();
         if (closed) return;
         state.replaceChildren(pill(LOOK[s.state] || "pending", t(s.state === "none" ? "waiting" : s.state)), " ",
           s.template ? t("template {name}", { name: s.template }) : s.error || "");
         log.textContent = s.log || "";
         log.scrollTop = log.scrollHeight;
-        if (s.state === "done") { result = true; toast(t("Built — now pick the template")); return close(); }
+        if (s.state === "done") { result = s.template || true; toast(t("Built — now pick the template")); return close(); }
         if (s.state === "failed") { result = false; return; }
       } catch (e) { if (closed) return; state.textContent = e.message; }
       timer = setTimeout(poll, 3000);
     };
     poll();
     return finished;
+  }
+  // ---- node packs and builds on the control plane (docs/design/15) -------------------------------------------
+  async function waitFor(rid, seconds = 90) {
+    for (let i = 0; i < seconds; i++) {
+      const s = await api("GET", `/api/admin/builds/${rid}`);
+      if (s.state === "done" || s.state === "failed") return s;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw new Error(t("the builder did not answer in time"));
+  }
+  async function resolve(repo, ref) {
+    const r = await api("POST", "/api/admin/node-packs/resolve", { repo, ref });
+    const s = await waitFor(r.id);
+    if (s.state !== "done") throw new Error(s.error || t("could not look it up"));
+    return s.commit;
+  }
+  const PACK_TIP = t("Off for a pack that imports only with a GPU (the UI worker runs on the CPU) — a rollout to the UI worker names such a pack");
+  async function addPack() {
+    if (!builder?.up) return toast(t("the builder is not running — node packs are looked up and built by it"), true);
+    if (!builder.node_sources.length) return toast(t("this farm's builder takes no node packs from the dashboard (COMFYFARM_BUILD_NODE_SOURCES)"), true);
+    const v = await formDialog(t("Add a node pack"), [
+      { name: "repo", label: t("Git repository (https)"), placeholder: "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+        hint: t("allowed here: {sources}", { sources: builder.node_sources.join(", ") }) },
+      { name: "ref", label: t("Branch, tag or commit (empty: the default branch)"), placeholder: "main",
+        hint: t("pinned to the commit it names now; Update moves it to a newer one") },
+      { name: "name", label: t("Name (its directory under custom_nodes; empty: from the repository)") },
+      { name: "ui", type: "checkbox", value: true, label: t("UI worker"), text: t("Also on the UI worker"), hint: PACK_TIP },
+      { name: "requirements_file", label: t("Requirements file (empty: requirements.txt, else pyproject.toml)"), placeholder: "requirements.txt" },
+      { name: "constraints", label: t("Constraints (optional, comma-separated)"), placeholder: "kornia<0.8",
+        hint: t("hold a dependency back where the pack breaks on a newer one") },
+      { name: "note", label: t("Note") },
+    ], t("Look up and add"), { wide: true });
+    if (!v) return;
+    const repo = v.repo.trim().replace(/\/+$/, "");
+    const name = v.name.trim() || repo.split("/").pop().replace(/\.git$/, "");
+    await act(async () => {
+      toast(t("Looking up {ref}…", { ref: v.ref.trim() || t("the default branch") }));
+      const commit = await resolve(repo, v.ref.trim());
+      return api("POST", "/api/admin/node-packs", { name, repo, commit, ref: v.ref.trim() || null, ui: !!v.ui,
+        requirements_file: v.requirements_file.trim() || null, constraints: words(v.constraints), note: v.note.trim() || null });
+    }, t("Node pack added — Build to put it into the artifact store"), refresh);
+  }
+  async function updatePack(p) {
+    await act(async () => {
+      const commit = await resolve(p.repo, p.ref || "");
+      if (commit === p.commit) return "same";
+      return api("PATCH", `/api/admin/node-packs/${p.id}`, { commit });
+    }, (r) => r === "same" ? t("Already the newest commit of {ref}", { ref: p.ref || t("the default branch") }) : t("Updated — Build to use it"), refresh);
+  }
+  async function editPack(p) {
+    const v = await formDialog(t("Node pack {name}", p), [
+      { name: "ui", type: "checkbox", value: p.ui, label: t("UI worker"), text: t("Also on the UI worker"), hint: PACK_TIP },
+      { name: "requirements_file", label: t("Requirements file (empty: requirements.txt, else pyproject.toml)"), value: p.requirements_file ?? "" },
+      { name: "constraints", label: t("Constraints (optional, comma-separated)"), value: (p.constraints || []).join(", ") },
+      { name: "note", label: t("Note"), value: p.note ?? "" },
+    ], t("Save"));
+    if (!v) return;
+    act(() => api("PATCH", `/api/admin/node-packs/${p.id}`, { ui: !!v.ui, requirements_file: v.requirements_file.trim(),
+      constraints: words(v.constraints), note: v.note }), t("Saved — Build to use it"), refresh);
+  }
+  async function buildOnPlane() {
+    if (!builder?.configured) return toast(t("no control-plane builder here — build on a worker host (From a recipe) or with publish.py"), true);
+    if (!builder.up) return toast(t("the builder is not running (docker compose ps builder)"), true);
+    const v = await formDialog(t("Build on the control plane"), [
+      { name: "recipe", label: t("Recipe (the kind of GPU)"), type: "select", value: builder.recipes[0],
+        options: builder.recipes.map((x) => ({ value: x, label: x })) },
+      { name: "roles", label: t("For"), type: "select", value: "both", options: [
+        { value: "both", label: t("GPU workers and the UI worker") }, { value: "gpu", label: t("GPU workers only") },
+        { value: "ui", label: t("the UI worker only") }] },
+      { name: "packs", type: "checkbox", value: packs.length > 0, label: t("Node packs"),
+        text: t("with the node packs below ({n})", { n: packs.length }) },
+    ], t("Build"));
+    if (!v) return;
+    const r = await act(() => api("POST", "/api/admin/builds", { recipe: v.recipe, roles: v.roles === "both" ? ["gpu", "ui"] : [v.roles], packs: !!v.packs }));
+    if (!r) return;
+    const tpl = await followBuild(t("Building {recipe} on the control plane", { recipe: v.recipe }), () => api("GET", `/api/admin/builds/${r.id}`));
+    if (tpl) fromRecipe(typeof tpl === "string" ? tpl : null);
+  }
+  function buildPack() {
+    const tr = namedRow(["name", "repo", "commit", "ui", "note", "actions"], { actions: "actions" });
+    tr.c.actions.append(button(t("Update"), () => updatePack(tr._item), { title: t("look up the newest commit of its branch or tag") }),
+      button(t("Edit"), () => editPack(tr._item)),
+      button(t("Remove"), () => { if (confirm(t("Remove node pack {name}? Profiles built with it keep it until you build again.", tr._item))) act(() => api("DELETE", `/api/admin/node-packs/${tr._item.id}`), t("Removed"), refresh); },
+             { cls: "danger" }));
+    return tr;
+  }
+  function updatePackRow(tr, p) {
+    setText(tr.c.name, p.name); setText(tr.c.repo, p.repo.replace(/^https:\/\//, ""));
+    setText(tr.c.commit, p.commit.slice(0, 12) + (p.ref ? ` (${p.ref})` : ""));
+    setText(tr.c.ui, p.ui ? t("yes") : t("no — GPU only")); setText(tr.c.note, p.note ?? "");
+  }
+  function renderBuilder(b) {
+    const fs = b.first_start || {};
+    const LOOK = { building: "running", starting: "running", waiting: "pending", error: "failed" };
+    firstStart.replaceChildren(...(LOOK[fs.state] ? [h("div", { class: "callout" }, pill(LOOK[fs.state], t(fs.state)), " ",
+      h("strong", {}, t("UI worker: ")), t(fs.detail || ""))] : []));
+    packInfo.textContent = !b.configured ? t("Without the control-plane builder (the compose deployment's), node packs go into recipes (rollouts.md).")
+      : !b.up ? t("The builder is not running — node packs cannot be looked up or built.")
+      : b.node_sources.length ? t("Added packs are built into node sets and venvs by Build, then rolled out like any profile — the UI worker first. Allowed sources: {s}", { s: b.node_sources.join(", ") })
+      : t("This farm's builder takes no node packs from the dashboard (COMFYFARM_BUILD_NODE_SOURCES is empty).");
   }
   const profCols = ["name", "core", "venv", "nodes", "flags", "assigned", "note", "actions"];
   function buildProf() {
@@ -318,9 +436,12 @@ export function rollout(root, { refresh }) {
   return {
     poll: 2000,
     async refresh() {
-      const [i, p, r, a] = await Promise.all([api("GET", "/api/admin/instances"), api("GET", "/api/admin/profiles"),
-        api("GET", "/api/admin/rollouts?limit=10"), api("GET", "/api/admin/audit?limit=30")]);
-      insts = i; profiles = p;
+      const [i, p, r, a, b, np] = await Promise.all([api("GET", "/api/admin/instances"), api("GET", "/api/admin/profiles"),
+        api("GET", "/api/admin/rollouts?limit=10"), api("GET", "/api/admin/audit?limit=30"), api("GET", "/api/admin/builder"),
+        api("GET", "/api/admin/node-packs")]);
+      insts = i; profiles = p; builder = b; packs = np;
+      renderBuilder(b);
+      syncRows(packT.tbody, np, (x) => x.id, buildPack, updatePackRow);
       if (artifacts === null) artifacts = await api("GET", "/api/admin/artifacts");
       syncRows(instT.tbody, i, (x) => x.worker_id, buildInst, updateInst);
       syncRows(profT.tbody, p, (x) => x.id, buildProf, updateProf);

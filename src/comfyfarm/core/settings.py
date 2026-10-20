@@ -24,3 +24,12 @@ class Settings:
     artifacts_dir: str | None = None       # <ART> as the router sees it (optional): artifact lists + §9 checks
     inventory_period: float = 600.0        # re-read a worker's models/nodes this often (models change without a restart)
     keys_dir: str = "/etc/comfyfarm/keys"   # restart backends: ssh keys, known_hosts and agent token files must lie here
+    # the compose deployment's builder and UI worker container (docs/design/15); unset = neither
+    builds_dir: str | None = None          # requests/ (the router writes) and status/ (the builder writes)
+    ui_service: str | None = None          # the UI worker container's ComfyUI, e.g. http://ui:8189
+    ui_agent: str | None = None            # its agent, e.g. http://ui:8399
+    ui_token: str = "ui_agent_token"       # the agent's token, a file in keys_dir
+    ui_home: str = "/var/lib/comfyfarm-ui"  # the container's own directories (local copies, models, temp)
+    ui_shared: str | None = None           # input/output/user below it: the storage the GPU workers use
+    ui_instance: str = "ui-1"
+    first_recipe: str = "rocm-gfx1201"     # its first build (the UI half: ComfyUI on the CPU — the same in every recipe)

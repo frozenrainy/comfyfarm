@@ -2,29 +2,55 @@
 #
 #   docker compose up -d                      (pulls the image from ghcr.io; -d keeps it running)
 #   docker compose logs router | grep "setup code"
-#   open http://<this host>:8080 — create the administrator with that code, then set up workers in the dashboard
+#   open http://<this host>:8080 — create the administrator with that code
 #
-# Nothing to edit first. Secrets are made on the first start into the `state` volume (files, not environment
-# variables); the router keeps its agent key and backups there too. Postgres is not published.
+# Nothing to edit first. On the first start the builder builds ComfyUI for the UI worker (this host needs internet for
+# that: a few minutes, ~2.5 GB) and the router starts it — workflows open before any GPU worker exists. Then set up
+# GPU workers in the dashboard, add node packs (System → Rollout → Node packs) and build for your GPUs there.
+#
+# Secrets are made on the first start into the `state` volume (files, not environment variables). Postgres is not
+# published, and the UI worker is not either (only the router and the gateway reach it).
 # What "easy" leaves to you: ports 8080 (users) and 8188 (workers, monitoring) open on every address of this host —
-# restrict them with your firewall (Docker publishes past ufw), or use ../compose: secrets on the host, ports on one
-# address, pinned image versions (docs/guide/install.md). Optional settings: a .env file next to this one (below).
+# restrict them with your firewall (Docker publishes past ufw), or use ../compose (install.md). Optional settings: a
+# .env file next to this one:
+#   COMFYFARM_ARTIFACTS_MOUNT  the artifact store, default /srv/comfyfarm/art — GPU workers mount it at the SAME path
+#   COMFYFARM_SHARED           input/output/user, default /srv/comfyfarm/shared — the storage GPU workers use too
+#   COMFYFARM_UID              the workers' service account uid (default 47800): shared storage belongs to it
+#   COMFYFARM_BUILD_NODE_SOURCES  where node packs picked in the dashboard may come from (default https://github.com/;
+#                              empty = none) — the builder's setting: the router cannot change it
+#   COMFYFARM_FIRST_RECIPE     the recipe whose UI half the first start builds (default rocm-gfx1201; the UI half is the
+#                              same in every recipe)
+#   ROUTER_PORT, GATEWAY_PORT  <host-ip>:<port> to publish on one address only
 name: comfyfarm
 
+x-image: &image
+  image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.9}
+  build:                                    # only for `docker compose build` (a change of your own, a closed network)
+    context: ../..
+    dockerfile: deploy/Dockerfile
+  pull_policy: missing
+
 services:
-  init:                                     # makes /state once (secrets, keys, backups) and exits; never changes it
-    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.8}
-    build: &build                           # only for `docker compose build` (a change of your own, a closed network)
-      context: ../..
-      dockerfile: deploy/Dockerfile
-    pull_policy: missing
-    # root for these seconds only: a bind mount (./state, ./logs instead of the volumes below) is created by Docker as
-    # root; init gives it to the image's account (uid 10001) — every other service runs as that account
+  init:                                     # makes /state and the builder's and UI worker's directories, then exits
+    <<: *image
+    # root for these seconds only: bind mounts are created by Docker as root; init gives each to its account — the
+    # router (uid 10001), the builder (10002, the artifact store), the workers' account (47800, the shared storage) —
+    # and never a directory that already holds someone else's files
     user: "0:0"
-    command: ["comfyfarm", "prepare", "/state", "--chown", "/var/log/comfyfarm"]
+    network_mode: none
+    command: ["comfyfarm", "prepare", "/state", "--chown", "/var/log/comfyfarm", "--builds", "/builds",
+              "--ui-token", "/ui-agent", "--art", "${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}",
+              "--shared", "${COMFYFARM_SHARED:-/srv/comfyfarm/shared}", "--builder-home", "/builder-home",
+              "--ui-home", "/ui-home", "--farm-uid", "${COMFYFARM_UID:-47800}"]
     volumes:
       - state:/state
       - logs:/var/log/comfyfarm
+      - builds:/builds
+      - ui-agent:/ui-agent
+      - builder-home:/builder-home
+      - ui-home:/ui-home
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
+      - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}:${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
     restart: "no"
 
   db:
@@ -40,15 +66,14 @@ services:
     volumes:
       - db:/var/lib/postgresql/data
       - state:/state:ro
+    networks: [db]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U comfyfarm -d comfyfarm"]
       interval: 5s
       retries: 20
 
   router:
-    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.8}
-    build: *build
-    pull_policy: missing
+    <<: *image
     restart: unless-stopped
     depends_on:
       db:
@@ -59,19 +84,24 @@ services:
       COMFYFARM_GATEWAY_SECRET_FILE: /state/secrets/gateway_secret
       COMFYFARM_KEYS_DIR: /state/keys
       COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}
-      COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:+/artifacts}
+      COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
+      COMFYFARM_BUILDS_DIR: /builds
+      COMFYFARM_UI_SERVICE: http://ui:8189
+      COMFYFARM_UI_AGENT: http://ui:8399
+      COMFYFARM_UI_SHARED: ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
+      COMFYFARM_FIRST_RECIPE: ${COMFYFARM_FIRST_RECIPE:-rocm-gfx1201}
     ports:
       - "${ROUTER_PORT:-8188}:8188"         # workers' launchers, /metrics — not for users' browsers
     volumes:
       - state:/state
       - logs:/var/log/comfyfarm
-      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:/artifacts:ro   # optional: the artifact store, read-only
-      - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # optional: the UI worker's user directory (backups)
+      - builds:/builds
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:ro
+      - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}/user:/userdata:ro   # the users' workflows: comfyfarm backup --user-dir /userdata
+    networks: [db, front]
 
   gateway:
-    image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.8}
-    build: *build
-    pull_policy: missing
+    <<: *image
     restart: unless-stopped
     depends_on:
       - router
@@ -85,8 +115,58 @@ services:
     volumes:
       - state:/state:ro
       - logs:/var/log/comfyfarm
+    networks: [front]
+
+  builder:                                  # builds what the dashboard asks for (docs/design/15); owns the artifact store
+    <<: *image
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    user: "10002:10002"
+    command: ["comfyfarm", "builder", "--art", "${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}"]
+    environment:
+      HOME: /var/lib/comfyfarm-builder
+      UV_CACHE_DIR: /var/lib/comfyfarm-builder/uv-cache
+      UV_PYTHON_INSTALL_DIR: /var/lib/comfyfarm-builder/python
+      COMFYFARM_BUILD_NODE_SOURCES: ${COMFYFARM_BUILD_NODE_SOURCES-https://github.com/}
+    volumes:
+      - builds:/builds
+      - builder-home:/var/lib/comfyfarm-builder
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
+    networks: [build]                       # internet (PyPI, PyTorch, GitHub); not the router's or the database's
+
+  ui:                                       # the UI worker: ComfyUI on the CPU for the screen and the users' files
+    <<: *image
+    restart: unless-stopped
+    depends_on:
+      - router
+    user: "${COMFYFARM_UID:-47800}:${COMFYFARM_UID:-47800}"
+    command: ["comfyfarm", "ui-worker"]
+    environment:
+      COMFYFARM_ROUTER: http://router:8188
+      COMFYFARM_ARTIFACTS: ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
+      COMFYFARM_SHARED: ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
+      COMFYFARM_UI_HOME: /var/lib/comfyfarm-ui
+      COMFYFARM_UI_TOKEN_FILE: /run/comfyfarm-ui-agent/token
+    volumes:
+      - ui-home:/var/lib/comfyfarm-ui
+      - ui-agent:/run/comfyfarm-ui-agent:ro
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:ro
+      - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}:${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
+    networks: [front]                       # only the router and the gateway reach it; never the database
+
+networks:
+  db:
+    internal: true                          # Postgres talks to the router only
+  front: {}
+  build: {}
 
 volumes:
   state:
   db:
   logs:
+  builds:
+  ui-agent:
+  builder-home:
+  ui-home:

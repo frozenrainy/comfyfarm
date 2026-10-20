@@ -1,5 +1,5 @@
-# ComfyFarm control plane: Postgres + router + gateway on one host. Workers (GPU machines running ComfyUI) and the
-# UI worker are separate — see docs/guide/install.md. Settings come from .env next to this file (cp env.example .env);
+# ComfyFarm control plane: Postgres + router + gateway on one host; with COMPOSE_PROFILES=farm in .env also the builder
+# and the UI worker container (docs/design/15). GPU workers are separate hosts — see docs/guide/install.md. Settings come from .env next to this file (cp env.example .env);
 # the three secrets are files in COMFYFARM_SECRETS_DIR (`comfyfarm secrets --write`), never values in the environment,
 # where `docker inspect` would show them.
 name: comfyfarm
@@ -23,6 +23,7 @@ services:
     secrets: [db_password]
     volumes:
       - db:/var/lib/postgresql/data
+    networks: [db]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U comfyfarm -d comfyfarm"]
       interval: 5s
@@ -46,7 +47,13 @@ services:
       COMFYFARM_GATEWAY_SECRET_FILE: /run/secrets/gateway_secret
       COMFYFARM_INSTANCE: ${COMFYFARM_INSTANCE:-comfyfarm-1}
       COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}
-      COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:+/artifacts}
+      COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:-}
+      # the builder and the UI worker container (COMPOSE_PROFILES=farm): empty = neither
+      COMFYFARM_BUILDS_DIR: ${COMFYFARM_BUILDS_DIR:-}
+      COMFYFARM_UI_SERVICE: ${COMFYFARM_UI_SERVICE:-}
+      COMFYFARM_UI_AGENT: ${COMFYFARM_UI_AGENT:-}
+      COMFYFARM_UI_SHARED: ${COMFYFARM_SHARED:-}
+      COMFYFARM_FIRST_RECIPE: ${COMFYFARM_FIRST_RECIPE:-rocm-gfx1201}
     secrets: [db_password, gateway_secret]
     # Launchers on the workers fetch their render here; /metrics and /api/health/dispatch are here too.
     # Browsers never come here — firewall this port to the worker hosts and your monitoring.
@@ -55,9 +62,11 @@ services:
     volumes:
       - logs:/var/log/comfyfarm
       - ${COMFYFARM_KEYS_DIR:-./keys}:/keys                          # agent key, known_hosts, token files (owned by uid 10001)
-      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:/artifacts:ro   # optional: the artifact store, read-only
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}:ro   # the store, at its path
+      - builds:/builds
       - ${COMFYFARM_BACKUP_DIR:-./backups}:/backups                    # comfyfarm backup /backups (owned by uid 10001)
       - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # the UI worker's user directory (backup --user-dir)
+    networks: [db, front]
 
   gateway:
     image: ${COMFYFARM_IMAGE:-ghcr.io/frozenrainy/comfyfarm}:${COMFYFARM_VERSION}
@@ -74,7 +83,79 @@ services:
       - "${GATEWAY_PORT:-8080}:8080"        # the only address users need
     volumes:
       - logs:/var/log/comfyfarm
+    networks: [front]
+
+  # ---- COMPOSE_PROFILES=farm: the builder and the UI worker container (docs/design/15) ----------------------------
+  init-farm:                                # root for seconds: the builder's and the UI worker's directories and token
+    profiles: [farm]
+    image: ${COMFYFARM_IMAGE:-ghcr.io/frozenrainy/comfyfarm}:${COMFYFARM_VERSION}
+    user: "0:0"
+    network_mode: none
+    command: ["comfyfarm", "prepare", "-", "--keys", "/keys", "--builds", "/builds", "--ui-token", "/ui-agent",
+              "--art", "${COMFYFARM_ARTIFACTS_MOUNT:-}", "--shared", "${COMFYFARM_SHARED:-}",
+              "--builder-home", "/builder-home", "--ui-home", "/ui-home", "--farm-uid", "${COMFYFARM_UID:-47800}"]
+    volumes:
+      - ${COMFYFARM_KEYS_DIR:-./keys}:/keys
+      - builds:/builds
+      - ui-agent:/ui-agent
+      - builder-home:/builder-home
+      - ui-home:/ui-home
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}
+      - ${COMFYFARM_SHARED:-./no-shared}:${COMFYFARM_SHARED:-/no-shared}
+    restart: "no"
+
+  builder:
+    profiles: [farm]
+    image: ${COMFYFARM_IMAGE:-ghcr.io/frozenrainy/comfyfarm}:${COMFYFARM_VERSION}
+    restart: unless-stopped
+    depends_on:
+      init-farm:
+        condition: service_completed_successfully
+    user: "10002:10002"
+    command: ["comfyfarm", "builder", "--art", "${COMFYFARM_ARTIFACTS_MOUNT:-}"]
+    environment:
+      HOME: /var/lib/comfyfarm-builder
+      UV_CACHE_DIR: /var/lib/comfyfarm-builder/uv-cache
+      UV_PYTHON_INSTALL_DIR: /var/lib/comfyfarm-builder/python
+      # node packs picked in the dashboard: off here unless you list the sources (e.g. https://github.com/)
+      COMFYFARM_BUILD_NODE_SOURCES: ${COMFYFARM_BUILD_NODE_SOURCES:-}
+    volumes:
+      - builds:/builds
+      - builder-home:/var/lib/comfyfarm-builder
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}
+    networks: [build]
+
+  ui:
+    profiles: [farm]
+    image: ${COMFYFARM_IMAGE:-ghcr.io/frozenrainy/comfyfarm}:${COMFYFARM_VERSION}
+    restart: unless-stopped
+    depends_on:
+      - router
+    user: "${COMFYFARM_UID:-47800}:${COMFYFARM_UID:-47800}"
+    command: ["comfyfarm", "ui-worker"]
+    environment:
+      COMFYFARM_ROUTER: http://router:8188
+      COMFYFARM_ARTIFACTS: ${COMFYFARM_ARTIFACTS_MOUNT:-}
+      COMFYFARM_SHARED: ${COMFYFARM_SHARED:-}
+      COMFYFARM_UI_HOME: /var/lib/comfyfarm-ui
+      COMFYFARM_UI_TOKEN_FILE: /run/comfyfarm-ui-agent/token
+    volumes:
+      - ui-home:/var/lib/comfyfarm-ui
+      - ui-agent:/run/comfyfarm-ui-agent:ro
+      - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}:ro
+      - ${COMFYFARM_SHARED:-./no-shared}:${COMFYFARM_SHARED:-/no-shared}
+    networks: [front]
+
+networks:
+  db:
+    internal: true
+  front: {}
+  build: {}
 
 volumes:
   db:
   logs:
+  builds:
+  ui-agent:
+  builder-home:
+  ui-home:

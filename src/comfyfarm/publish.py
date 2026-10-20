@@ -341,6 +341,10 @@ def load_recipe(name: str, recipes: str | None = None) -> dict:
         raise Refused(f"recipe {name}: {e}")
     if not isinstance(r, dict) or not NAME.match(str(r.get("recipe", ""))):
         raise Refused(f"recipe {path}: 'recipe' must be a plain name")
+    return check_recipe(r)
+
+
+def check_recipe(r: dict) -> dict:
     who = f"recipe {r['recipe']}"
     c = r.get("comfyui") or {}
     if not isinstance(c, dict) or not REPO.match(str(c.get("repo", ""))) or not RELEASE.match(str(c.get("ref", ""))):
@@ -372,6 +376,9 @@ def load_recipe(name: str, recipes: str | None = None) -> dict:
             raise Refused(f"{who}: node {n['name']} requirements_file must be a .txt file inside the pack")
         if not isinstance(n.get("ui", True), bool):
             raise Refused(f"{who}: node {n['name']} ui must be true or false")
+    names = [n["name"] for n in r.get("nodes", [])]
+    if len(set(names)) != len(names) or set(names) & {"comfyfarm_worker", "comfyfarm_ui"}:
+        raise Refused(f"{who}: node names must be unique and not comfyfarm_worker or comfyfarm_ui")
     for x in r.get("constraints", []) + [c for n in r.get("nodes", []) for c in n.get("constraints", [])]:
         if not isinstance(x, str) or "\n" in x or not SPEC.match(x.strip()):
             raise Refused(f"{who}: constraints must be version specifiers like 'kornia<0.8', not {x!r}")
@@ -508,7 +515,7 @@ def needed_through_dependencies(uv: str, requirements: list[str], constraints: l
         cmd += ["-r", r]
     for c in constraints:
         cmd += ["-c", c]
-    cmd += [a for a in pip_args if a.startswith(("--index-url", "--extra-index-url", "--index-strategy"))]
+    cmd += [a for a in pip_args if a.startswith(("--index-url", "--extra-index-url", "--index-strategy", "--python-platform"))]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         return [KEEP_OPENCV, keep_ort(accelerator)]
@@ -586,10 +593,20 @@ def venv_inputs(recipe: dict, role: str, requirements: list[str], extra: list[st
 
 
 def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = False, recipes: str | None = None,
-                   ext: str | None = None, log=print) -> dict:
+                   ext: str | None = None, log=print, roles: tuple[str, ...] = ROLES, extra_nodes: list[dict] | None = None,
+                   platform: str | None = None) -> dict:
     """Publish what the recipe names, reusing what is already there with the same content, and write a profile
     template (<ART>/profiles/<template>.json, ComfyFarm's own — not part of the contract) for the dashboard."""
     recipe, ext = load_recipe(name, recipes), find_dir("worker_ext", ext)
+    if extra_nodes:                                  # node packs picked in the dashboard (builder.py checked their source)
+        recipe = check_recipe({**recipe, "nodes": recipe.get("nodes", []) + list(extra_nodes),
+                               "about": (recipe.get("about", "") + f" + {len(extra_nodes)} node pack(s) from the dashboard").strip()})
+    roles = tuple(r for r in ROLES if r in roles)
+    if not roles:
+        raise Refused("roles: gpu, ui or both")
+    if platform and not re.fullmatch(r"[a-z0-9_][a-z0-9_.-]*", platform):
+        raise Refused(f"bad platform {platform!r}")
+    target = [f"--python-platform={platform}"] if platform and uv else []     # wheels every worker host can load
     art = os.path.abspath(art)
     uv = uv or shutil.which("uv") or next((p for p in (os.path.expanduser("~/.local/bin/uv"),) if os.path.exists(p)), None)
     py = recipe.get("python", "3.12")
@@ -626,7 +643,7 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
         with open(base, "w") as f:
             f.write("\n".join(BASE_EXTRA) + "\n")
         template = {"recipe": recipe["recipe"], "about": recipe.get("about", ""), "comfyui": c["ref"]}
-        for role in ROLES:
+        for role in roles:
             # each role's venv has the requirements of the packs that role runs, resolved together with ComfyUI's
             acc = recipe[role]["accelerator"]
             req_files = [os.path.join(core_src, "requirements.txt"), base]
@@ -643,7 +660,7 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
             if lines and uv:
                 with open(node_file, "w") as f:
                     f.write("\n".join(lines) + "\n")
-                pip_probe = [f"--index-url={recipe[role]['index']}", f"--extra-index-url={PYPI}", "--index-strategy=unsafe-best-match"]
+                pip_probe = [f"--index-url={recipe[role]['index']}", f"--extra-index-url={PYPI}", "--index-strategy=unsafe-best-match"] + target
                 for k in needed_through_dependencies(uv, req_files + [node_file], extra[1:], pip_probe, py, acc):
                     if not any(re.match(re.escape(k) + r"(?![A-Za-z0-9_.-])", x, re.I) for x in lines):
                         lines.append(k)
@@ -673,7 +690,7 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
             else:
                 venv = next_name(art, "venv", v["venv"])
                 log(f"venv/{venv}: building ({v['accelerator']}, {v['index']}) — this takes a while")
-                pip = [f"--index-url={v['index']}", f"--extra-index-url={PYPI}"] + (["--index-strategy=unsafe-best-match"] if uv else [])
+                pip = [f"--index-url={v['index']}", f"--extra-index-url={PYPI}"] + (["--index-strategy=unsafe-best-match"] if uv else []) + target
                 publish_venv(art, venv, py if uv else f"python{py}", req_files, v["accelerator"], v.get("arch", []),
                              pip + v.get("pip", []), uv, {"inputs_sha256": inputs, "recipe": recipe["recipe"]},
                              constraints=extra[1:], overrides=extra[:1])
@@ -686,7 +703,7 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
             continue                                       # another recipe whose name starts with this one
         with open(f) as fh:
             old = json.load(fh)
-        if all(old.get(r) == template[r] for r in ROLES):
+        if all(old.get(r) == template.get(r) for r in ROLES):
             log(f"profiles/{os.path.basename(f)}: the same template exists")
             return old
     n = next_name(art, "profiles", recipe["recipe"]).rsplit("-", 1)[1]
@@ -714,10 +731,22 @@ def main(argv=None) -> int:
     ap.add_argument("--uv", help="build with this uv binary instead of venv + pip")
     ap.add_argument("--rebuild", action="store_true", help="recipe: build new venvs even when the same inputs were built")
     ap.add_argument("--recipes", help="recipe: the directory holding recipes/ (default: next to this file, or the repository)")
+    ap.add_argument("--roles", default="gpu,ui", help="recipe: build these halves (gpu, ui or both)")
+    ap.add_argument("--nodes-json", help="recipe: a JSON list of node packs to add (the control-plane builder's)")
+    ap.add_argument("--platform", help="recipe: wheels for this uv platform tag, e.g. x86_64-manylinux_2_35")
+    ap.add_argument("--ext", help="recipe: the directory holding worker_ext/ and ui_ext/ (default: like --recipes)")
     a = ap.parse_args(argv)
     try:
         if a.kind == "recipe":
-            m = publish_recipe(a.art, a.name, a.uv, a.rebuild, a.recipes, log=lambda x: print(x, file=sys.stderr))
+            extra = None
+            if a.nodes_json:
+                with open(a.nodes_json) as f:
+                    extra = json.load(f)
+                if not isinstance(extra, list):
+                    raise Refused("--nodes-json: a list of node packs")
+            m = publish_recipe(a.art, a.name, a.uv, a.rebuild, a.recipes, ext=a.ext, log=lambda x: print(x, file=sys.stderr),
+                               roles=tuple(x.strip() for x in a.roles.split(",") if x.strip()), extra_nodes=extra,
+                               platform=a.platform)
         elif a.kind == "venv":
             m = publish_venv(a.art, a.name, a.python, a.requirements, a.accelerator, a.arch, a.pip_arg, a.uv)
         else:

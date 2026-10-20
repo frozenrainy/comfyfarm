@@ -5,7 +5,8 @@ their outputs and submit or interrupt jobs by going to the worker's port directl
 
 Configuration: `COMFYFARM_ALLOW` — comma-separated addresses or CIDR blocks of the router(s) and gateway(s),
 e.g. `COMFYFARM_ALLOW=10.0.0.5,10.0.0.6/32`. Loopback is always allowed (local administration). Unset = open, and
-the worker reports itself as unsecured (the dashboard shows it).
+the worker reports itself as unsecured (the dashboard shows it). `COMFYFARM_ALLOW_NETWORK` is added to it: the UI
+worker container sets it to the compose network it is reachable on, whatever the profile's allow-list says.
 
 The decision uses the TCP peer address, never a header (X-Forwarded-For is whatever the client wrote). No ComfyUI
 imports here, so the policy can be tested on its own."""
@@ -17,6 +18,7 @@ import os
 from aiohttp import web
 
 ENV = "COMFYFARM_ALLOW"
+ENV_NETWORK = "COMFYFARM_ALLOW_NETWORK"
 LOOPBACK = (ipaddress.ip_network("127.0.0.0/8"), ipaddress.ip_network("::1/128"))
 
 
@@ -76,4 +78,5 @@ def make_middleware(policy: Policy):
 
 
 def from_env(environ=None) -> Policy:
-    return Policy((environ or os.environ).get(ENV))
+    e = environ or os.environ
+    return Policy(",".join(x for x in (e.get(ENV), e.get(ENV_NETWORK)) if x))

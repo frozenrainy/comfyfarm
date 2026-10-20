@@ -31,6 +31,8 @@ ComfyUI로 재현한 구체적인 장애에 묶여 있습니다.
   아티팩트가 아니면 거부하는 표준 라이브러리 전용 런처를 씁니다([설정](docs/guide/rollouts.md)).
 - 안내형 워커 설치: 대시보드에 빈 리눅스 호스트를 적고, 그 호스트에서 검증된 명령 한 줄을 실행하면(또는 라우터가 ssh로
   대신 실행) 호스트 점검 결과를 보고 워커를 등록합니다([설계 14](docs/design/14-worker-setup.md)).
+- 대시보드에서 노드팩 배포: 저장소를 추가하고 빌드해서 롤아웃합니다. 요구사항을 한 번에 해석하고, OpenCV는 한 벌만,
+  서브모듈 포함, 커밋 고정, 운영자가 허용한 저장소에서만 받습니다([설계 15](docs/design/15-control-plane-builds.md)).
 - Postgres 원장, 한 대 구성. 이중화(라우터 2대 + Postgres 복제)는 설계만 되어 있고 아직 구현 전입니다
   ([아키텍처](docs/design/01-architecture.md) C).
 
@@ -51,16 +53,17 @@ ComfyUI로 재현한 구체적인 장애에 묶여 있습니다.
 ComfyFarm은 콘텐츠를 조직 네트워크 밖으로 내보낼 수 없는 곳을 위한 것입니다. 제어 호스트 한 대, NAS, ComfyUI를 돌리는 GPU
 머신 몇 대로 이루어집니다. 설치는 엔지니어(또는 AI 어시스턴트)가 오후 한나절이면 되고, 그 뒤 운영은 대시보드에서 합니다.
 
-1. **제어 영역** — 라우터·게이트웨이·Postgres. 미리 고칠 파일이 없습니다.
+1. **제어 영역** — 라우터·게이트웨이·Postgres·빌더·UI 워커. 미리 고칠 파일이 없습니다.
    ```sh
    git clone https://github.com/frozenrainy/comfyfarm && cd comfyfarm/deploy/easy
    docker compose up -d
    docker compose logs router | grep "setup code"      # http://<이 호스트>:8080 을 열고 이 코드로 관리자를 만듭니다
    ```
-   보안을 엄격하게(비밀값은 호스트에, 포트는 주소 하나에, 버전 고정): `deploy/compose/`, 컨테이너 없이:
-   `deploy/systemd/` — [설치](docs/guide/install.md) §1.
-2. **워커** — ComfyUI·venv·노드 세트를 한 번 게시하고([롤링 업그레이드](docs/guide/rollouts.md) §1), *시스템 → 워커 →
-   워커 설치*로 빈 리눅스 호스트를 점검된 워커로 만듭니다. UI 워커 먼저, 그다음 GPU 머신.
+   첫 기동이 UI 워커용 ComfyUI를 빌드하고 띄웁니다. GPU 워커가 없어도 워크플로가 열립니다.
+   보안을 엄격하게(비밀값은 호스트에, 포트는 주소 하나에, 버전 고정): `deploy/compose/`, 컨테이너 없이: `deploy/systemd/`
+   (빌더·UI 워커 컨테이너 없음) — [설치](docs/guide/install.md) §1.
+2. **노드팩과 GPU 워커** — *시스템 → 롤아웃*에서 노드팩을 추가하고, GPU 종류에 맞게 *빌드*하고, 프로필을 만듭니다. 그다음
+   *시스템 → 워커 → 워커 설치*로 빈 리눅스 호스트를 점검된 워커로 만듭니다.
 3. **점검** — `docker compose exec router comfyfarm doctor`가 아직 맞지 않은 것을 한 줄씩 알려 줍니다.
 
 안내서(영문): [설치](docs/guide/install.md) · [운영](docs/guide/running.md) · [롤링 업그레이드](docs/guide/rollouts.md) ·

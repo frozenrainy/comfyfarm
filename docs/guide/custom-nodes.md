@@ -4,6 +4,19 @@ A custom node reaches the workers the same way ComfyUI itself does: as published
 profile and rolled out (rollouts.md). Nothing is installed on a worker by hand, and ComfyUI-Manager is not used —
 every worker of a group must run exactly the same nodes. Worked example at the end: ComfyUI-VideoHelperSuite.
 
+**With the compose deployment** (its builder, [design 15](../design/15-control-plane-builds.md)):
+
+1. *System → Rollout → Node packs → Add node pack*: the repository and a branch or tag (empty: the default branch). The
+   builder looks up the commit it names now; the pack stays pinned to it until *Update*.
+2. Untick *Also on the UI worker* for a pack that imports only with a GPU. Add a constraint where a pack breaks on a
+   newer dependency (`kornia<0.8` for ComfyUI-LTXVideo); name another requirements file if the pack ships a lighter one.
+3. *Build* (your kind of GPU, both halves, with the node packs) → *From a recipe* → roll the UI profile out, then the
+   group's. A pack that fails to import stops that worker's step and is named (§4).
+
+The pack's requirements, one OpenCV, submodules and the rest are handled by the build (rollouts.md §1, *Custom nodes in
+a recipe*). Read §1, §5–§7 below anyway: what a node does with routes, previews, settings and server paths is the same
+however it was installed. The rest of this page is the way without the builder.
+
 ## 1. Look at the node first
 
 Pin a commit (or a release) and read four things:

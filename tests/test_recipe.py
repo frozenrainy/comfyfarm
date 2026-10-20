@@ -334,3 +334,34 @@ def test_the_kept_opencv_and_onnxruntime_are_asked_for(tmp_path, monkeypatch):
     monkeypatch.setattr(publish.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "no"))
     assert publish.needed_through_dependencies("uv", ["r.txt"], [], [], "3.12", "cpu") == ["opencv-contrib-python-headless",
                                                                                            "onnxruntime"]
+
+
+def test_one_half_and_packs_from_the_dashboard(setup):
+    """The control-plane builder: the first start builds the UI half only; later builds add the dashboard's packs."""
+    t = publish.publish_recipe(str(setup["art"]), "test-gpu", uv=None, recipes=setup["recipes"], ext=ROOT,
+                               log=lambda x: None, roles=("ui",))
+    assert "gpu" not in t and t["ui"]["venv"] == "uv-1" and [b[0] for b in setup["built"]] == ["uv-1"]
+    extra = node_repo(setup, "DashPack", {"__init__.py": "", "requirements.txt": "dash-lib\n"})
+    t2 = publish.publish_recipe(str(setup["art"]), "test-gpu", uv=None, recipes=setup["recipes"], ext=ROOT,
+                                log=lambda x: None, extra_nodes=[extra])
+    assert t2["template"] != t["template"] and "gpu" in t2 and "dashboard" in t2["about"]
+    assert "DashPack" in os.listdir(setup["art"] / "nodes" / t2["gpu"]["nodes"][0])
+    assert "dash-lib" in setup["built"][-1][1][2]
+    with pytest.raises(publish.Refused, match="unique"):                         # a pack may not shadow the recipe's
+        publish.publish_recipe(str(setup["art"]), "test-gpu", uv=None, recipes=setup["recipes"], ext=ROOT,
+                               log=lambda x: None, extra_nodes=[{**extra, "name": "SomeNode"}])
+    with pytest.raises(publish.Refused, match="roles"):
+        publish.publish_recipe(str(setup["art"]), "test-gpu", uv=None, recipes=setup["recipes"], ext=ROOT,
+                               log=lambda x: None, roles=("cpu",))
+
+
+def test_the_platform_reaches_the_install_only_with_uv(setup):
+    import shutil
+    uv = shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
+    if os.path.exists(uv):                                                       # the real uv installs the interpreter
+        publish.publish_recipe(str(setup["art"]), "test-gpu", uv=uv, recipes=setup["recipes"], ext=ROOT,
+                               log=lambda x: None, platform="x86_64-manylinux_2_35")
+        assert "--python-platform=x86_64-manylinux_2_35" in setup["built"][0][2]
+    with pytest.raises(publish.Refused, match="platform"):
+        publish.publish_recipe(str(setup["art"]), "test-gpu", uv=None, recipes=setup["recipes"], ext=ROOT,
+                               log=lambda x: None, platform="x86; rm")

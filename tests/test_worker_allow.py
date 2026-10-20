@@ -107,3 +107,12 @@ def test_failed_custom_nodes_are_a_worker_warning():
         [CUSTOM_NODES_FAILED + "X, Y"]
     for quiet in ({"loaded": ["a"], "failed": []}, None):                 # none failed / an older extension
         assert security_warnings({"extension": {**ext, "custom_nodes": quiet}}) == []
+
+
+def test_the_container_network_is_added_to_the_profiles_allow_list():
+    """The UI worker container: its profile may allow the router's LAN address (made for GPU workers); the gateway
+    and router reach the container on the compose network — COMFYFARM_ALLOW_NETWORK, set by its supervisor."""
+    p = allow.from_env({"COMFYFARM_ALLOW": "10.0.0.5", "COMFYFARM_ALLOW_NETWORK": "172.30.0.0/16"})
+    assert p.secured and p.allows("10.0.0.5") and p.allows("172.30.4.2") and not p.allows("192.168.1.9")
+    assert allow.from_env({"COMFYFARM_ALLOW_NETWORK": "172.30.0.0/16"}).secured
+    assert not allow.from_env({}).secured

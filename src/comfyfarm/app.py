@@ -41,6 +41,7 @@ class Router:
         from .rollout.engine import Engine
         self.rollout = Engine(self)
         self.tasks: list[asyncio.Task] = []
+        self.background: list = []              # coroutine functions the API modules add (api/builds.py: first start)
         self.setup_code: str | None = None      # set while the farm has no administrator (first_admin_code)
 
     async def start(self, loops: bool = True):
@@ -50,6 +51,7 @@ class Router:
             self.tasks = [asyncio.create_task(x.run()) for x in (self.health, self.dispatcher, self.reconciler, self.events,
                                                                   self.rollout)]
             self.tasks.append(asyncio.create_task(self.listen()))
+            self.tasks += [asyncio.create_task(f()) for f in self.background]
 
     async def first_admin_code(self) -> str | None:
         """A fresh install has no administrator: a one-time setup code lets whoever has it create the first one on the
@@ -136,13 +138,13 @@ def create_app(settings: Settings) -> FastAPI:
         await router.stop()
 
     app = FastAPI(title="ComfyFarm", lifespan=lifespan)
-    from .api import account, admin as admin_api, dashboard, rollout as rollout_api, setup as setup_api, stock
+    from .api import account, admin as admin_api, builds as builds_api, dashboard, rollout as rollout_api, setup as setup_api, stock
     from .api.context import Ctx
     from .identity import TrustGatewayHeaders
     app.add_middleware(TrustGatewayHeaders, secret=settings.gateway_secret, dev=settings.dev_identity is not None)
     ctx = Ctx(router, settings)
     identity, is_admin = ctx.identity, ctx.is_admin
-    for module in (stock, dashboard, account, admin_api, rollout_api, setup_api):
+    for module in (stock, dashboard, account, admin_api, rollout_api, setup_api, builds_api):
         app.include_router(module.make_router(ctx))
 
     @app.exception_handler(Busy)
