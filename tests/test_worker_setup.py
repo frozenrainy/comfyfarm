@@ -217,3 +217,26 @@ def test_a_unit_in_the_accounts_home_that_would_shadow_setups_is_named(tmp_path)
     own.write_text("[Service]\n")
     res = ws.setup(payload(), ws.Host(root=str(root), run=Recorder()))
     assert not res["ok"] and "take the place" in res["error"]
+
+
+
+def test_the_router_is_allowed_by_default(tmp_path):
+    """Field (dev.9, NVIDIA): set up as the dashboard does, every worker started "unsecured" — nothing filled the
+    allow-list. Setup now allows the router's address as this host reaches it; with the router on this very host, the
+    Docker bridges its containers come from."""
+    root = fake_root(tmp_path)
+    ws.setup(payload(), ws.Host(root=str(root), run=Recorder()))
+    assert "COMFYFARM_ALLOW_NETWORK=10.0.0.5" in (root / "etc/comfyfarm/gpu-1.env").read_text()
+
+    class SameHost(Recorder):
+        def __call__(self, argv):
+            if argv[:3] == ["ip", "-j", "addr"]:
+                self.calls.append(argv)
+                return 0, json.dumps([
+                    {"ifname": "eth0", "addr_info": [{"family": "inet", "local": "10.0.0.5", "prefixlen": 24}]},
+                    {"ifname": "docker0", "addr_info": [{"family": "inet", "local": "172.17.0.1", "prefixlen": 16}]},
+                    {"ifname": "br-1a2b", "addr_info": [{"family": "inet", "local": "10.200.1.1", "prefixlen": 24}]}])
+            return super().__call__(argv)
+    root = fake_root(tmp_path / "b")
+    ws.setup(payload(), ws.Host(root=str(root), run=SameHost()))
+    assert "COMFYFARM_ALLOW_NETWORK=10.0.0.5,172.17.0.0/16,10.200.1.0/24" in (root / "etc/comfyfarm/gpu-1.env").read_text()

@@ -71,6 +71,19 @@ purpose (`--disable-all-custom-nodes` with a whitelist) are not failures. With `
 not in the log and the extension reports it as unknown — the rollout then cannot check it. A worker started outside a
 rollout shows the same as a warning in System → Workers. Then run one real workflow with the node through the gateway.
 
+**System libraries.** Some packs' wheels load desktop libraries a minimal server lacks (pymeshlab, used by 3D packs,
+needs nine). A rollout names the missing one and its package — `ComfyUI-Hunyuan3DWrapper (libGL.so.1 is missing on the
+host — install libgl1)`. On Debian/Ubuntu these cover the packs seen so far:
+
+```sh
+sudo apt install libgl1 libopengl0 libegl1 libx11-6 libxcb1 libxext6 libxrender1 libsm6 libfontconfig1 libfreetype6 \
+    libcom-err2 libgpg-error0 libp11-kit0
+```
+
+**Installs at run time.** A few packs pip-install modules while ComfyUI imports them. The launcher starts ComfyUI with
+`PIP_NO_INDEX=1` and published venvs are read-only, so such an install fails at once instead of waiting for a network;
+name the pack's files in `requirements_file` so the build puts them in (AlekPet keeps one per node).
+
 ## 5. Previews of files that are not saved
 
 ComfyUI writes unsaved results (previews) to the executing worker's temp directory. The gateway asks the router which

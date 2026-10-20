@@ -47,7 +47,8 @@ tag, every node a full commit.
 What the build does with it, so that the pack works without anyone installing anything on a worker:
 
 - **Requirements come from the pack**: its `requirements.txt`, else the dependencies in its `pyproject.toml`.
-  `"requirements_file": "requirements-lite.txt"` picks another file of the pack; `"requirements": [...]` in the entry
+  `"requirements_file": "requirements-lite.txt"` picks another file of the pack (several, comma-separated, for a pack that
+  keeps one per node); `"requirements": [...]` in the entry
   replaces the pack's own list. Never taken from a pack: options (an index URL, `-r`, `-e`), local paths, and torch,
   torchvision or torchaudio — the venv keeps the torch of its accelerator. The build log says what it left out.
 - **One venv, resolved at once**: ComfyUI's requirements, torchaudio (packs import it without listing it) and every

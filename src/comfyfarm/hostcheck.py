@@ -29,7 +29,23 @@ MIN_PYTHON = (3, 10)
 # shared libraries GPU wheels load from the system, and the Debian/Ubuntu package that has each
 SYSTEM_LIBS = {"libatomic.so.1": "libatomic1", "libgomp.so.1": "libgomp1", "libnuma.so.1": "libnuma1",
                "libdrm.so.2": "libdrm2", "libdrm_amdgpu.so.1": "libdrm-amdgpu1", "libelf.so.1": "libelf1t64",
-               "libtinfo.so.6": "libtinfo6", "libstdc++.so.6": "libstdc++6", "libquadmath.so.0": "libquadmath0"}
+               "libtinfo.so.6": "libtinfo6", "libstdc++.so.6": "libstdc++6", "libquadmath.so.0": "libquadmath0",
+               # what node packs' wheels load (pymeshlab, opencv's GUI builds, open3d …): a minimal server lacks them
+               "libGL.so.1": "libgl1", "libOpenGL.so.0": "libopengl0", "libEGL.so.1": "libegl1", "libX11.so.6": "libx11-6",
+               "libxcb.so.1": "libxcb1", "libXext.so.6": "libxext6", "libXrender.so.1": "libxrender1", "libSM.so.6": "libsm6",
+               "libICE.so.6": "libice6", "libglib-2.0.so.0": "libglib2.0-0t64", "libgthread-2.0.so.0": "libglib2.0-0t64",
+               "libfontconfig.so.1": "libfontconfig1", "libfreetype.so.6": "libfreetype6", "libcom_err.so.2": "libcom-err2",
+               "libgpg-error.so.0": "libgpg-error0", "libp11-kit.so.0": "libp11-kit0", "libsndfile.so.1": "libsndfile1"}
+MISSING_LIB = re.compile(r"(lib[\w.+-]+\.so[.\d]*): cannot open shared object file")
+
+
+def explain(error: str) -> str:
+    """An import error, with the package to install when it is a missing system library."""
+    m = MISSING_LIB.search(error or "")
+    if not m:
+        return error
+    pkg = SYSTEM_LIBS.get(m.group(1))
+    return f"{m.group(1)} is missing on the host" + (f" — install {pkg}" if pkg else " — install the package that provides it")
 
 
 def read_env(path: str) -> dict:
@@ -252,7 +268,7 @@ class Check:
             if code == 0 and mark:
                 self.add(OK, f"venv {name}", f"Python {mark.group(1).strip()} runs here")
                 continue
-            lib = re.search(r"(lib[\w.+-]+\.so[.\d]*): cannot open shared object file", out)
+            lib = MISSING_LIB.search(out)
             if lib:
                 pkg = SYSTEM_LIBS.get(lib.group(1))
                 self.add(FAIL, f"venv {name}", f"a system library is missing on this host: {lib.group(1)}"

@@ -89,13 +89,17 @@ def test_extension_reads_comfyuis_own_import_verdict(monkeypatch):
         root.setLevel(logging.INFO)
         logging.info("\nImport times for custom nodes:")
         logging.info("   0.0 seconds: /x/custom_nodes/websocket_image_save.py")
+        logging.warning("Cannot import /x/custom_nodes/BrokenNode module for custom nodes: libGL.so.1: cannot open "
+                        "shared object file: No such file or directory")
         logging.info("   1.3 seconds (IMPORT FAILED): /x/custom_nodes/BrokenNode")
         logging.info("   0.2 seconds: /x/custom_nodes/GoodNode/")
         logging.warning("IMPORT FAILED: comfy_extras/nodes_broken_builtin.py")
         logging.info("Skipping Hidden due to disable_all_custom_nodes and whitelist_custom_nodes")   # not a verdict
         root.setLevel(level)
         assert ext.custom_node_status() == {"loaded": ["GoodNode", "websocket_image_save.py"],
-                                            "failed": ["BrokenNode", "nodes_broken_builtin.py"]}
+                                            "failed": ["BrokenNode", "nodes_broken_builtin.py"],
+                                            "errors": {"BrokenNode": "libGL.so.1: cannot open shared object file: "
+                                                                     "No such file or directory"}}
     finally:
         logging.getLogger().removeHandler(ext._watch)
 

@@ -17,7 +17,7 @@ from aiohttp import web
 
 from .allow import from_env, make_middleware
 
-EXT_VERSION = "0.5"
+EXT_VERSION = "0.6"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")
@@ -120,17 +120,23 @@ def _install_validate():
 # summary is logged. Built-in extra nodes that fail are logged as "IMPORT FAILED: <path>" and counted too.
 IMPORT_LINE = re.compile(r"^\s*[\d.]+ seconds( \(IMPORT FAILED\))?: (.+)$")
 IMPORT_FAILED = re.compile(r"^IMPORT FAILED: (.+)$")
+# why, logged by ComfyUI before the summary: "Cannot import <path> module for custom nodes: <exception>"
+IMPORT_WHY = re.compile(r"^Cannot import (.+?) module for custom nodes: (.*)$", re.S)
 
 
 class _ImportWatch(logging.Handler):
     def __init__(self):
         super().__init__(logging.INFO)
-        self.loaded, self.failed = [], []
+        self.loaded, self.failed, self.why = [], [], {}
 
     def emit(self, record):
         try:
             msg = record.getMessage()
         except Exception:                                   # a record we cannot read is not our business
+            return
+        m = IMPORT_WHY.match(msg)
+        if m:
+            self.why[os.path.basename(m.group(1).strip().rstrip("/"))] = m.group(2).strip().splitlines()[0][:300] if m.group(2).strip() else ""
             return
         m = IMPORT_LINE.match(msg)
         if m:
@@ -150,7 +156,9 @@ def custom_node_status() -> dict | None:
     ends, or when the log level is above INFO (then the extension cannot know, and says so rather than guessing)."""
     if not _watch.loaded and not _watch.failed:
         return None
-    return {"loaded": sorted(set(_watch.loaded)), "failed": sorted(set(_watch.failed))}
+    failed = sorted(set(_watch.failed))
+    return {"loaded": sorted(set(_watch.loaded)), "failed": failed,
+            "errors": {n: _watch.why[n] for n in failed if _watch.why.get(n)}}
 
 
 def _install_allow():

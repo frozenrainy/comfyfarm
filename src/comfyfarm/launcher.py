@@ -420,6 +420,22 @@ def fetch(router: str, instance: str, local: str) -> dict:
     return render
 
 
+def runtime_env(python: str, env: dict) -> dict:
+    """What every ComfyUI the launcher starts gets, whatever the render says:
+    - the NVIDIA libraries a CUDA venv carries (site-packages/nvidia/*/lib) on LD_LIBRARY_PATH: torch finds them by
+      itself, onnxruntime-gpu only by name — without them its CUDA provider fails and every ONNX node runs on the CPU,
+      silently. They are the published venv's own files (a render can never set LD_* itself);
+    - no package installs at run time: published venvs are read-only, and a node pack that pip-installs while ComfyUI
+      imports it would otherwise wait for a network a closed farm does not have."""
+    import glob
+    venv = os.path.dirname(os.path.dirname(python))
+    libs = sorted(glob.glob(os.path.join(venv, "lib", "python3*", "site-packages", "nvidia", "*", "lib")))
+    out = {"PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1"}
+    if libs:
+        out["LD_LIBRARY_PATH"] = ":".join(libs + [p for p in env.get("LD_LIBRARY_PATH", "").split(":") if p])
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     env = os.environ
@@ -457,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     child_env = {k: v for k, v in env.items() if not k.startswith("COMFY_LAUNCH_")}
     child_env.update(render.get("env", {}))
+    child_env.update(runtime_env(render["argv"][0], child_env))
     os.chdir(render["cwd"])
     os.execve(render["argv"][0], render["argv"], child_env)     # PID kept for the service manager
     return 1                                                    # not reached

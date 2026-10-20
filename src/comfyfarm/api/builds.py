@@ -72,8 +72,8 @@ def check_pack(p: dict) -> dict:
         raise HTTPException(400, "repo: an https:// git URL")
     if not COMMIT.match(p["commit"]):
         raise HTTPException(400, "commit: the full 40-character commit (a pack is pinned)")
-    if p.get("requirements_file") and not publish.REQ_FILE.match(p["requirements_file"]):
-        raise HTTPException(400, "requirements_file: a .txt file inside the pack")
+    if p.get("requirements_file") and not all(publish.REQ_FILE.match(f.strip()) for f in p["requirements_file"].split(",")):
+        raise HTTPException(400, "requirements_file: .txt files inside the pack, comma-separated")
     for x in p.get("constraints") or []:
         if "\n" in x or not publish.SPEC.match(x.strip()):
             raise HTTPException(400, f"constraints: version specifiers like 'kornia<0.8', not {x!r}")

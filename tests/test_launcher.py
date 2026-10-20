@@ -183,6 +183,7 @@ def test_launcher_run(tmp_path, monkeypatch, capsys):
         launcher.main([])
         path, argv, env = execs[-1]
         assert argv == good["argv"] and env["PYTORCH_TUNABLEOP_ENABLED"] == "1"
+        assert env["PIP_NO_INDEX"] == "1"                                            # no installs at run time
         assert not any(k.startswith("COMFY_LAUNCH_") for k in env)
         core_copy = os.path.join(p["local"], "core", profile["core"], "main.py")
         assert open(core_copy).read() == "print('comfy')\n"                       # synced
@@ -355,3 +356,20 @@ def test_env_token_edges():
     assert launcher.env_problem("CUDA_VISIBLE_DEVICES", "") is None
     assert launcher.env_problem("MIOPEN_FIND_MODE", "빠름")
     assert launcher.env_problem("MIOPEN_FIND_MODE", "LAZY,.x")
+
+
+
+def test_comfyui_gets_the_venvs_nvidia_libraries_and_no_runtime_installs(tmp_path):
+    """Field (CUDA, onnxruntime-gpu 1.31): without the venv's nvidia/*/lib on LD_LIBRARY_PATH its CUDA provider fails
+    and every ONNX node runs on the CPU, silently — cuDNN's directory alone was not enough. And a node pack that
+    pip-installs while ComfyUI imports it must fail at once, not wait for a network."""
+    from comfyfarm import launcher
+    venv = tmp_path / "art" / "venv" / "cu130-1"
+    for lib in ("cudnn", "cublas", "cuda_runtime"):
+        (venv / "lib" / "python3.12" / "site-packages" / "nvidia" / lib / "lib").mkdir(parents=True)
+    env = launcher.runtime_env(str(venv / "bin" / "python"), {"LD_LIBRARY_PATH": "/opt/x"})
+    paths = env["LD_LIBRARY_PATH"].split(":")
+    assert [p.split("/nvidia/")[1] for p in paths[:3]] == ["cublas/lib", "cuda_runtime/lib", "cudnn/lib"] and paths[3] == "/opt/x"
+    assert env["PIP_NO_INDEX"] == "1"
+    cpu = launcher.runtime_env(str(tmp_path / "art" / "venv" / "cpu-1" / "bin" / "python"), {})
+    assert "LD_LIBRARY_PATH" not in cpu and cpu["PIP_NO_INDEX"] == "1"

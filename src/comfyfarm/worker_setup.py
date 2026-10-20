@@ -357,6 +357,34 @@ def tools(h: Host, files: dict, version: str):
     h.write(f"{TOOLS}/VERSION", version + "\n", 0o644)
 
 
+def router_allow(h: Host, router_url: str) -> list[str]:
+    """Who may talk to this worker by default (the worker extension's COMFYFARM_ALLOW_NETWORK, added to a profile's
+    COMFYFARM_ALLOW): the router's address as this host reaches it — the gateway, on the same control-plane host, comes
+    from there too. With the router on this very host its containers come from Docker's bridge networks instead: those
+    are added. Without it every worker started "unsecured" until someone filled the profile's allow-list."""
+    import ipaddress
+    host = re.sub(r"^https?://\[?([^\]/:]+)\]?.*$", r"\1", router_url)
+    try:
+        addrs = sorted({info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)})
+    except OSError:
+        return []
+    code, out = h.run(["ip", "-j", "addr"], check=False)
+    try:
+        links = json.loads(out) if code == 0 and out.strip().startswith("[") else []
+    except ValueError:
+        links = []
+    local = {a.get("local") for link in links for a in link.get("addr_info", [])}
+    allow = list(addrs)
+    if any(a in local or ipaddress.ip_address(a).is_loopback for a in addrs):
+        for link in links:
+            name = link.get("ifname", "")
+            if name == "docker0" or name.startswith("br-"):
+                for a in link.get("addr_info", []):
+                    if a.get("family") == "inet":
+                        allow.append(str(ipaddress.ip_network(f"{a['local']}/{a['prefixlen']}", strict=False)))
+    return allow
+
+
 def configure(h: Host, spec: dict, home: str):
     own = f"{home}/.config/systemd/user/comfyfarm@.service"
     if os.path.exists(h.p(own)):
@@ -373,7 +401,8 @@ def configure(h: Host, spec: dict, home: str):
         f"COMFY_LAUNCH_INSTANCE={inst}",
         f"COMFY_LAUNCH_ARTIFACTS={spec['art']}",
         f"COMFY_LAUNCH_LOCAL={spec['local']}",
-        f"COMFY_LAUNCH_PREFIXES={','.join(prefixes)}", ""]))
+        f"COMFY_LAUNCH_PREFIXES={','.join(prefixes)}"]
+        + ([f"COMFYFARM_ALLOW_NETWORK={','.join(allow)}"] if (allow := router_allow(h, spec["router_url"])) else []) + [""]))
     h.write(f"{ETC}/{inst}.check.json", json.dumps({
         "gpu": spec.get("gpu", "any"), "paths": paths, "port": spec.get("port", 8188),
         "listen": spec.get("listen", "0.0.0.0"), "account": user, "uid": spec.get("uid")}, indent=1) + "\n")

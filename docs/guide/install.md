@@ -266,9 +266,9 @@ owns the artifact store, never as the service account. It needs internet and git
 checksum, into `/opt/comfyfarm/worker/bin`), and an artifact
 store that is empty or already that account's ([design 14](../design/14-worker-setup.md)).
 
-Worker access control: put `COMFYFARM_ALLOW=<control-plane address>` in the profile's environment (with containers
-the control plane talks to other hosts from the host's address). Without it the dashboard shows the worker as
-**unsecured**. On AMD with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every
+Worker access control: setup allows the router's address as the host reaches it (and, with the router on that very
+host, Docker's bridge networks) — `COMFYFARM_ALLOW_NETWORK` in `/etc/comfyfarm/<instance>.env`. A profile's
+`COMFYFARM_ALLOW` adds to it. A worker that allows nobody shows as **unsecured** in the dashboard. On AMD with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every
 worker burns one CPU core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)). The host
 check shows each venv's PyTorch version (also in `<ART>/venv/<name>/freeze.txt`).
 

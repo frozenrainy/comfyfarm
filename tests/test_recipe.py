@@ -365,3 +365,16 @@ def test_the_platform_reaches_the_install_only_with_uv(setup):
     with pytest.raises(publish.Refused, match="platform"):
         publish.publish_recipe(str(setup["art"]), "test-gpu", uv=None, recipes=setup["recipes"], ext=ROOT,
                                log=lambda x: None, platform="x86; rm")
+
+
+
+def test_a_pack_may_name_several_requirements_files(setup):
+    """Field (CUDA, 42 packs): a pack that keeps a requirements file per node (AlekPet) pip-installed them while
+    ComfyUI imported it; named here, they are in the venv instead."""
+    p = node_repo(setup, "PerNode", {"__init__.py": "", "A/requirements.txt": "lib-a\n", "B/requirements.txt": "lib-b\n"})
+    write(setup, nodes=[{**p, "requirements_file": "A/requirements.txt, B/requirements.txt"}])
+    run(setup)
+    assert setup["built"][0][1][2] == "lib-a\nlib-b\n"
+    write(setup, nodes=[{**p, "requirements_file": "A/requirements.txt,../x.txt"}])
+    with pytest.raises(publish.Refused, match="requirements_file"):
+        run(setup)

@@ -358,7 +358,9 @@ class FakeWorker:
 
     async def info(self, request):
         return web.json_response({"extension": "0.3-fake", "comfyui": self.version, "ws_fix": self.ws_fix,
-                                  "custom_nodes": {"loaded": ["comfyfarm_worker"], "failed": self.failed_nodes},
+                                  "custom_nodes": {"loaded": ["comfyfarm_worker"], "failed": self.failed_nodes,
+                                                   "errors": {n: "libGL.so.1: cannot open shared object file: No such file or "
+                                                              "directory" for n in self.failed_nodes}},
                                   "secured": self.secured, "allow": ["10.0.0.1/32"] if self.secured else [], "invalid": []})
 
     async def get_system_stats(self, request):

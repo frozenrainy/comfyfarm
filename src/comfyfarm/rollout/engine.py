@@ -464,8 +464,12 @@ class Engine:
                 info = r.json() if r.status_code == 200 else {}
             except ValueError:
                 raise StepFailed("the worker extension's info is not JSON")
-            if failed := ((info if isinstance(info, dict) else {}).get("custom_nodes") or {}).get("failed"):
-                raise StepFailed(f"custom nodes failed to import: {', '.join(failed)}")
+            nodes = (info if isinstance(info, dict) else {}).get("custom_nodes") or {}
+            if failed := nodes.get("failed"):
+                from ..hostcheck import explain
+                why = nodes.get("errors") or {}
+                raise StepFailed("custom nodes failed to import: " + "; ".join(
+                    f"{n} ({explain(why[n])})" if why.get(n) else n for n in failed))
         except httpx.HTTPError as e:
             raise StepFailed(f"verify: {type(e).__name__}")
         if opts["smoke"]:

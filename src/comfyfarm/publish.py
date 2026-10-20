@@ -372,8 +372,8 @@ def check_recipe(r: dict) -> dict:
                           "a recipe is pinned)")
         if not all(isinstance(x, str) and "\n" not in x and not x.startswith("-") for x in n.get("requirements", [])):
             raise Refused(f"{who}: node {n['name']} requirements must be requirement lines, not options")
-        if "requirements_file" in n and not REQ_FILE.match(str(n["requirements_file"])):
-            raise Refused(f"{who}: node {n['name']} requirements_file must be a .txt file inside the pack")
+        if "requirements_file" in n and not all(REQ_FILE.match(f.strip()) for f in str(n["requirements_file"]).split(",")):
+            raise Refused(f"{who}: node {n['name']} requirements_file must be .txt files inside the pack (comma-separated)")
         if not isinstance(n.get("ui", True), bool):
             raise Refused(f"{who}: node {n['name']} ui must be true or false")
     names = [n["name"] for n in r.get("nodes", [])]
@@ -445,16 +445,19 @@ def node_requirements(n: dict, tree: str) -> tuple[list[str], list[str]]:
     name = n["name"]
     if "requirements" in n:
         raw, origin = list(n["requirements"]), "recipe"
-    else:
-        f = n.get("requirements_file") or "requirements.txt"
-        path = os.path.join(tree, f)
-        if os.path.isfile(path) and os.path.realpath(path).startswith(os.path.realpath(tree) + os.sep):
+    elif n.get("requirements_file"):                      # one or more of the pack's files (some keep them per node)
+        raw, origin = [], n["requirements_file"]
+        for f in (x.strip() for x in n["requirements_file"].split(",") if x.strip()):
+            path = os.path.join(tree, f)
+            if not (os.path.isfile(path) and os.path.realpath(path).startswith(os.path.realpath(tree) + os.sep)):
+                raise Refused(f"node {name}: no {f} in the pack")
             with open(path, encoding="utf-8", errors="replace") as fh:
-                raw, origin = fh.read().splitlines(), f
-        elif n.get("requirements_file"):
-            raise Refused(f"node {name}: no {f} in the pack")
-        else:
-            raw, origin = pyproject_dependencies(tree), "pyproject.toml"
+                raw += fh.read().splitlines()
+    elif os.path.isfile(os.path.join(tree, "requirements.txt")):
+        with open(os.path.join(tree, "requirements.txt"), encoding="utf-8", errors="replace") as fh:
+            raw, origin = fh.read().splitlines(), "requirements.txt"
+    else:
+        raw, origin = pyproject_dependencies(tree), "pyproject.toml"
     lines, notes = [], []
     for line in raw:
         line = re.sub(r"(^|\s)#.*$", "", line).strip()

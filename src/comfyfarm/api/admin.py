@@ -92,7 +92,9 @@ def security_warnings(caps: dict) -> list[str]:
     if not ext.get("ws_fix"):
         out.append("reconnect fix not active on this ComfyUI version: events may stop after a reconnect")
     if failed := (ext.get("custom_nodes") or {}).get("failed"):
-        out.append(CUSTOM_NODES_FAILED + ", ".join(failed))
+        from ..hostcheck import explain
+        why = (ext.get("custom_nodes") or {}).get("errors") or {}
+        out.append(CUSTOM_NODES_FAILED + ", ".join(f"{n} ({explain(why[n])})" if why.get(n) else n for n in failed))
     return out
 
 

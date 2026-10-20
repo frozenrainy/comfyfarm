@@ -46,7 +46,9 @@ A build running when the builder stops is marked failed on its next start.
 ## Node packs: what a build does with one
 
 From an analysis of 42 widely used node packs (offline CPU import, ComfyUI 0.41.0): as their authors publish them 37
-import; with the rules below 40; the other two need a GPU to import.
+import; with the rules below 40; the other two need a GPU to import. Built the same way for CUDA and loaded on an
+RTX 3080 Ti: 41 — both GPU-only packs among them; the one left lacked system libraries (libGL and eight more for
+pymeshlab), which the rollout now names with their packages.
 
 - Requirements come from the pack (`requirements.txt`, else `pyproject.toml`; `requirements_file` picks another).
   Never from a pack: options (an index URL, `-r`, `-e`), local paths, torch/torchvision/torchaudio.
@@ -87,6 +89,14 @@ start the worker. The dashboard's Rollout page shows the state.
 yet — the UI worker's definitions stand in: they are the same node packs on the CPU. They are stored as the group's
 snapshot with source `ui:<worker>` and replaced as soon as a GPU worker of the group answers; a real snapshot is never
 replaced by them; a rollout to the UI worker refreshes them.
+
+## What the launcher adds (0.1.0-dev.10)
+
+Found on an NVIDIA host (RTX 3080 Ti, 42 packs): onnxruntime-gpu loads cuDNN and the CUDA libraries by name only.
+Without the venv's `site-packages/nvidia/*/lib` on `LD_LIBRARY_PATH` its CUDA provider fails and it falls back to the
+CPU without an error — every ONNX node runs slowly, silently (cuDNN's directory alone is not enough). The launcher now
+puts those directories, the published venv's own, on `LD_LIBRARY_PATH` for ComfyUI; a render still cannot set any
+`LD_*` itself. It also starts ComfyUI with `PIP_NO_INDEX=1`: a pack that installs at import time fails at once.
 
 ## Also in this round
 
