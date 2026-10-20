@@ -12,6 +12,7 @@ check as the account — then it reports the result and this host's ssh host key
 from __future__ import annotations
 
 import base64
+import glob
 import grp
 import json
 import os
@@ -400,8 +401,11 @@ def builds(h: Host, spec: dict, files: dict):
         raise Failed("this router sent no build tools — upgrade the router, or set the host up without builds")
     uv = next((u for u in ("/usr/local/bin/uv", "/usr/bin/uv") if os.path.exists(h.p(u))), None)
     if not uv:
-        raise Failed("builds need uv where every account finds it: curl -LsSf https://astral.sh/uv/install.sh | "
-                     "sudo env UV_INSTALL_DIR=/usr/local/bin sh   (then run setup again)")
+        have = sorted(glob.glob(h.p("/home/*/.local/bin/uv")) + glob.glob(h.p("/root/.local/bin/uv")))
+        copy = (f"\n    sudo install -m 755 {have[0][len(h.root):]} /usr/local/bin/uv" if have else "")
+        raise Failed("builds need uv in /usr/local/bin or /usr/bin (every account finds it there). Run one of these on "
+                     "this host, each on one line, then run setup again:" + copy +
+                     "\n    curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh")
     if not os.path.exists(h.p("/usr/bin/git")):
         raise Failed("builds need git (apt install git)")
     for rel, b64 in sorted(files.items()):

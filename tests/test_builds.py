@@ -146,6 +146,12 @@ def test_setup_with_builds_installs_the_builder_and_without_removes_its_units(tm
 def test_setup_with_builds_refuses_what_it_should(tmp_path):
     res = ws.setup(build_payload(), ws.Host(root=str(fake_root(tmp_path / "a")), run=Recorder()))   # no uv
     assert not res["ok"] and "uv" in res["error"]
+    assert "\n    curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh" in res["error"]
+    root = fake_root(tmp_path / "a2")                    # uv in someone's ~/.local/bin: copying it is offered first
+    (root / "home" / "op" / ".local" / "bin").mkdir(parents=True)
+    (root / "home" / "op" / ".local" / "bin" / "uv").write_text("")
+    res = ws.setup(build_payload(), ws.Host(root=str(root), run=Recorder()))
+    assert "\n    sudo install -m 755 /home/op/.local/bin/uv /usr/local/bin/uv\n" in res["error"]
     p = build_payload()
     p["build_files"]["../../etc/cron.d/x"] = base64.b64encode(b"* * * * * root sh").decode()
     res = ws.setup(p, ws.Host(root=str(builder_root(tmp_path / "b")), run=Recorder()))
