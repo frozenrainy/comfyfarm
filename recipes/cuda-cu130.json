@@ -1,0 +1,19 @@
+{
+ "recipe": "cuda-cu130",
+ "about": "NVIDIA (Turing to Blackwell: RTX 20xx–50xx, A/L/H/B series) with CUDA 13.0 PyTorch, driver 580 or newer — and the UI worker (CPU)",
+ "comfyui": {"repo": "https://github.com/comfyanonymous/ComfyUI.git", "ref": "v0.41.0"},
+ "python": "3.12",
+ "gpu": {
+  "venv": "cu130", "accelerator": "cuda",
+  "index": "https://download.pytorch.org/whl/cu130",
+  "env": {},
+  "flags": []
+ },
+ "ui": {
+  "venv": "cpu", "accelerator": "cpu",
+  "index": "https://download.pytorch.org/whl/cpu",
+  "env": {},
+  "flags": ["--cpu"]
+ },
+ "nodes": []
+}

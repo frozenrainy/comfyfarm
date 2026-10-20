@@ -85,15 +85,27 @@ export function rollout(root, { refresh }) {
     act(() => api("PUT", `/api/admin/instances/${i.worker_id}`, { instance: v.instance.trim(), hosts: words(v.hosts), listen: v.listen.trim(),
       port: v.port, platform: v.platform, role: v.role, paths, restart_backend: v.restart_backend, restart_config: cfg }), t("Instance saved"), refresh);
   }
+  // A worker that is not running (added before any profile existed, or stopped) is started here; a running one changes
+  // through a rollout, which drains it first.
+  const startable = (i) => i.instance && i.state !== "online" && i.enabled && i.instance.restart_backend !== "manual";
   async function assign(i) {
+    const down = startable(i);
     const v = await formDialog(t("Assign a profile to {worker}", i), [
-      { name: "profile", label: t("Profile"), type: "select", value: String(i.instance.profile_id ?? ""),
+      { name: "profile", label: t("Profile"), type: "select", value: String(i.instance.profile_id ?? profiles[0]?.id ?? ""),
         options: profiles.map((p) => ({ value: String(p.id), label: p.name })),
-        hint: t("Without a restart: the badge shows 'differs' until the worker restarts. To change a running worker, start a rollout.") }],
-      t("Assign"));
+        hint: down ? t("The worker is not running: it starts with this profile.")
+                   : t("Without a restart: the badge shows 'differs' until the worker restarts. To change a running worker, start a rollout.") },
+      ...(down ? [{ name: "start", type: "checkbox", value: true, text: t("Start it now") }] : [])],
+      down ? t("Assign and start") : t("Assign"));
     if (!v) return;
-    const res = await act(() => api("POST", `/api/admin/instances/${i.worker_id}/assign`, { profile_id: Number(v.profile) }), t(t("Assigned")), refresh);
+    const res = await act(() => api("POST", `/api/admin/instances/${i.worker_id}/assign`, { profile_id: Number(v.profile) }),
+                          v.start ? null : t("Assigned"), v.start ? null : refresh);
     if (res?.warnings?.length) alert(res.warnings.join("\n"));
+    if (res && v.start) await start(i);
+  }
+  async function start(i) {
+    await act(() => api("POST", `/api/admin/instances/${i.worker_id}/start`),
+              t("Starting {worker} — its badge turns to match when it is up", i), refresh);
   }
   async function showRender(i) {
     const r = await act(() => api("GET", `/api/admin/instances/${i.worker_id}/render`));
@@ -105,10 +117,12 @@ export function rollout(root, { refresh }) {
     const tr = namedRow(instCols, { actions: "actions" });
     tr.cfg = button(t("Configure"), () => configure(tr._item));
     tr.asg = button(t("Assign"), () => assign(tr._item));
+    tr.go = button(t("Start"), () => start(tr._item), { cls: "primary",
+                   title: t("The worker is not running: start it with its assigned profile") });
     tr.ren = button(t("Render"), () => showRender(tr._item));
     tr.chk = button(t("Check host"), () => checkHost(tr._item.worker_id, tr._item.worker),
                     { title: t("Read-only check of the host through its agent: driver, groups, directories, venvs, clock, router") });
-    tr.c.actions.append(tr.cfg, tr.asg, tr.ren, tr.chk);
+    tr.c.actions.append(tr.go, tr.cfg, tr.asg, tr.ren, tr.chk);
     return tr;
   }
   function updateInst(tr, i) {
@@ -121,6 +135,7 @@ export function rollout(root, { refresh }) {
     setText(tr.c.running, [i.comfyui ? `ComfyUI ${i.comfyui}` : null, i.backend].filter(Boolean).join(" · "));
     setText(tr.c.via, i.instance ? i.instance.restart_backend : "");
     tr.asg.hidden = tr.ren.hidden = !i.instance;
+    tr.go.hidden = !(startable(i) && i.instance.profile_id);
     tr.chk.hidden = !i.instance || !["ssh", "http-agent"].includes(i.instance.restart_backend);
   }
 

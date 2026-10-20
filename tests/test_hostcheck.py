@@ -201,3 +201,62 @@ def test_recipe_templates_in_the_store_are_reported_with_the_way_to_make_them(tm
     assert line["level"] == "OK" and line["templates"][0] == {**t, "missing": []}     # the broken file is skipped, not fatal
     assert line["templates"][1]["missing"] == ["venv/rocm72-9"] and "rocm-gfx1201-2" not in line["detail"]
     assert levels(out)["artifact store"] == "OK"                             # templates are not counted as artifacts
+
+
+def test_a_gpu_venv_must_reach_the_gpu_not_only_import_torch(tmp_path, router):
+    """A CUDA wheel newer than the driver imports fine and then finds no GPU: every job would run on nothing."""
+    root, paths, art, local = host(tmp_path)
+    v = os.path.join(art, "venv", "rocm-x")
+    os.makedirs(os.path.join(v, "bin")); open(os.path.join(v, "READY"), "w").close()
+    with open(os.path.join(v, "manifest.json"), "w") as f:
+        json.dump({"accelerator": "rocm"}, f)
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    seen = []
+
+    def run(answer):
+        def cmd(argv, timeout=20):
+            if argv[0].startswith(v):
+                seen.append(argv[3:])
+                return answer
+            return fake_cmd()(argv, timeout)
+        out = hostcheck.Check(env, {"gpu": "amd", "paths": paths}, root=root, cmd=cmd, user="comfyfarm").run()
+        return next(x for x in out if x["name"] == "venv rocm-x")
+    r = run((0, "comfyfarm-venv: 3.12.15 · torch 2.14.1+rocm7.2 · 1 GPU(s): AMD Radeon AI PRO R9700"))
+    assert r["level"] == "OK" and "R9700" in r["detail"] and seen[-1] == ["gpu"]
+    r = run((0, "comfyfarm-gpu-error: No HIP GPUs are available (torch built for HIP 7.2)\ncomfyfarm-venv: 3.12.15 · torch 2.14.1"))
+    assert r["level"] == "FAIL" and "No HIP GPUs" in r["detail"] and "NVIDIA" not in r["detail"]
+    # no GPU of that kind here (a UI host checking with gpu any): only the import is checked
+    seen.clear()
+    out = hostcheck.Check(env, {"gpu": "any", "paths": paths}, root=host(tmp_path / "b", kfd=False)[0],
+                          cmd=lambda a, timeout=20: (seen.append(a[3:]), (0, "comfyfarm-venv: 3.12.15"))[1]
+                          if a[0].startswith(v) else fake_cmd()(a, timeout), user="comfyfarm").run()
+    assert seen == [[]]
+
+
+def test_the_gpu_probe_reports_an_old_driver_for_real(tmp_path):
+    """The probe itself, run by a Python without a GPU runtime: the probe's own syntax and the error path."""
+    import subprocess, sys
+    fake = tmp_path / "torch"
+    fake.mkdir()
+    (fake / "__init__.py").write_text(
+        "__version__ = '2.14.1+cu130'\n"
+        "class version: cuda = '13.0'; hip = None\n"
+        "class cuda:\n"
+        " @staticmethod\n"
+        " def init(): raise RuntimeError('The NVIDIA driver on your system is too old (found version 12020).\\nmore')\n")
+    captured = {}
+
+    def cmd(argv, timeout=20):
+        if argv[1:2] == ["-c"]:
+            captured["probe"] = argv[2]
+        return fake_cmd()(argv, timeout)
+    root, paths, art, local = host(tmp_path / "h")
+    v = os.path.join(art, "venv", "cu-x"); os.makedirs(os.path.join(v, "bin")); open(os.path.join(v, "READY"), "w").close()
+    env = {"COMFY_LAUNCH_ROUTER": "http://127.0.0.1:9", "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    hostcheck.Check(env, {"gpu": "any", "paths": paths}, root=root, cmd=cmd, user="comfyfarm").run()
+    p = subprocess.run([sys.executable, "-c", captured["probe"], "gpu"], capture_output=True, text=True,
+                       env={"PYTHONPATH": str(tmp_path)})
+    assert p.returncode == 0, p.stderr
+    assert "comfyfarm-gpu-error: The NVIDIA driver on your system is too old (found version 12020). (torch built for CUDA 13.0)" in p.stdout
+    p = subprocess.run([sys.executable, "-c", captured["probe"]], capture_output=True, text=True, env={"PYTHONPATH": str(tmp_path)})
+    assert "gpu-error" not in p.stdout and "torch 2.14.1+cu130" in p.stdout

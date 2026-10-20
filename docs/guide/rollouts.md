@@ -32,6 +32,36 @@ while the store has no template, and after a recipe update. A template whose art
 and not offered. A recipe of your own: copy one in `recipes/` — the ComfyUI `ref` is a release
 tag, every node a full commit.
 
+**Custom nodes in a recipe** — one entry per node pack in `nodes`:
+
+```json
+{"name": "ComfyUI-VideoHelperSuite", "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+ "commit": "<40 hex>"}
+```
+
+What the build does with it, so that the pack works without anyone installing anything on a worker:
+
+- **Requirements come from the pack**: its `requirements.txt`, else the dependencies in its `pyproject.toml`.
+  `"requirements_file": "requirements-lite.txt"` picks another file of the pack; `"requirements": [...]` in the entry
+  replaces the pack's own list. Never taken from a pack: options (an index URL, `-r`, `-e`), local paths, and torch,
+  torchvision or torchaudio — the venv keeps the torch of its accelerator. The build log says what it left out.
+- **One venv, resolved at once**: ComfyUI's requirements, torchaudio (packs import it without listing it) and every
+  pack's requirements go into one install, so one pack cannot quietly change what another needed.
+- **One OpenCV, one onnxruntime**: packs ask for different OpenCV packages (directly and through their own
+  dependencies), and they all install into the same `cv2` — the last one wins. The venv keeps
+  `opencv-contrib-python-headless` (every module, none of the desktop libraries a server lacks) and `onnxruntime-gpu`
+  on CUDA, `onnxruntime` elsewhere.
+- **Git submodules** come along at the commits the pack pins. A pack without them may try to download them when
+  ComfyUI imports it, which fails on a farm without internet.
+- **Constraints**: `"constraints": ["kornia<0.8"]` in an entry (or for the whole recipe) holds a dependency back where
+  a pack breaks on a newer one but does not say so — ComfyUI-LTXVideo needs a kornia before 0.8.
+- **The UI worker** gets every pack (their web code, their routes, their node definitions) except those marked
+  `"ui": false`: packs that import only with a GPU (the UI worker runs on the CPU). A rollout to the UI worker names a
+  pack that fails to import there.
+
+Measured on 42 widely used packs (October 2026, ComfyUI 0.41.0, Python 3.12, CPU venv, no network): with these rules
+40 import; the other two did not import without a GPU and are `"ui": false`.
+
 **By hand** — what the recipe does, step by step (`publish.py` needs `launcher.py` next to it):
 
 ```sh

@@ -339,7 +339,11 @@ export default {
   "the worker was added": "워커를 등록했습니다", "this setup expired — make a new one": "이 설치는 만료되었습니다 — 새로 만드세요",
   "Error: ": "오류: ", "Add the worker": "워커 등록",
   "Worker added and starting — watch its badge in System → Rollout": "워커를 등록하고 시작하는 중 — 시스템 → 롤아웃에서 배지를 확인하세요",
-  "Worker added — assign a profile in System → Rollout": "워커를 등록했습니다 — 시스템 → 롤아웃에서 프로필을 할당하세요",
+  "Worker added — assign a profile and start it in System → Rollout": "워커를 등록했습니다 — 시스템 → 롤아웃에서 프로필을 할당하고 시작하세요",
+  "The worker is not running: it starts with this profile.": "워커가 실행 중이 아닙니다. 이 프로필로 시작합니다.",
+  "Start it now": "지금 시작", "Assign and start": "할당하고 시작",
+  "Starting {worker} — its badge turns to match when it is up": "{worker} 시작 중 — 올라오면 배지가 일치로 바뀝니다",
+  "The worker is not running: start it with its assigned profile": "워커가 실행 중이 아닙니다. 할당된 프로필로 시작합니다",
   "Check host": "호스트 점검", "Host check: {name}": "호스트 점검: {name}",
   "Read-only check of the host through its agent: driver, groups, directories, venvs, clock, router":
     "에이전트를 통한 읽기 전용 점검: 드라이버, 그룹, 디렉터리, venv, 시계, 라우터",

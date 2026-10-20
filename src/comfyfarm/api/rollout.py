@@ -370,6 +370,9 @@ def make_router(ctx: Ctx) -> APIRouter:
                 raise HTTPException(400, "configure the instance and assign a profile first")
             if await in_active_rollout(c, worker_id):
                 raise HTTPException(409, "the worker is part of an active rollout")
+            if await c.fetchval("SELECT state = 'online' FROM workers WHERE id = $1", worker_id):
+                # a restart here would cut its running job: changing a running worker is a rollout (it drains first)
+                raise HTTPException(409, "the worker is running — to change what it runs, start a rollout")
         try:
             backend = be.make(inst["restart_backend"], inst["restart_config"], keys_dir=settings.keys_dir)
         except be.BackendError as e:

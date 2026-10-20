@@ -44,7 +44,7 @@ rollout tasks. The gateway is a second entrypoint of the same package (so a site
 | health | 5 s | concurrent `/queue`-level probe of every worker, busy/dead classification, capability refresh on change |
 | reconcile | 5 s | running jobs vs worker `/api/jobs/{id}` → finish / cancel / lost |
 | worker WS ×N | continuous | receive events, throttle progress, relay to browsers |
-| object_info | on demand | refresh per group snapshot (manual, after rollout, or node-set change) |
+| object_info | on demand | refresh per group snapshot (manual, after rollout, or node-set change); with no GPU worker of the group, the UI worker's stands in until one answers |
 | rollout | on demand | one task per rollout |
 
 Wake-ups: submit and finish notify the dispatcher via Postgres `LISTEN/NOTIFY` so dispatch does not wait for the next

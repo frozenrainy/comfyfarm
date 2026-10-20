@@ -113,6 +113,7 @@ class Check:
                     self.add(OK, "GPU (NVIDIA)", "; ".join(out.splitlines()))
                 else:
                     self.add(FAIL, "GPU (NVIDIA)", f"nvidia-smi failed: {out[:200] or code} — driver not loaded?")
+        self.found = found
         if want in ("amd", "nvidia") and want not in found:
             self.add(FAIL, "GPU", f"setup expects an {want.upper()} GPU and none is usable here (driver installed and loaded?)")
         elif not found and want == "any":
@@ -210,11 +211,21 @@ class Check:
     # ---- venvs ----------------------------------------------------------------------------------------------------
     def venvs(self):
         """Each published venv must not only start but import torch here: the wheels need system libraries the build
-        host had and a fresh host may lack (ROCm torch: libatomic.so.1)."""
+        host had and a fresh host may lack (ROCm torch: libatomic.so.1). A GPU venv on a host with that kind of GPU
+        must also reach it: a driver older than the wheel's CUDA imports fine and then runs every job on nothing."""
         art = self.env.get("COMFY_LAUNCH_ARTIFACTS", "")
         probe = ("import importlib.util, sys; v = '%d.%d.%d' % sys.version_info[:3]\n"
-                 "if importlib.util.find_spec('torch'):\n import torch; v += ' · torch ' + torch.__version__\n"
+                 "if importlib.util.find_spec('torch'):\n"
+                 " import torch; v += ' · torch ' + torch.__version__\n"
+                 " if sys.argv[1:] == ['gpu']:\n"
+                 "  try:\n"
+                 "   torch.cuda.init(); n = torch.cuda.device_count()\n"
+                 "   v += ' · %d GPU(s): %s' % (n, torch.cuda.get_device_name(0))\n"
+                 "  except Exception as e:\n"
+                 "   rt = torch.version.cuda and 'CUDA ' + torch.version.cuda or torch.version.hip and 'HIP ' + torch.version.hip or '?'\n"
+                 "   print('comfyfarm-gpu-error: %s (torch built for %s)' % ((str(e).strip().splitlines() or [type(e).__name__])[0], rt))\n"
                  "print('comfyfarm-venv:', v)")                       # marked: GPU runtimes print noise of their own
+        reach = {"rocm": "amd", "cuda": "nvidia"}
         usable = {"amd": {"rocm", "cpu", None}, "nvidia": {"cuda", "cpu", None}, "none": {"cpu", None}}.get(self.cfg.get("gpu", "any"))
         for ready in sorted(glob.glob(os.path.join(art, "venv", "*", "READY"))) if art else []:
             v = os.path.dirname(ready)
@@ -227,8 +238,14 @@ class Check:
             if usable is not None and accel not in usable:
                 continue                                 # a ROCm venv on a CPU-only UI host, a CUDA venv on an AMD host
             py = os.path.join(v, "bin", "python")
-            code, out = self.cmd([py, "-c", probe], timeout=300)
+            gpu = reach.get(accel) in getattr(self, "found", [])
+            code, out = self.cmd([py, "-c", probe] + (["gpu"] if gpu else []), timeout=300)
             mark = re.search(r"comfyfarm-venv: (.+)", out)
+            if code == 0 and (bad := re.search(r"comfyfarm-gpu-error: (.+)", out)):
+                self.add(FAIL, f"venv {name}", f"torch cannot use this host's GPU: {bad.group(1).strip()[:300]}"
+                         + (" — the NVIDIA driver must be new enough for that CUDA (nvidia-smi shows the highest it "
+                            "supports): update the driver, or use a recipe built for an older CUDA" if accel == "cuda" else ""))
+                continue
             if code == 0 and mark:
                 self.add(OK, f"venv {name}", f"Python {mark.group(1).strip()} runs here")
                 continue

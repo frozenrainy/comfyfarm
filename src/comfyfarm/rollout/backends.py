@@ -75,8 +75,11 @@ class Manual(Backend):
 
 
 async def _run(argv: list[str], timeout: float = 30.0) -> tuple[int, str]:
-    p = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                                             stderr=asyncio.subprocess.STDOUT)
+    try:
+        p = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                                                 stderr=asyncio.subprocess.STDOUT)
+    except OSError as e:                         # no ssh / systemctl on this host: a failed delivery, not a crash
+        return 127, f"cannot run {argv[0]}: {e.strerror or e}"
     try:
         out, _ = await asyncio.wait_for(p.communicate(), timeout)
     except TimeoutError:

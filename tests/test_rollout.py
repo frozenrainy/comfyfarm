@@ -550,3 +550,29 @@ async def test_worker_changes_mid_step_are_refused_and_everything_is_audited(far
     assert any(a["action"] == "maintenance off" and a["target"] == "w2" for a in log)        # the abort put w2 back
     conf = next(a for a in log if a["action"] == "instance configured" and a["target"] == "w2")
     assert conf["detail"]["config"]["restart_config"] == {"timeout": 77}
+
+
+async def test_a_worker_that_is_not_running_can_be_started_a_running_one_cannot(farm):
+    """Field: a worker added before any profile existed was assigned one later — and nothing on the screen started it.
+    Start is for a worker that is not running; a running one changes through a rollout, which drains it first."""
+    api, r, hosts = farm["api"], farm["router"], farm["hosts"]
+    w1 = hosts["w1"].wid
+    res = await api.post(f"/api/admin/instances/{w1}/start", headers=H)
+    assert res.status_code == 409 and "rollout" in res.text
+    await hosts["w1"].stop()
+    async with r.db.conn() as c:
+        await c.execute("UPDATE workers SET state = 'offline' WHERE id = $1", w1)
+    res = await api.post(f"/api/admin/instances/{w1}/start", headers=H)
+    assert res.status_code == 200 and res.json()["started"], res.text
+    audit = (await api.get("/api/admin/audit?limit=5", headers=H)).json()
+    rows = audit if isinstance(audit, list) else audit.get("rows", audit.get("entries", []))
+    assert any(a.get("action") == "instance started" for a in rows), rows
+    w3 = (await api.post("/api/admin/workers", json={"name": "w3", "base_url": "http://127.0.0.1:9"}, headers=H)).json()["id"]
+    assert (await api.post(f"/api/admin/instances/{w3}/start", headers=H)).status_code == 400   # nothing assigned
+
+
+async def test_a_missing_command_is_a_failed_delivery_not_a_crash():
+    """Field (local check): Start on a host without systemctl answered HTTP 500 instead of saying why."""
+    from comfyfarm.rollout import backends as be
+    rc, out = await be._run(["/nonexistent/systemctl", "restart", "x"])
+    assert rc == 127 and "cannot run /nonexistent/systemctl" in out

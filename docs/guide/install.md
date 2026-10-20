@@ -151,7 +151,9 @@ a worker → UI worker* — after publishing what it runs and creating its profi
   gateway and the router reach it from the compose network, not the host's address: allow that subnet too
   (`docker network inspect comfyfarm_default -f '{{(index .IPAM.Config 0).Subnet}}'`).
 
-The gateway finds the UI worker by itself (`UI_WORKER_URL=auto`, the default). As a worker row it is health-checked,
+The gateway finds the UI worker by itself (`UI_WORKER_URL=auto`, the default). Until a GPU worker of a group answers,
+the editor takes its node definitions from the UI worker — it runs the same node packs on the CPU — so workflows open
+and the node packs show before any GPU worker exists (a pack marked `"ui": false` appears once a GPU worker answers). As a worker row it is health-checked,
 host-checked and rolled out with the others, so its ComfyUI and frontend follow the GPU workers' version.
 
 ## 3. GPU workers
@@ -210,6 +212,9 @@ forced command, enables lingering — and runs the **host check**, which the das
 device access, directories, every published venv runs here, clock, the router answers, the port is free. Fix what it
 says and run the same command again (it is idempotent). When it is green, **Add the worker**: the dashboard adds it,
 configures its instance with the ssh restart backend and the pinned host keys, assigns the profile and starts it.
+Added with *assign later* (a new farm has no profile yet)? Once there is one, *System → Rollout*: **Assign** offers
+*Assign and start* for a worker that is not running, and its row has **Start**. A running worker changes what it runs
+through a rollout, which waits for its job first.
 
 Later: *Check host* on the instance (System → Rollout) and `comfyfarm doctor` run the same check through the agent.
 

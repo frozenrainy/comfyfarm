@@ -79,3 +79,50 @@ async def test_object_info_group_header_takes_an_id(dsn):
             assert await nodes("alpha") == [f"Node_{ids['alpha']}"]                    # older extensions
             assert await nodes("999999") == [f"Node_{ids['alpha']}"]                   # unknown: the first group
             assert await nodes("99999999999999999999999") == [f"Node_{ids['alpha']}"]  # beyond bigint: no 500
+
+
+async def test_without_gpu_workers_the_ui_worker_stands_in_for_node_definitions(dsn, fakes):
+    """A new farm: the router and the UI worker are up, no GPU worker yet. The screen must still open workflows and
+    show the node packs — from the UI worker — and the group's own definitions take over once a GPU worker answers."""
+    app = create_app(fast_settings(dsn))
+    async with app.router.lifespan_context(app):
+        r = app.state.router
+        ui = await fakes(nodes_extra=["UiSideNode"])
+        me = {"X-ComfyFarm-User": "tester"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            async with r.db.conn() as conn:
+                await conn.execute("INSERT INTO workers(name, base_url, kind) VALUES ('ui', $1, 'ui')", ui.url)
+            async def online(n):
+                for _ in range(100):
+                    async with r.db.conn() as conn:
+                        if await conn.fetchval("SELECT count(*) FROM workers WHERE state = 'online'") >= n:
+                            return
+                    await asyncio.sleep(0.1)
+                raise AssertionError("workers did not come online")
+            await online(1)
+            oi = (await c.get("/api/object_info", headers=me)).json()          # no group at all yet
+            assert "UiSideNode" in oi and "EmptyImage" in oi
+            async with r.db.conn() as conn:
+                await conn.execute("INSERT INTO worker_groups(name) VALUES ('g1')")
+            assert "UiSideNode" in (await c.get("/api/object_info", headers=me)).json()   # a group, no GPU worker
+            async with r.db.conn() as conn:
+                assert (await conn.fetchval("SELECT source FROM object_info_snapshots")) == "ui:ui"
+            gpu = await fakes(nodes_extra=["GpuOnlyNode"])
+            await add_worker(r, gpu.url, name="gpu-1")
+            await online(2)
+            oi = (await c.get("/api/object_info", headers=me)).json()
+            assert "GpuOnlyNode" in oi and "UiSideNode" not in oi                 # the group's own definitions
+            async with r.db.conn() as conn:
+                assert (await conn.fetchval("SELECT source FROM object_info_snapshots")) == "gpu-1"
+            # its GPU workers away for now: the real snapshot stays, the UI worker does not overwrite it
+            await gpu.stop()
+            async with r.db.conn() as conn:
+                await conn.execute("UPDATE workers SET state = 'offline' WHERE name = 'gpu-1'")
+            gid = await _gid(r)
+            assert await r.refresh_snapshot(gid) is None
+            assert "GpuOnlyNode" in (await c.get("/api/object_info", headers=me)).json()
+
+
+async def _gid(r):
+    async with r.db.conn() as conn:
+        return await conn.fetchval("SELECT id FROM worker_groups WHERE name = 'g1'")

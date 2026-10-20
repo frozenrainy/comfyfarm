@@ -219,6 +219,11 @@ class Engine:
                 groups = [r["group_id"] for r in await c.fetch(
                     "SELECT DISTINCT w.group_id FROM rollout_steps s JOIN workers w ON w.id = s.worker_id "
                     "WHERE s.rollout_id = $1 AND s.status = 'done' AND w.group_id IS NOT NULL", rid)]
+                # the UI worker's node definitions stand in for groups without GPU workers: they changed with it
+                if await c.fetchval("SELECT EXISTS (SELECT 1 FROM rollout_steps s JOIN workers w ON w.id = s.worker_id "
+                                    "WHERE s.rollout_id = $1 AND s.status = 'done' AND w.kind = 'ui')", rid):
+                    groups += [r["group_id"] for r in await c.fetch(
+                        "SELECT group_id FROM object_info_snapshots WHERE source LIKE 'ui:%'") if r["group_id"] not in groups]
         refresh = getattr(self.r, "refresh_snapshot", None)       # set by the API module
         for gid in groups if refresh else []:  # node definitions may have changed: refresh once, after the rollout (D-20)
             try:

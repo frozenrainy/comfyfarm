@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from ..core import jobs as jobsvc
 
 log = logging.getLogger(__name__)
+UI_SOURCE = "ui:"                     # object_info_snapshots.source of a stand-in from the UI worker
 
 STOCK_STATUS = {"pending": "pending", "paused": "pending", "dispatching": "in_progress", "running": "in_progress",
                 "cancelling": "in_progress", "completed": "completed", "failed": "failed", "cancelled": "cancelled"}
@@ -229,14 +230,22 @@ def make_router(ctx) -> APIRouter:
         who = identity(x_comfyfarm_user)
         async with router.db.conn() as c:
             g = await group_for(c, who, x_comfyfarm_group)
-            if g is None:
-                raise HTTPException(503, "no worker group available to you")
-            snap = await c.fetchrow("SELECT data FROM object_info_snapshots WHERE group_id = $1", g["id"])
-        if snap is None:
+            snap = g and await c.fetchrow("SELECT data, source FROM object_info_snapshots WHERE group_id = $1", g["id"])
+            # definitions taken from the UI worker stand in until a GPU worker of the group can give its own
+            stand_in = bool(snap) and (snap["source"] or "").startswith(UI_SOURCE)
+            gpu_up = bool(g) and await c.fetchval("SELECT EXISTS (SELECT 1 FROM workers WHERE group_id = $1 AND enabled AND "
+                                                  "deleted_at IS NULL AND NOT maintenance AND state = 'online')", g["id"])
+        if g is None:                       # a new farm without groups: the screen still opens, with the UI worker's nodes
+            data = await ui_object_info()
+            if data is None:
+                raise HTTPException(503, "no worker group available to you, and no UI worker answered")
+            return Response(data[1], media_type="application/json")
+        if snap is None or (stand_in and gpu_up):
             snap_data = await refresh_snapshot(g["id"])
-            if snap_data is None:
-                raise HTTPException(503, "no node definitions yet: no worker of this group answered")
-            return Response(snap_data, media_type="application/json")
+            if snap_data is not None:
+                return Response(snap_data, media_type="application/json")
+            if snap is None:
+                raise HTTPException(503, "no node definitions yet: no worker of this group or UI worker answered")
         return Response(gzip.decompress(snap["data"]), media_type="application/json")
 
     @api.get("/api/object_info/{node_class}")
@@ -246,31 +255,58 @@ def make_router(ctx) -> APIRouter:
         data = json.loads(r.body)
         return {node_class: data[node_class]} if node_class in data else {}
 
+    async def fetch_object_info(w) -> tuple[bytes, int] | None:
+        try:
+            r = await router.adapter.http.get(f"{w['base_url']}/object_info", timeout=90)
+            if r.status_code != 200:
+                return None
+            return r.content, len(r.json())
+        except Exception as e:
+            log.warning("object_info from %s failed: %s", w["name"], type(e).__name__)
+            return None
+
+    async def ui_object_info() -> tuple[str, bytes, int] | None:
+        """The UI worker's own definitions. It runs the same node sets as the GPU workers (their CPU side), so a farm
+        whose GPU workers are not there yet still opens workflows and shows its node packs. A pack that imports only
+        with a GPU is missing from them until a GPU worker answers."""
+        async with router.db.conn() as c:
+            ws = await c.fetch("SELECT name, base_url FROM workers WHERE kind = 'ui' AND enabled AND deleted_at IS NULL "
+                               "AND state = 'online' ORDER BY id")
+        for w in ws:
+            got = await fetch_object_info(w)
+            if got:
+                return w["name"], got[0], got[1]
+        return None
+
     async def refresh_snapshot(group_id: int) -> bytes | None:
-        """Fetch /object_info from an online worker of the group (idle first, up to 3). On failure the existing
-        snapshot stays — a 502 here would leave the frontend with an empty canvas (D-20)."""
+        """Fetch /object_info from an online worker of the group (idle first, up to 3); with none, from the UI worker,
+        kept as a stand-in until a GPU worker of the group answers. On failure the existing snapshot stays — a 502
+        here would leave the frontend with an empty canvas (D-20)."""
         async with router.db.conn() as c:
             ws = await c.fetch("SELECT name, base_url, current_job_id IS NULL AS idle FROM workers WHERE group_id = $1 AND enabled "
                                "AND deleted_at IS NULL AND NOT maintenance AND state = 'online'", group_id)
+            had = await c.fetchval("SELECT source FROM object_info_snapshots WHERE group_id = $1", group_id)
         idle = [w for w in ws if w["idle"]]; busy = [w for w in ws if not w["idle"]]
         random.shuffle(idle); random.shuffle(busy)
+        got = None
         for w in (idle + busy)[:3]:
-            try:
-                r = await router.adapter.http.get(f"{w['base_url']}/object_info", timeout=90)
-                if r.status_code != 200:
-                    continue
-                data = r.content
-                n = len(r.json())
-            except Exception as e:
-                log.warning("object_info from %s failed: %s", w["name"], type(e).__name__)
-                continue
-            async with router.db.conn() as c:
-                await c.execute("INSERT INTO object_info_snapshots(group_id, data, node_count, source, fetched_at) "
-                                "VALUES ($1, $2, $3, $4, now()) ON CONFLICT (group_id) DO UPDATE SET data = excluded.data, "
-                                "node_count = excluded.node_count, source = excluded.source, fetched_at = now()",
-                                group_id, gzip.compress(data), n, w["name"])
-            return data
-        return None
+            if got := await fetch_object_info(w):
+                source = w["name"]
+                break
+        # the UI worker only stands in where nothing better was ever had: GPU workers that are there but failed, or
+        # a real snapshot whose workers are away for now, keep what the group had (stale-if-error)
+        if got is None and not ws and (had is None or had.startswith(UI_SOURCE)):
+            if ui := await ui_object_info():
+                source, got = UI_SOURCE + ui[0], ui[1:]
+        if got is None:
+            return None
+        data, n = got
+        async with router.db.conn() as c:
+            await c.execute("INSERT INTO object_info_snapshots(group_id, data, node_count, source, fetched_at) "
+                            "VALUES ($1, $2, $3, $4, now()) ON CONFLICT (group_id) DO UPDATE SET data = excluded.data, "
+                            "node_count = excluded.node_count, source = excluded.source, fetched_at = now()",
+                            group_id, gzip.compress(data), n, source)
+        return data
 
     router.refresh_snapshot = refresh_snapshot
     return api

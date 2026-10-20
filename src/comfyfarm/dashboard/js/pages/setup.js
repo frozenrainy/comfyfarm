@@ -223,7 +223,7 @@ function runSetup(made, refresh) {
         await api("POST", `/api/admin/instances/${w.id}/start`);
       }
       await api("POST", `/api/admin/setups/${made.id}/finished?worker_id=${w.id}`);
-      toast(pid ? t("Worker added and starting — watch its badge in System → Rollout") : t("Worker added — assign a profile in System → Rollout"));
+      toast(pid ? t("Worker added and starting — watch its badge in System → Rollout") : t("Worker added — assign a profile and start it in System → Rollout"));
       close();
     } catch (e) { toast(e.message, true); finish.disabled = false; poll(); }
   }

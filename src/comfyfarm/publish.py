@@ -30,6 +30,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 
 try:
     from .launcher import CONTRACT, NAME, OPTIONS, env_problem, tree_sha256
@@ -203,10 +204,47 @@ def carry_interpreter(python: str, path: str) -> str:
     return os.path.join(dest, "bin", os.path.basename(real))
 
 
+def removed_by(overrides: list[str]) -> set[str]:
+    """The packages an override file removes (the NEVER marker)."""
+    out = set()
+    for o in overrides:
+        with open(o) as f:
+            for line in f:
+                if NEVER in line:
+                    out.add(re.split(r"[;<>=!~\[ ]", line.strip(), maxsplit=1)[0].lower())
+    return out
+
+
+def check_dependencies(argv: list[str], overrides: list[str]) -> None:
+    """pip/uv check, read rather than trusted blindly: a package asking for an OpenCV variant the overrides removed is
+    fine (the kept one provides cv2), and a wheel whose metadata names another platform but runs here is only worth a
+    warning (decord's says cp36). Anything else missing or incompatible stops the build."""
+    p = subprocess.run(argv, capture_output=True, text=True)
+    if p.returncode == 0:
+        return
+    removed, fatal = removed_by(overrides), []
+    for line in (p.stdout + p.stderr).splitlines():
+        m = (re.search(r"requires `([A-Za-z0-9._-]+)[^`]*`, but it's not installed", line)
+             or re.search(r"requires ([A-Za-z0-9._-]+)[^,]*, which is not installed", line))
+        if m and m.group(1).lower() in removed:
+            continue
+        if "built for a different platform" in line or "is not supported on this platform" in line:
+            print(f"publish: warning: {line.strip()}", file=sys.stderr)
+            continue
+        if re.search(r"requires|has requirement|incompatib|not installed", line) and not line.startswith(("Found ", "Checked ")):
+            fatal.append(line.strip())
+    if fatal:
+        raise Refused("dependency check failed:\n  " + "\n  ".join(fatal))
+
+
 def publish_venv(art: str, name: str, python: str, requirements: list[str], accelerator: str | None,
-                 arch: list[str], pip_args: list[str], uv: str | None = None, manifest_extra: dict | None = None) -> dict:
+                 arch: list[str], pip_args: list[str], uv: str | None = None, manifest_extra: dict | None = None,
+                 constraints: list[str] | None = None, overrides: list[str] | None = None) -> dict:
     """Built at its final path, with its interpreter inside it (D-42), so every host that mounts the store at the same
-    path can run it — not only the build host."""
+    path can run it — not only the build host. All requirement files go into one install, so they are resolved
+    together: one after the other, a later file could quietly change what an earlier one needed."""
+    if overrides and not uv:
+        raise Refused("overrides (one OpenCV, one onnxruntime) need uv — install it, or pass --uv")
     path = target(art, "venv", name)
     if os.sep not in python:                     # a version (3.12) or a command name, not a path
         found = (subprocess.run([uv, "python", "find", python], capture_output=True, text=True).stdout.strip() if uv
@@ -226,9 +264,16 @@ def publish_venv(art: str, name: str, python: str, requirements: list[str], acce
     try:
         if bad := interpreter_problems(path):
             raise Refused("; ".join(bad))
+        cmd = pip + ["install"] + target_py
         for r in requirements:
-            subprocess.run(pip + ["install"] + target_py + ["-r", r] + pip_args, check=True)
-        subprocess.run(pip + ["check"] + target_py, check=True)
+            cmd += ["-r", r]
+        for c in constraints or []:
+            cmd += ["-c", c]
+        for o in overrides or []:
+            cmd += ["--override", o]
+        if requirements:
+            subprocess.run(cmd + pip_args, check=True)
+        check_dependencies(pip + ["check"] + target_py, overrides or [])
         if bad := venv_escapes(path):
             raise Refused("the venv references things outside itself: " + "; ".join(bad))
         freeze = subprocess.run(pip + ["freeze"] + target_py, check=True, capture_output=True, text=True).stdout
@@ -252,6 +297,22 @@ def publish_venv(art: str, name: str, python: str, requirements: list[str], acce
 HERE = os.path.dirname(os.path.abspath(__file__))
 PYPI = "https://pypi.org/simple"
 ROLES = ("gpu", "ui")
+# What a farm venv always has besides ComfyUI's own requirements: torchaudio is not in them, yet node packs import it
+# without listing it (they assume the usual torch/torchvision/torchaudio install). Unpinned: its last release imports
+# fine on newer torch.
+BASE_EXTRA = ["torchaudio"]
+# Node packs ask for torch with their own idea of it; the venv's torch comes from the accelerator's index and stays.
+TORCH_FAMILY = re.compile(r"^(torch|torchvision|torchaudio)\s*($|[<>=!~;\[(])", re.I)
+# One cv2 and one onnxruntime: their variants install into the same module, and whichever installs last wins —
+# packs ask for different ones directly and through their own dependencies. The kept OpenCV has every module and
+# none of the desktop libraries a server lacks (libGL).
+OPENCV = ("opencv-python", "opencv-python-headless", "opencv-contrib-python", "opencv-contrib-python-headless")
+KEEP_OPENCV = "opencv-contrib-python-headless"
+ONNXRUNTIME = ("onnxruntime", "onnxruntime-gpu")
+NEVER = "; python_version < '0'"                            # a uv override with this marker removes the package
+REQ_FILE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9._/-]*\.txt$")   # a file inside the pack
+SPEC = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._ -]+\])?\s*([<>=!~][<>=!~0-9A-Za-z.*+, ]*)?"
+                  r"(;[A-Za-z0-9_ .'\"<>=!~()-]+)?\Z")             # name[extras] specifiers ; marker
 
 
 def find_dir(name: str, given: str | None) -> str:
@@ -307,21 +368,159 @@ def load_recipe(name: str, recipes: str | None = None) -> dict:
                           "a recipe is pinned)")
         if not all(isinstance(x, str) and "\n" not in x and not x.startswith("-") for x in n.get("requirements", [])):
             raise Refused(f"{who}: node {n['name']} requirements must be requirement lines, not options")
+        if "requirements_file" in n and not REQ_FILE.match(str(n["requirements_file"])):
+            raise Refused(f"{who}: node {n['name']} requirements_file must be a .txt file inside the pack")
+        if not isinstance(n.get("ui", True), bool):
+            raise Refused(f"{who}: node {n['name']} ui must be true or false")
+    for x in r.get("constraints", []) + [c for n in r.get("nodes", []) for c in n.get("constraints", [])]:
+        if not isinstance(x, str) or "\n" in x or not SPEC.match(x.strip()):
+            raise Refused(f"{who}: constraints must be version specifiers like 'kornia<0.8', not {x!r}")
     return r
 
 
-def fetch(repo: str, ref: str, dest: str) -> tuple[str, str]:
-    """The tree of `ref` in `repo`, as `git archive` gives it (no .git) — the same bytes every time — and the commit
-    it resolved to. repo and ref come after --end-of-options: git never reads them as options."""
+FETCH_TRIES = 3
+FETCH_WAIT = 5.0
+
+
+def git_net(argv: list[str], env: dict | None = None, tries: int | None = None) -> subprocess.CompletedProcess:
+    """A git command that talks to a server, tried again after a pause when it fails: a build fetches dozens of
+    repositories, and one dropped connection (a TLS read error, an early EOF) must not end it."""
+    tries = tries or FETCH_TRIES
+    for i in range(tries):
+        p = subprocess.run(argv, env=env, capture_output=True, text=True)
+        if p.returncode == 0:
+            return p
+        if i + 1 < tries:
+            print(f"publish: {' '.join(argv[3:5])} failed ({(p.stderr.strip().splitlines() or ['?'])[-1][:200]}) — "
+                  f"trying again", file=sys.stderr)
+            time.sleep(FETCH_WAIT * (i + 1))
+    raise subprocess.CalledProcessError(p.returncode, argv, p.stdout, p.stderr)
+
+
+def fetch(repo: str, ref: str, dest: str, submodules: dict | None = None) -> tuple[str, str]:
+    """The tree of `ref` in `repo` without .git — the same bytes every time — and the commit it resolved to. repo and
+    ref come after --end-of-options: git never reads them as options. Git submodules come along at the commits the
+    pack pins (a pack without them is incomplete and may try to download them when ComfyUI imports it — which fails on a
+    farm without internet); their URLs may be https only, or local paths when the pack itself is a local path."""
     src = dest + ".git-src"
     subprocess.run(["git", "init", "-q", src], check=True)
-    subprocess.run(["git", "-C", src, "fetch", "-q", "--depth", "1", "--end-of-options", repo, ref], check=True)
+    git_net(["git", "-C", src, "fetch", "-q", "--depth", "1", "--end-of-options", repo, ref])
     commit = subprocess.run(["git", "-C", src, "rev-parse", "FETCH_HEAD"], check=True, capture_output=True, text=True).stdout.strip()
-    os.makedirs(dest)
-    archive = subprocess.run(["git", "-C", src, "archive", "FETCH_HEAD"], check=True, capture_output=True).stdout
-    subprocess.run(["tar", "-x", "-C", dest], input=archive, check=True)
+    if subprocess.run(["git", "-C", src, "cat-file", "-e", "FETCH_HEAD:.gitmodules"], capture_output=True).returncode != 0:
+        os.makedirs(dest)
+        archive = subprocess.run(["git", "-C", src, "archive", "FETCH_HEAD"], check=True, capture_output=True).stdout
+        subprocess.run(["tar", "-x", "-C", dest], input=archive, check=True)
+    else:
+        env = {**os.environ, "GIT_ALLOW_PROTOCOL": "https" if repo.startswith("https://") else "https:file",
+               "GIT_TERMINAL_PROMPT": "0"}
+        subprocess.run(["git", "-C", src, "checkout", "-q", "--detach", "FETCH_HEAD"], check=True)
+        sub = ["git", "-C", src, "submodule", "update", "--init", "--recursive"]
+        try:
+            git_net(sub + ["--depth", "1"], env, tries=1)
+        except subprocess.CalledProcessError:
+            git_net(sub, env)                                     # a pinned commit that is not a branch tip, or the net
+        status = subprocess.run(["git", "-C", src, "submodule", "status", "--recursive"], check=True,
+                                capture_output=True, text=True).stdout
+        if submodules is not None:
+            for line in status.splitlines():
+                parts = line[1:].split()
+                if len(parts) >= 2:
+                    submodules[parts[1]] = parts[0]
+        shutil.copytree(src, dest, symlinks=True, ignore=shutil.ignore_patterns(".git"))
     shutil.rmtree(src)
     return dest, commit
+
+
+def node_requirements(n: dict, tree: str) -> tuple[list[str], list[str]]:
+    """The requirement lines of one node pack, and notes on what was left out. The recipe's own list wins; otherwise
+    the pack's requirements_file (requirements.txt by default — some packs ship a lighter one), otherwise the
+    dependencies in its pyproject.toml. Never from a pack: options (an index URL, -r, -e), local paths, torch."""
+    name = n["name"]
+    if "requirements" in n:
+        raw, origin = list(n["requirements"]), "recipe"
+    else:
+        f = n.get("requirements_file") or "requirements.txt"
+        path = os.path.join(tree, f)
+        if os.path.isfile(path) and os.path.realpath(path).startswith(os.path.realpath(tree) + os.sep):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                raw, origin = fh.read().splitlines(), f
+        elif n.get("requirements_file"):
+            raise Refused(f"node {name}: no {f} in the pack")
+        else:
+            raw, origin = pyproject_dependencies(tree), "pyproject.toml"
+    lines, notes = [], []
+    for line in raw:
+        line = re.sub(r"(^|\s)#.*$", "", line).strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            notes.append(f"{name}: '{line}' in {origin} ignored — options never come from a pack")
+        elif TORCH_FAMILY.match(line):
+            notes.append(f"{name}: '{line}' in {origin} ignored — the venv keeps its own torch")
+        elif re.search(r"(^|@\s*)(file:|\.{0,2}/)", line):
+            notes.append(f"{name}: '{line}' in {origin} ignored — a local path")
+        else:
+            lines.append(line)
+    return lines, notes
+
+
+def pyproject_dependencies(tree: str) -> list[str]:
+    path = os.path.join(tree, "pyproject.toml")
+    if not os.path.isfile(path):
+        return []
+    try:
+        import tomllib
+        with open(path, "rb") as f:
+            deps = tomllib.load(f).get("project", {}).get("dependencies", [])
+        return [d for d in deps if isinstance(d, str)]
+    except (ImportError, ValueError):                       # Python 3.10, or a broken file: no list from it
+        return []
+
+
+ONE_OPENCV = re.compile(r"^opencv-(contrib-)?python(-headless)?(?![A-Za-z0-9_.-])(.*)$", re.I)
+ONE_ORT = re.compile(r"^onnxruntime(-gpu)?(?![A-Za-z0-9_.-])(.*)$", re.I)
+
+
+def keep_ort(accelerator: str) -> str:
+    return "onnxruntime-gpu" if accelerator == "cuda" else "onnxruntime"
+
+
+def one_of(lines: list[str], accelerator: str) -> list[str]:
+    """A pack's own OpenCV or onnxruntime line becomes the kept package, with the pack's version bounds (the variants
+    share their version numbers). The overrides remove the others — so the kept one must be asked for."""
+    out = []
+    for line in lines:
+        if m := ONE_OPENCV.match(line):
+            out.append(KEEP_OPENCV + m.group(3))
+        elif m := ONE_ORT.match(line):
+            out.append(keep_ort(accelerator) + m.group(2))
+        else:
+            out.append(line)
+    return out
+
+
+def needed_through_dependencies(uv: str, requirements: list[str], constraints: list[str], pip_args: list[str],
+                                python: str, accelerator: str) -> list[str]:
+    """The kept OpenCV / onnxruntime when only a dependency of a pack asks for a variant (mediapipe asks for
+    opencv-contrib-python): resolve once without the overrides and look. If that cannot be told, ask for both."""
+    cmd = [uv, "pip", "compile", "-q", "--no-header", "--python-version", python]
+    for r in requirements:
+        cmd += ["-r", r]
+    for c in constraints:
+        cmd += ["-c", c]
+    cmd += [a for a in pip_args if a.startswith(("--index-url", "--extra-index-url", "--index-strategy"))]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode != 0:
+        return [KEEP_OPENCV, keep_ort(accelerator)]
+    names = {re.split(r"[=<>!~ \[;]", line.strip(), maxsplit=1)[0].lower() for line in p.stdout.splitlines()
+             if line.strip() and not line.lstrip().startswith("#")}
+    return ([KEEP_OPENCV] if names & set(OPENCV) else []) + ([keep_ort(accelerator)] if names & set(ONNXRUNTIME) else [])
+
+
+def overrides_for(accelerator: str) -> str:
+    """uv overrides that keep one OpenCV and the onnxruntime that fits the accelerator."""
+    drop = [p for p in OPENCV if p != KEEP_OPENCV] + [p for p in ONNXRUNTIME if p != keep_ort(accelerator)]
+    return "".join(p + NEVER + "\n" for p in drop)
 
 
 def ready(art: str, kind: str) -> dict[str, dict]:
@@ -366,17 +565,23 @@ def stage_nodes(work: str, role: str, ext: str, fetched: dict[str, str], recipe:
     shutil.copytree(os.path.join(ext, "worker_ext", "comfyfarm_worker"), os.path.join(stage, "comfyfarm_worker"), ignore=ignore)
     if role == "ui":
         shutil.copytree(os.path.join(ext, "ui_ext", "comfyfarm_ui"), os.path.join(stage, "comfyfarm_ui"), ignore=ignore)
-    for n in recipe.get("nodes", []):
-        if role == "gpu" or n.get("ui"):
-            shutil.copytree(fetched[n["name"]], os.path.join(stage, n["name"]), symlinks=True, ignore=ignore)
+    for n in nodes_for(recipe, role):
+        shutil.copytree(fetched[n["name"]], os.path.join(stage, n["name"]), symlinks=True, ignore=ignore)
     return stage
 
 
-def venv_inputs(recipe: dict, role: str, requirements: list[str]) -> str:
+def nodes_for(recipe: dict, role: str) -> list[dict]:
+    """GPU workers get every pack; the UI worker too (their web code, routes and node definitions), except packs marked
+    "ui": false — those that only import with a GPU (the UI worker runs on the CPU)."""
+    return [n for n in recipe.get("nodes", []) if role == "gpu" or n.get("ui", True)]
+
+
+def venv_inputs(recipe: dict, role: str, requirements: list[str], extra: list[str] = ()) -> str:
     """What decides a venv's contents. A venv build is not byte-for-byte repeatable, so reuse goes by its inputs."""
     v = recipe[role]
     blob = {"python": recipe.get("python", "3.12"), "accelerator": v["accelerator"], "arch": v.get("arch", []),
-            "index": v["index"], "pip": v.get("pip", []), "requirements": [open(r).read() for r in requirements]}
+            "index": v["index"], "pip": v.get("pip", []), "requirements": [open(r).read() for r in requirements],
+            "constraints_overrides": [open(r).read() for r in extra]}
     return hashlib.sha256(json.dumps(blob, sort_keys=True).encode()).hexdigest()
 
 
@@ -407,19 +612,46 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
         else:
             publish_tree(art, "core", core, core_src, source={"repo": c["repo"], "ref": c["ref"], "commit": core_commit})
             log(f"core/{core}: published (commit {core_commit[:12]})")
-        fetched, commits = {}, {}
+        fetched, commits, subs, reqs = {}, {}, {}, {}
         for n in recipe.get("nodes", []):
-            fetched[n["name"]], commits[n["name"]] = fetch(n["repo"], n["commit"], os.path.join(work, "node-" + n["name"]))
-        node_reqs = []
-        for n in recipe.get("nodes", []):
-            node_reqs += n.get("requirements", [])
-        req_files = [os.path.join(core_src, "requirements.txt")]
-        if node_reqs:
-            req_files.append(os.path.join(work, "node-requirements.txt"))
-            with open(req_files[-1], "w") as f:
-                f.write("\n".join(node_reqs) + "\n")
+            subs[n["name"]] = {}
+            fetched[n["name"]], commits[n["name"]] = fetch(n["repo"], n["commit"], os.path.join(work, "node-" + n["name"]),
+                                                           subs[n["name"]])
+            reqs[n["name"]], notes = node_requirements(n, fetched[n["name"]])
+            for note in notes:
+                log(note)
+            log(f"node {n['name']}: {len(reqs[n['name']])} requirement(s)"
+                + (f", {len(subs[n['name']])} submodule(s)" if subs[n["name"]] else ""))
+        base = os.path.join(work, "base-requirements.txt")
+        with open(base, "w") as f:
+            f.write("\n".join(BASE_EXTRA) + "\n")
         template = {"recipe": recipe["recipe"], "about": recipe.get("about", ""), "comfyui": c["ref"]}
         for role in ROLES:
+            # each role's venv has the requirements of the packs that role runs, resolved together with ComfyUI's
+            acc = recipe[role]["accelerator"]
+            req_files = [os.path.join(core_src, "requirements.txt"), base]
+            lines = one_of([x for n in nodes_for(recipe, role) for x in reqs[n["name"]]], acc)
+            node_file = os.path.join(work, f"node-requirements-{role}.txt")
+            cons = recipe.get("constraints", []) + [x for n in nodes_for(recipe, role) for x in n.get("constraints", [])]
+            extra = [os.path.join(work, f"overrides-{role}.txt")]
+            with open(extra[0], "w") as f:
+                f.write(overrides_for(acc))
+            if cons:
+                extra.append(os.path.join(work, f"constraints-{role}.txt"))
+                with open(extra[-1], "w") as f:
+                    f.write("\n".join(cons) + "\n")
+            if lines and uv:
+                with open(node_file, "w") as f:
+                    f.write("\n".join(lines) + "\n")
+                pip_probe = [f"--index-url={recipe[role]['index']}", f"--extra-index-url={PYPI}", "--index-strategy=unsafe-best-match"]
+                for k in needed_through_dependencies(uv, req_files + [node_file], extra[1:], pip_probe, py, acc):
+                    if not any(re.match(re.escape(k) + r"(?![A-Za-z0-9_.-])", x, re.I) for x in lines):
+                        lines.append(k)
+                        log(f"{role} venv: {k} added — a dependency of a pack asks for a variant of it")
+            if lines:
+                req_files.append(node_file)
+                with open(node_file, "w") as f:
+                    f.write("\n".join(lines) + "\n")
             stage = stage_nodes(work, role, ext, fetched, recipe)
             prefix = "farm-" + role
             nodes = same_tree(art, "nodes", stage, prefix)
@@ -428,11 +660,12 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
             else:
                 nodes = next_name(art, "nodes", prefix)
                 publish_tree(art, "nodes", nodes, stage, recipe=recipe["recipe"],
-                             sources={n["name"]: {"repo": n["repo"], "commit": commits[n["name"]]}
-                                      for n in recipe.get("nodes", []) if role == "gpu" or n.get("ui")})
+                             sources={n["name"]: {"repo": n["repo"], "commit": commits[n["name"]],
+                                                  **({"submodules": subs[n["name"]]} if subs[n["name"]] else {})}
+                                      for n in nodes_for(recipe, role)})
                 log(f"nodes/{nodes}: published")
             v = recipe[role]
-            inputs = venv_inputs(recipe, role, req_files)
+            inputs = venv_inputs(recipe, role, req_files, extra)
             venv = None if rebuild else next((n for n, m in sorted(ready(art, "venv").items())
                                               if m.get("inputs_sha256") == inputs), None)
             if venv:
@@ -442,7 +675,8 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
                 log(f"venv/{venv}: building ({v['accelerator']}, {v['index']}) — this takes a while")
                 pip = [f"--index-url={v['index']}", f"--extra-index-url={PYPI}"] + (["--index-strategy=unsafe-best-match"] if uv else [])
                 publish_venv(art, venv, py if uv else f"python{py}", req_files, v["accelerator"], v.get("arch", []),
-                             pip + v.get("pip", []), uv, {"inputs_sha256": inputs, "recipe": recipe["recipe"]})
+                             pip + v.get("pip", []), uv, {"inputs_sha256": inputs, "recipe": recipe["recipe"]},
+                             constraints=extra[1:], overrides=extra[:1])
                 log(f"venv/{venv}: published")
             template[role] = {"core": core, "venv": venv, "nodes": [nodes], "flags": v.get("flags", []), "env": v.get("env", {})}
     pdir = os.path.join(art, "profiles")
