@@ -378,3 +378,18 @@ def test_a_pack_may_name_several_requirements_files(setup):
     write(setup, nodes=[{**p, "requirements_file": "A/requirements.txt,../x.txt"}])
     with pytest.raises(publish.Refused, match="requirements_file"):
         run(setup)
+
+
+def test_uv_copies_into_the_store(monkeypatch):
+    """Field (dev.13): every control-plane build warned "Failed to hardlink files; falling back to full copy" — uv's
+    cache and the store are separate mounts there. A store's venv is its own copy anyway: copy is the mode, unless the
+    operator says otherwise."""
+    env = {}
+    monkeypatch.setattr(publish.os, "environ", env)
+    with pytest.raises(SystemExit):
+        publish.main(["venv"])                                  # stops at the arguments; the default is set before
+    assert env["UV_LINK_MODE"] == "copy"
+    env.clear(); env["UV_LINK_MODE"] = "symlink"
+    with pytest.raises(SystemExit):
+        publish.main(["venv"])
+    assert env["UV_LINK_MODE"] == "symlink"

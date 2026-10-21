@@ -721,6 +721,9 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
 
 
 def main(argv=None) -> int:
+    # a venv in the store is its own copy, never hard links into uv's cache: the cache sits elsewhere (another mount in
+    # the compose deployment, where uv warned "Failed to hardlink files" on every build) and may be cleaned
+    os.environ.setdefault("UV_LINK_MODE", "copy")
     ap = argparse.ArgumentParser(prog="comfyfarm-publish")
     ap.add_argument("kind", choices=["core", "nodes", "frontend", "venv", "recipe"])
     ap.add_argument("art")
