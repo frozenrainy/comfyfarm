@@ -16,6 +16,7 @@ from ..core import jobs as jobsvc
 from ..core import stats as statsvc
 from ..health.dispatch import snapshot
 from .context import Ctx
+from .stock import outputs_count
 
 RECENT_ON_DASHBOARD = 10
 QUEUE_LIMIT = 1000
@@ -62,6 +63,10 @@ def job_doc(r, place=None) -> dict:
         d["error"] = (r["error"] or {}).get("message") if r["status"] == "failed" else None
     if "runnable" in r.keys():
         d["runnable"] = r["runnable"]
+    if "outputs" in r.keys():           # history: how many files, and the first one to show
+        d["outputs"], _, first = outputs_count(r["outputs"])
+        if first and first.get("filename"):
+            d["preview"] = {k: first.get(k, "") for k in ("filename", "subfolder", "type", "mediaType")}
     return d
 
 
@@ -217,7 +222,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         where += search_clause(q, args, everyone)
         async with db.conn() as c:
             total = await c.fetchval(f"SELECT count(*) FROM jobs j WHERE {where}", *args)
-            rows = await c.fetch(f"SELECT {JOB_COLS} {JOB_FROM} WHERE {where} "
+            rows = await c.fetch(f"SELECT {JOB_COLS}, j.outputs {JOB_FROM} WHERE {where} "
                                  f"ORDER BY j.finished_at DESC NULLS LAST, j.id DESC OFFSET {offset} LIMIT {limit}", *args)
         return {"scope": "all" if everyone else "mine", "total": total, "offset": offset, "limit": limit,
                 "jobs": [job_doc(r) for r in rows]}

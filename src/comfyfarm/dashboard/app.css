@@ -80,6 +80,8 @@ td.actions { white-space: nowrap; text-align: right; }
 td.actions button + button { margin-left: .25rem; }
 td.nowrap { white-space: nowrap; }
 td.err { color: var(--bad); max-width: 28rem; overflow-wrap: anywhere; }
+td.result { white-space: nowrap; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
+img.thumb { height: 2.5rem; max-width: 5rem; object-fit: cover; border-radius: 3px; vertical-align: middle; display: inline-block; }
 .empty { margin: .4rem .2rem; }
 
 .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .8rem; border: 1px solid currentColor; white-space: nowrap; }

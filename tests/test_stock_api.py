@@ -24,6 +24,8 @@ async def test_stock_endpoints_per_user(dsn, fakes):
                     break
                 await asyncio.sleep(0.1)
             assert d["status"] == "completed" and d["outputs_count"] == 1 and d["preview_output"]["filename"].startswith("fake_")
+            # the frontend's queue panel drops the whole list when an item's preview lacks these (ComfyUI's jobs API)
+            assert d["preview_output"]["nodeId"] == "3" and d["preview_output"]["mediaType"] == "images"
             assert d["execution_status"]["status_str"] == "success" and d["workflow"]["prompt"]["1"]["class_type"] == "EmptyImage"
 
             long = (await c.post("/api/prompt", json={"prompt": tiny(2, blur=25, size=2048)}, headers=me)).json()["prompt_id"]

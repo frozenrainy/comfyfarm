@@ -82,6 +82,9 @@ export async function setupWorker(refresh, again = null, fix = null) {
   const firstGpu = !src && pickRole?.role !== "ui" && !(await api("GET", "/api/admin/workers")).some((w) => w.kind !== "ui");
   const hereHost = /^(localhost|127\.|::1|\[)/.test(location.hostname) ? "" : location.hostname;
   const roleProfiles = profiles.filter((p) => ((p.flags || []).includes("--cpu")) === (pickRole?.role === "ui"));
+  // the GPU of a new worker: what this farm's GPU profiles were built for (their venv names the accelerator)
+  const builtFor = new Set(roleProfiles.map((p) => /rocm/i.test(p.venv) ? "amd" : /cu\d|cuda/i.test(p.venv) ? "nvidia" : "any"));
+  const gpuGuess = builtFor.size === 1 ? [...builtFor][0] : "any";
   const last = src ? src.spec : recent[0]?.spec;
   const lastX = src ? src.extra : {};
   const pathOf = (k, d) => {
@@ -105,15 +108,16 @@ export async function setupWorker(refresh, again = null, fix = null) {
       { name: "host", required: true, label: t("Host address"), value: lastX.host ?? (firstGpu ? hereHost : ""), placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
       { name: "instance", required: true, label: t("Instance name"), value: src ? last.instance : ui ? "ui-1" : "gpu-1", hint: keep || t("one ComfyUI on this host; letters, digits, . _ -") },
       ...(ui ? [] : [
-        { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
+        { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : gpuGuess,
           options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })), hint: t("ComfyFarm checks the driver; it never installs one") },
         groups.length ? { name: "group", label: t("Group"), type: "select", value: src ? lastX.group ?? "" : groups[0]?.name ?? "",
           options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] }
-        : { name: "group", label: t("Group"), value: "default",            // a new farm has none: made with the worker
+        : { name: "group", label: t("Group"), value: "gpu",                // a new farm has none: made with the worker
             hint: t("no group yet: this one is made with the worker (jobs go to a group's workers; users get groups)") }]),
       { name: "profile", label: t("Profile to run"), type: "select",
         value: fix && lastX.profile_id ? String(lastX.profile_id) : again ? "" : String(roleProfiles[roleProfiles.length - 1]?.id ?? ""),
-        options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))],
+        options: [{ value: "", label: t("(assign later)") }, ...profiles.filter((p) => roleProfiles.includes(p) || String(p.id) === String(lastX.profile_id))
+                                                                  .map((p) => ({ value: String(p.id), label: p.name }))],
         hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
       { name: "port", label: t("ComfyUI port"), type: "number", value: src ? last.port : ui ? 8189 : routerPort === 8188 ? 8288 : 8188,
         hint: ui ? t("not 8188 when it shares the host with the router") : "" },

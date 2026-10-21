@@ -30,7 +30,7 @@ def outputs_count(outputs) -> tuple[int, int, dict | None]:
     """(outputs_count, previewable_outputs_count, preview_output) from a stock /history outputs dict."""
     n = p = 0
     first = None
-    for node_out in (outputs or {}).values():
+    for node_id, node_out in (outputs or {}).items():
         if not isinstance(node_out, dict):
             continue
         for kind, items in node_out.items():
@@ -39,7 +39,8 @@ def outputs_count(outputs) -> tuple[int, int, dict | None]:
                 if kind in ("images", "gifs", "video", "videos", "animated"):
                     p += len(items)
                     if first is None and items and isinstance(items[0], dict):
-                        first = items[0]
+                        # as ComfyUI's own jobs API: the frontend's queue panel needs both, or drops the whole list
+                        first = {**items[0], "nodeId": str(node_id), "mediaType": items[0].get("mediaType", kind)}
     return n, p, first
 
 

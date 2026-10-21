@@ -185,7 +185,7 @@ export function button(label, onclick, opts = {}) {
 // fields: [{name, label, type: text|password|number|checkbox|checkboxes|select, value, options:[{value,label}], hint}]
 export function formDialog(title, fields, submitLabel = t("Save"), { wide = false, noSubmit = false, errors = {} } = {}) {
   return new Promise((resolve) => {
-    const inputs = {};
+    const inputs = {}, setters = {};    // setters: what a select's onChange(value, set) may change in the other fields
     const rows = fields.map((f) => {
       let control;
       if (f.type === "checkboxes") {
@@ -194,6 +194,7 @@ export function formDialog(title, fields, submitLabel = t("Save"), { wide = fals
           return { cb, el: h("label", { class: "check" }, cb, ` ${o.label}`) };
         });
         inputs[f.name] = () => boxes.filter((b) => b.cb.checked).map((b) => b.cb.value);
+        setters[f.name] = (vals) => boxes.forEach((b) => { b.cb.checked = vals.includes(b.cb.value); });
         control = h("div", { class: "checks" }, ...boxes.map((b) => b.el), boxes.length ? null : h("span", { class: "muted" }, t("none available")));
       } else if (f.type === "checkbox") {
         const cb = h("input", { type: "checkbox", checked: f.value });
@@ -211,6 +212,7 @@ export function formDialog(title, fields, submitLabel = t("Save"), { wide = fals
         const sel = h("select", {}, ...(f.options || []).map((o) => h("option", { value: o.value }, o.label)));
         sel.value = f.value ?? "";
         inputs[f.name] = () => sel.value;
+        if (f.onChange) sel.addEventListener("change", () => f.onChange(sel.value, (name, v) => setters[name]?.(v)));
         control = sel;
       } else {
         const inp = h("input", { type: f.type || "text", value: f.value ?? "", placeholder: f.placeholder, autocomplete: f.autocomplete || "off",

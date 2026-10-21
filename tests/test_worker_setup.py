@@ -50,7 +50,8 @@ class Recorder:
 
 def test_setup_builds_a_worker_and_reports(tmp_path):
     root, rec = fake_root(tmp_path), Recorder()
-    res = ws.setup(payload(), ws.Host(root=str(root), run=rec))
+    host = ws.Host(root=str(root), run=rec)
+    res = ws.setup(payload(), host)
     assert res["ok"], res
     assert [s["step"] for s in res["steps"]] == ["preconditions", "account", "worker tools", "configuration", "directories",
                                                   "router access", "user manager", "builds"]
@@ -77,6 +78,9 @@ def test_setup_builds_a_worker_and_reports(tmp_path):
     enable = [c for c in rec.calls if "enable" in c and "comfyfarm@gpu-1" in c]
     assert enable and not [c for c in rec.calls if "start" in c and "comfyfarm@gpu-1" in c]
     assert res["check"][0]["name"] == "GPU (AMD)"
+    # the models directory: made when missing, for the account to read (not to write), and the log says what goes there
+    assert (root / "srv/models").is_dir() and oct(os.stat(root / "srv/models").st_mode & 0o777) == "0o755"
+    assert any("/srv/models is new and empty" in line for line in host.done)
 
 
 def test_setup_runs_again_without_changes_and_adds_instances(tmp_path):

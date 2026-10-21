@@ -41,9 +41,10 @@ Dashboard page, for administrators) shows where you are.
    ([custom-nodes.md](custom-nodes.md)). Then *Build* — the recipe of your GPU — and *From a recipe* → *Create the
    profiles*. If you added node packs, roll the UI profile out to the UI worker (*Start rollout*).
 4. **The GPU worker**: put your models under `/srv/comfyfarm/models` (`checkpoints/`, `loras/`, `vae/` …, readable by
-   everyone). *System → Workers → Set up a worker*: the form is filled for this server — its address, the router, the
-   paths, port 8288 (the router has 8188), the newest GPU profile, and a group `default` made with the worker. Run the
-   command it shows (as a user with sudo), *Add the worker*. It starts.
+   everyone; setup makes the directory if it is not there, and the host check warns while it is empty).
+   *System → Workers → Set up a worker*: the form is filled for this server — its address, the router, the paths, port
+   8288 (the router has 8188), the newest GPU profile, and a group `gpu` made with the worker. Run the command it shows
+   (as a user with sudo), *Add the worker*. It starts.
 5. **Artists**: *System → Users → New user* — every group is ticked. They open `http://<this server>:8080`.
 6. **Check**: `docker compose exec router comfyfarm doctor`, and one workflow as an artist.
 
@@ -221,7 +222,9 @@ host check verifies the paths. Everything else comes from the router.
 **Models**: ComfyUI's folder layout (`checkpoints/`, `loras/`, `vae/`, `upscale_models/` …) under the worker's
 *Models directory* (default `/srv/comfyfarm/models`), readable by the service account (it never writes there). Every
 worker of a group needs the same files under the same names — a workflow names its models — so give them a share
-(read-only is fine) or copy them. The UI worker needs none: the editor lists the GPU workers' models.
+(read-only is fine) or copy them. The UI worker needs none: the editor lists the GPU workers' models. Setup makes the
+directory when it is missing (root's, mode 755: you put the files there, the service account reads them); the host check
+fails while it is missing and warns while it holds no model.
 
 The service account is its own: keep the default `comfyfarm` and setup creates it. It runs ComfyUI, and its
 `authorized_keys` holds only the router's restart key — setup refuses a person's login account (home under `/home`,

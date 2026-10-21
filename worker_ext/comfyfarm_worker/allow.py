@@ -81,8 +81,9 @@ def make_middleware(policy: Policy):
         peer = peer_address(request)
         if not policy.allows(peer):
             policy.refuse(peer)
+            # the address it saw: what the router's operator adds to the allow-list when the refused one is their own
             return web.json_response({"error": "comfyfarm: this worker accepts requests only from the farm router "
-                                               "and gateway"}, status=403)
+                                               "and gateway", "peer": peer}, status=403)
         return await handler(request)
     return allow_middleware
 

@@ -48,3 +48,4 @@ def setup(log_dir: str | None = None, level: str = "INFO", name: str = "router")
         root.addHandler(err)
         _mine.append(err)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)     # one line per request is noise, not signal
+    logging.getLogger("httpx").setLevel(logging.WARNING)              # the same for each probe and proxied request

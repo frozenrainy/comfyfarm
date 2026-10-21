@@ -41,13 +41,16 @@ def ask(tmp_path, doc, rid=None):
     return rid
 
 
-def test_the_builder_builds_installed_recipes_with_packs_from_allowed_sources_only(box):
+def test_the_builder_builds_installed_recipes_with_packs_from_allowed_sources_only(box, capsys):
     b, tmp, calls = box
     good = {"name": "VHS", "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", "commit": C1}
     rid = ask(tmp, {"kind": "build", "recipe": "rocm-x", "roles": ["ui"], "nodes": [good]})
     assert b.pending("build") == [rid]
     st = b.handle(rid)
     assert st["state"] == "done" and st["template"] == "rocm-x-1" and st["nodes"] == 1, st
+    said = capsys.readouterr().out.splitlines()          # its own log: what it took and how it ended (QA: it said nothing)
+    assert said == [f"comfyfarm builder: {rid}: build rocm-x (ui, 1 node pack(s))",
+                    f"comfyfarm builder: {rid}: done after 0 s — template rocm-x-1"]
     argv = calls[-1]
     assert argv[argv.index("--roles") + 1] == "ui" and argv[argv.index("--platform") + 1] == "x86_64-manylinux_2_35"
     assert json.loads(open(argv[argv.index("--nodes-json") + 1]).read()) == [good]

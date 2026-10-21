@@ -219,6 +219,11 @@ def make_router(ctx: Ctx) -> APIRouter:
             if r["enabled"] and r["state"] == "online" and r["id"] in streams and not streams[r["id"]][0].connected:
                 warn.append("event stream down: no progress or previews")
             caps = r["capabilities"] or {}
+            if r["failure_kind"] == "refused" and r["state"] != "online":
+                seen = caps.get("refused_as") or "an address it does not allow"
+                warn.append(f"refuses the router: its allow-list does not have {seen} — add that address to "
+                            "COMFYFARM_ALLOW_NETWORK in the host's /etc/comfyfarm/<instance>.env (Set up again writes it) "
+                            "or to the profile's COMFYFARM_ALLOW, then restart the worker")
             warn += security_warnings(caps)
             warn += consistency.warnings(rep.get(r["group_id"], {}).get("workers", {}).get(r["id"]))
             devs = [d for d in caps.get("devices") or [] if isinstance(d, dict)]

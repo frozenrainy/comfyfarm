@@ -31,7 +31,7 @@ export default {
   "pending": "대기", "waiting": "대기", "paused": "일시정지", "dispatching": "전달 중", "running": "실행 중",
   "cancelling": "취소 중", "completed": "완료", "failed": "실패", "cancelled": "취소됨", "blocked": "실행 불가",
   "online": "온라인", "offline": "오프라인", "disabled": "비활성", "maintenance": "점검", "active": "사용 중",
-  "unknown": "알 수 없음",
+  "unknown": "알 수 없음", "busy unresponsive": "바쁨 (응답 없음)", "suspect": "연결 의심",
 
   // ---- common ----
   "Save": "저장", "Saved": "저장했습니다", "Cancel": "취소", "Close": "닫기", "Create": "만들기", "Add": "추가",
@@ -42,7 +42,7 @@ export default {
 
   // ---- job tables ----
   "Status": "상태", "Owner": "소유자", "Group": "그룹", "Worker": "워커", "Progress": "진행",
-  "Waiting / running": "대기 / 실행 시간", "Finished": "종료", "Run time": "실행 시간", "Error": "오류",
+  "Waiting / running": "대기 / 실행 시간", "Finished": "종료", "Run time": "실행 시간", "Error": "오류", "Result": "결과", "{n} file(s)": "파일 {n}개",
   "(any)": "(아무 그룹)",
   "Run next": "다음 차례로", "Move up": "위로", "Move down": "아래로", "Move to the end": "맨 뒤로",
   "Pause": "일시정지", "Resume": "재개", "Keep it in the queue but skip it": "대기열에 두되 건너뜁니다",
@@ -58,7 +58,9 @@ export default {
   "{online}/{workers} online": "온라인 {online}/{workers}",
   "Idle workers": "유휴 워커", "Waiting": "대기", "Running": "실행 중", "Paused": "일시정지",
   "Dispatch stalled": "배정 멈춤", "Longest running": "최장 실행", "Cannot run": "실행 불가", "Consistency": "구성 일치",
-  "{n} job(s)": "{n}건", "{n} worker(s) differ": "워커 {n}대가 다름",
+  "{n} job(s)": "{n}건",
+  "No worker group yet: set up the first GPU worker (System → Workers) — it makes the first group.":
+    "아직 워커 그룹이 없습니다: 첫 GPU 워커를 설치하세요 (시스템 → 워커) — 그때 첫 그룹이 생깁니다.", "{n} worker(s) differ": "워커 {n}대가 다름",
 
   // ---- dashboard ----
   "My jobs": "내 작업", "My groups": "내 그룹", "My usage": "내 사용량", "Recent": "최근", "All history →": "전체 기록 →",
@@ -174,6 +176,7 @@ export default {
   "Instance name (the launcher's COMFY_LAUNCH_INSTANCE)": "인스턴스 이름 (런처의 COMFY_LAUNCH_INSTANCE)",
   "Hosts allowed to fetch the render (addresses, comma-separated)": "렌더를 받아 갈 수 있는 호스트 (주소, 쉼표로 구분)",
   "Platform": "플랫폼", "GPU worker": "GPU 워커", "UI worker": "UI 워커",
+  "pick at least one worker": "워커를 하나 이상 고르세요",
   "Artifact store <ART>": "아티팩트 저장소 <ART>", "Local root <LOCAL>": "로컬 루트 <LOCAL>", "Models directory": "모델 디렉터리",
   "Input directory": "입력 디렉터리", "Output directory": "출력 디렉터리", "User directory": "사용자 디렉터리", "Temp directory": "임시 디렉터리",
   "{name} (advanced)": "{name} (고급)",
@@ -225,6 +228,13 @@ export default {
   "unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway":
     "보호되지 않음: 어느 주소의 요청이든 받습니다 — COMFYFARM_ALLOW에 라우터와 게이트웨이 주소를 넣으세요",
   "differs from its group: ": "그룹과 다름: ",
+  "event stream down: no progress or previews": "이벤트 스트림 끊김: 진행률과 미리보기가 오지 않습니다",
+  "no group: receives no jobs": "그룹 없음: 작업을 받지 않습니다",
+  "does not meet its group's requirements: receives no jobs": "그룹의 요구 사항을 채우지 못함: 작업을 받지 않습니다",
+  "refuses the router: its allow-list does not have {addr} — add that address to COMFYFARM_ALLOW_NETWORK in the host's /etc/comfyfarm/<instance>.env (Set up again writes it) or to the profile's COMFYFARM_ALLOW, then restart the worker":
+    "라우터를 거부함: 허용 목록에 {addr}이(가) 없습니다 — 호스트의 /etc/comfyfarm/<instance>.env의 COMFYFARM_ALLOW_NETWORK(다시 설치하면 다시 씀)나 프로필의 COMFYFARM_ALLOW에 그 주소를 넣고 워커를 재시작하세요",
+  "refused {n} request(s), the last from {addr} — if that is this farm's gateway or router, add it to COMFYFARM_ALLOW_NETWORK in the host's /etc/comfyfarm/<instance>.env or to the profile's COMFYFARM_ALLOW":
+    "요청 {n}건을 거부함, 마지막은 {addr} — 이 팜의 게이트웨이나 라우터라면 호스트의 /etc/comfyfarm/<instance>.env의 COMFYFARM_ALLOW_NETWORK나 프로필의 COMFYFARM_ALLOW에 넣으세요",
   "custom nodes failed to import (missing on this worker, see its log): ":
     "커스텀 노드를 불러오지 못함 (이 워커에는 없음, 워커 로그 참고): ",
 
@@ -253,7 +263,8 @@ export default {
   "the artifact store on {name} is not usable: {detail}": "{name}의 아티팩트 저장소를 쓸 수 없습니다: {detail}",
   "Build the recipe on {name} first (no profile template in its store yet)": "먼저 {name}에서 레시피를 빌드하세요 (저장소에 아직 프로필 견본이 없음)",
   "no template is usable: {names}": "쓸 수 있는 견본이 없습니다: {names}",
-  "profile {name} exists — kept": "프로필 {name}이(가) 이미 있어 그대로 둡니다",
+  "({names} existed already — kept)": "({names}은(는) 이미 있어 그대로 둠)",
+  "{names}: these profiles exist already — this template made them. Roll them out as they are; for new node packs or a new recipe, build again (the checkbox below the template).": "{names}: 이 견본으로 만든 프로필이 이미 있습니다. 그대로 롤아웃하세요. 노드팩이나 레시피가 바뀌었다면 다시 빌드하세요(견본 아래 체크박스).",
   "Allow builds from the dashboard on this host": "이 호스트에서 대시보드 빌드 허용", "Builds": "빌드",
   "Update the worker": "워커 갱신",
   "Restart {worker}? It finishes its running job first (a rollout of its own profile).": "{worker}를 재시작할까요? 실행 중인 작업을 먼저 끝냅니다 (자기 프로필 롤아웃).",
@@ -275,7 +286,7 @@ export default {
   "what it runs; a later change goes through a rollout": "이 워커가 실행할 것. 나중에 바꿀 때는 롤아웃으로 합니다",
   "What one build left in the artifact store: ComfyUI, a venv and the node sets for the GPU workers and the UI worker. The newest is last.": "빌드 한 번이 아티팩트 저장소에 남긴 것: GPU 워커와 UI 워커용 ComfyUI, venv, 노드 세트. 가장 새것이 마지막입니다.",
   "Optional: addresses the workers take requests from, added to what setup allowed on each host (the router's address). Leave it empty unless a worker reaches the router or the gateway over another address.": "선택: 워커가 요청을 받을 주소. 설치가 각 호스트에 허용한 주소(라우터 주소)에 더해집니다. 워커가 다른 주소로 라우터나 게이트웨이에 닿는 경우가 아니면 비워 두세요.",
-  "Build {recipe} again on {name} first": "먼저 {name}에서 {recipe}를 다시 빌드",
+  "Build the chosen template's recipe again on {name} first": "먼저 {name}에서 고른 견본의 레시피를 다시 빌드",
   "Makes a new template instead of using one of these: after adding or updating node packs, or after a ComfyFarm upgrade that changed the recipe. The build takes minutes; its profiles then roll out like any.": "여기 있는 견본 대신 새 견본을 만듭니다: 노드팩을 추가하거나 업데이트한 뒤, 또는 ComfyFarm 업그레이드로 레시피가 바뀐 뒤에 쓰세요. 빌드는 몇 분 걸리고, 만든 프로필은 다른 프로필처럼 롤아웃합니다.",
   "no group yet: this one is made with the worker (jobs go to a group's workers; users get groups)": "아직 그룹이 없습니다: 이 이름으로 워커와 함께 만듭니다 (작업은 그룹의 워커로 가고, 사용자는 그룹 단위로 권한을 받습니다)",
   "The UI worker is ready": "UI 워커 준비",

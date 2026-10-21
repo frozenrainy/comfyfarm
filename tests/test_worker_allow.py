@@ -134,3 +134,40 @@ def test_a_refused_peer_is_counted_and_shown():
     assert d["refused"]["count"] == 2 and d["refused"]["last_peer"] == "172.20.0.4"
     w = security_warnings({"extension": {"installed": True, "ws_fix": True, **d}})
     assert any("refused 2 request(s), the last from 172.20.0.4" in x and "COMFYFARM_ALLOW_NETWORK" in x for x in w)
+
+
+async def test_a_worker_that_refuses_the_router_is_named_not_busy(dsn, monkeypatch):
+    """QA (dev.11): a worker whose allow-list lacked the router's address answered every probe with 403 and was shown
+    as 'busy unresponsive' — nothing said its allow-list was the reason, or which address to add."""
+    from aiohttp import web
+    monkeypatch.setattr(allow, "LOOPBACK", ())               # the test's router talks over loopback; refuse it too
+    app_w = web.Application(middlewares=[allow.make_middleware(allow.Policy("192.0.2.5"))])
+    async def queue(request):
+        return web.json_response({})
+    app_w.router.add_get("/queue", queue)
+    runner = web.AppRunner(app_w)
+    await runner.setup()
+    from conftest import free_port
+    port = free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    try:
+        app = create_app(fast_settings(dsn))
+        async with app.router.lifespan_context(app):
+            r = app.state.router
+            ok, kind, detail = await r.adapter.probe(f"http://127.0.0.1:{port}")
+            assert (ok, kind, detail) == (False, "refused", "127.0.0.1")
+            await add_worker(r, f"http://127.0.0.1:{port}", name="w-refusing")
+            for _ in range(50):
+                await r.health.tick()
+                async with r.db.conn() as c:
+                    st = await c.fetchrow("SELECT state, failure_kind FROM workers WHERE name = 'w-refusing'")
+                if st["state"] == "offline":
+                    break
+                await asyncio.sleep(0.1)
+            assert dict(st) == {"state": "offline", "failure_kind": "refused"}
+            H = {"X-ComfyFarm-User": "tester", "X-ComfyFarm-Roles": "admin"}
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+                w = next(x for x in (await c.get("/api/admin/workers", headers=H)).json() if x["name"] == "w-refusing")
+            assert any(x.startswith("refuses the router: its allow-list does not have 127.0.0.1 — ") for x in w["warnings"])
+    finally:
+        await runner.cleanup()

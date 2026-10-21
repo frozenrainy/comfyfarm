@@ -480,11 +480,16 @@ async def test_first_administrator_from_the_login_page(dsn, caplog):
 
             async def setup(**kw):
                 form = {"code": code, "username": "boss", "password": "password-1", "again": "password-1", **kw}
-                return (await c.post(f"{gw}/comfyfarm/setup", data=form)).headers["location"]
-            assert (await setup(code="AAAA-BBBB-CCCC")).endswith("s=code")
-            assert (await setup(again="password-2")).endswith("s=differ")
-            assert (await setup(password="short", again="short")).endswith("s=short")
-            assert (await setup(username="-x")).endswith("s=name")
+                r = await c.post(f"{gw}/comfyfarm/setup", data=form)
+                return r.headers["location"] if r.status_code == 303 else r.text
+            # a mistake brings the form back with the code and the name as typed (QA: both were gone after each one)
+            page = await setup(code="AAAA-BBBB-CCCC")
+            assert "Wrong setup code" in page and 'value="AAAA-BBBB-CCCC"' in page and 'value="boss"' in page
+            page = await setup(again="password-2")
+            assert "The passwords differ" in page and f'value="{code}"' in page and "password-1" not in page
+            assert "at least 8 characters" in await setup(password="short", again="short")
+            page = await setup(username='-x"><b id=injected>')
+            assert "User name:" in page and "<b id=injected>" not in page and 'value="-x&quot;&gt;&lt;b id=injected&gt;"' in page
             assert await setup(code=f" {code.lower()} ") == "/comfyfarm/dashboard/"     # typed from a log: case, spaces
             me = (await c.get(f"{gw}/api/farm/me")).json()
             assert me["user"] == "boss" and me["admin"]

@@ -52,6 +52,11 @@ class Refused(Exception):
     pass
 
 
+def say(line: str) -> None:
+    """One line per request start and end: `docker compose logs builder` tells what it did and when."""
+    print(f"comfyfarm builder: {line}", flush=True)
+
+
 class Builder:
     def __init__(self, requests: str, status: str, art: str, share: str, uv: str | None, node_sources: list[str],
                  platform_tag: str | None = None, runner=subprocess.run):
@@ -126,10 +131,14 @@ class Builder:
 
     def handle(self, rid: str) -> dict:
         st = {"id": rid, "state": "running", "started": now()}
+        t0 = time.monotonic()
         try:
             req = self.take(rid)
             st["kind"] = req.get("kind")
             write_json(os.path.join(self.status, rid + ".json"), st)
+            say(f"{rid}: {req.get('kind')} " + (f"{req.get('recipe')} ({','.join(req.get('roles') or publish.ROLES)}, "
+                                               f"{len(req.get('nodes') or [])} node pack(s))" if req.get("kind") == "build"
+                                               else f"{req.get('repo')} {req.get('ref') or 'HEAD'}"))
             if req.get("kind") == "resolve":
                 st.update(self.resolve(req))
             elif req.get("kind") == "build":
@@ -143,6 +152,8 @@ class Builder:
             st.update(state="failed", error=f"{type(e).__name__}: {e}")
         st["finished"] = now()
         write_json(os.path.join(self.status, rid + ".json"), st)
+        say(f"{rid}: {st['state']} after {time.monotonic() - t0:.0f} s"
+            + (f" — template {st['template']}" if st.get("template") else f" — {st['error']}" if st.get("error") else ""))
         return st
 
     def resolve(self, req: dict) -> dict:

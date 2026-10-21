@@ -237,13 +237,21 @@ class ComfyAdapter:
             return False
 
     async def probe(self, base_url: str) -> tuple[bool, str | None, str]:
-        """Health probe: (ok, failure_kind 'busy'|'dead'|None, detail)."""
+        """Health probe: (ok, failure_kind 'busy'|'dead'|'refused'|None, detail). 'refused': the worker extension's
+        allow-list turned the router away — up and answering, but not busy; the detail is the address it saw (0.8)."""
         try:
             r = await self.http.get(f"{base_url}/queue", timeout=QUERY_TIMEOUT)
         except Exception as e:
             return False, classify_exception(e), _ename(e)
         if r.status_code == 200:
             return True, None, "ok"
+        if r.status_code == 403:
+            try:
+                body = r.json()
+            except ValueError:
+                body = None
+            if isinstance(body, dict) and str(body.get("error", "")).startswith("comfyfarm:"):
+                return False, "refused", str(body.get("peer") or "")
         return False, "busy", f"HTTP {r.status_code}"
 
     async def capabilities(self, base_url: str) -> dict | None:

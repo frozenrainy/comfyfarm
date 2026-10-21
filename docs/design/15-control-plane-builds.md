@@ -117,3 +117,25 @@ puts those directories, the published venv's own, on `LD_LIBRARY_PATH` for Comfy
 - The host check runs each GPU venv's torch against the GPU (a driver older than the wheel's CUDA imports fine and
   then finds no GPU).
 - Start on a worker that has a profile and is not running; a running one changes through a rollout.
+
+## A first day, run by someone new (0.1.0-dev.11)
+
+The install guide followed from the top on a clean host, with the defaults, by someone who had not seen the project.
+What they stumbled on, and what changed:
+
+- *From a recipe* listed templates by name, not age, and preselected an old one; after a build it did not pick the new
+  one; *Build again* named the first recipe, not the chosen template's. Now newest last and preselected, the built one
+  picked, the chosen one rebuilt; a second click says the profiles exist and why.
+- The queue panel of the stock frontend dropped every finished job: the preview item lacked `nodeId` and `mediaType`.
+  The dashboard's history now shows the first saved file of each job.
+- A worker whose allow-list lacked the router's address was shown as *busy unresponsive*. The worker extension (0.8)
+  says which address it saw; the worker goes offline as *refused*, and the dashboard names the address to add.
+- An empty or missing models directory surfaced only as a failed job. Setup makes it; the host check warns while it is
+  empty (the UI worker needs none).
+- The UI worker's host check printed nothing: its uid has no passwd entry in the container.
+- A replaced setup command printed a Python traceback; it now says the command was replaced or has expired.
+- *Start rollout* ticked every worker for any profile; it ticks the workers of the profile's role. *Set up a worker*
+  offers the role's profiles and guesses the GPU from them; the group a first GPU worker makes is called `gpu`.
+- The router's log was one line per HTTP request (httpx); the builder said nothing about its requests. Both fixed.
+- The first-administrator form forgot the setup code and the name after a mistake.
+- Outputs are shared between users by design of stock ComfyUI; the security design says so (09).

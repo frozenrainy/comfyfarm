@@ -5,6 +5,23 @@ import { act, ago, api, button, dur, h, namedRow, noteInput, progressOf, setBar,
 
 const jobUrl = (pid, op) => `/api/farm/jobs/${pid}/${op}`;
 const groupLabel = (j) => j.group ?? (j.group_id == null ? t("(any)") : `#${j.group_id}`);
+const viewUrl = (f, extra = "") => "/api/view?" + new URLSearchParams({ filename: f.filename, subfolder: f.subfolder || "",
+                                                                      type: f.type || "output" }) + extra;
+
+// The first file a job saved: a small picture of an image, a link to anything else (the gateway serves both).
+function showResult(td, j) {
+  const f = j.preview;
+  const key = f ? `${f.type}/${f.subfolder}/${f.filename}/${j.outputs}` : String(j.outputs ?? "");
+  if (td._key === key) return;
+  td._key = key;
+  td.replaceChildren();
+  if (!f) { if (j.outputs) td.append(t("{n} file(s)", { n: j.outputs })); return; }
+  const image = f.mediaType === "images" && !/\.(mp4|webm|mov|gif)$/i.test(f.filename);
+  td.append(h("a", { href: viewUrl(f), target: "_blank", rel: "noopener", title: f.filename },
+    image ? h("img", { class: "thumb", src: viewUrl(f, "&preview=webp;60"), alt: f.filename, loading: "lazy" })
+          : `▶ ${f.filename}`));
+  if (j.outputs > 1) td.append(h("span", { class: "muted" }, ` +${j.outputs - 1}`));
+}
 
 // opts: { owner: show owner column, reorder: admin reorder buttons, refresh, list: () => current items }
 export function queueTable(opts) {
@@ -64,10 +81,11 @@ export function queueTable(opts) {
 }
 
 export function historyTable(opts) {
-  const cols = ["finished", "status", ...(opts.owner ? ["owner"] : []), "group", "worker", "run", "error", "note", "actions"];
-  const head = { finished: t("Finished"), status: t("Status"), owner: t("Owner"), group: t("Group"), worker: t("Worker"),
-                 run: t("Run time"), error: t("Error"), note: t("Note"), actions: "" };
-  const cls = { finished: "num", run: "num", error: "err", actions: "actions" };
+  const cols = ["finished", "status", "result", ...(opts.owner ? ["owner"] : []), "group", "worker", "run", "error", "note",
+                "actions"];
+  const head = { finished: t("Finished"), status: t("Status"), result: t("Result"), owner: t("Owner"), group: t("Group"),
+                 worker: t("Worker"), run: t("Run time"), error: t("Error"), note: t("Note"), actions: "" };
+  const cls = { finished: "num", result: "result", run: "num", error: "err", actions: "actions" };
   const tbl = table(cols.map((c) => [head[c], cls[c]]));
   function build() {
     const tr = namedRow(cols, cls);
@@ -83,6 +101,7 @@ export function historyTable(opts) {
     setText(c.finished, when(j.finished_at));
     c.finished.title = j.finished_at ? new Date(j.finished_at).toLocaleString(locale()) : "";
     setPill(c.status, j.status);
+    showResult(c.result, j);
     if (c.owner) setText(c.owner, j.owner);
     setText(c.group, groupLabel(j));
     setText(c.worker, j.worker || "");
@@ -96,7 +115,12 @@ export function historyTable(opts) {
 
 // Group cards: health numbers of the groups the user may use.
 export function groupCards(groups) {
-  if (!groups.length) return [h("p", { class: "muted" }, t("You may not use any worker group yet. Ask an administrator."))];
+  if (!groups.length) {
+    // an administrator of a new farm is the one to ask: the first group comes with the first GPU worker
+    return [h("p", { class: "muted" }, document.body.classList.contains("is-admin")
+      ? t("No worker group yet: set up the first GPU worker (System → Workers) — it makes the first group.")
+      : t("You may not use any worker group yet. Ask an administrator."))];
+  }
   return groups.map((g) => {
     const hh = g.health || {};
     const stall = hh.dispatch_idle_seconds;

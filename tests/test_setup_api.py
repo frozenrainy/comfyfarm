@@ -274,3 +274,36 @@ async def test_correcting_a_setup_replaces_it(farm, tmp_path):
     assert (await c.post(f"/api/admin/setups/{new['id']}/finished?worker_id={w['id']}", headers=H)).status_code == 200
     assert (await c.post("/api/admin/setups", json=spec(name="other", instance="gpu-9", host="10.0.0.29",
                                                         replaces=new["id"]), headers=H)).status_code == 409
+
+
+def test_the_operator_command_says_what_went_wrong(tmp_path):
+    """QA (dev.11): running a command that setting up again had replaced printed a urllib traceback (HTTP 404)."""
+    import hashlib
+    import http.server
+    import subprocess
+    import threading
+    from comfyfarm.core import hostsetup
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/ok" else 404)
+            self.end_headers()
+            self.wfile.write(b"print('hi')\n" if self.path == "/ok" else b"{}")
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base, good = f"http://127.0.0.1:{srv.server_port}", hashlib.sha256(b"print('hi')\n").hexdigest()
+    try:
+        def fetch(url, sha):
+            p = subprocess.run(["sh", "-c", hostsetup.operator_command(url, sha).split(" && ")[0]], capture_output=True,
+                               text=True, timeout=30)
+            return p.returncode, p.stderr.strip()
+        rc, err = fetch(base + "/gone", good)
+        assert rc != 0 and err.startswith("comfyfarm: the router answered 404 — this command was used, replaced or has "
+                                          "expired") and "Traceback" not in err
+        assert fetch(base + "/ok", "0" * 64) == (1, "comfyfarm: checksum mismatch: not the script the dashboard made")
+        assert fetch(base + "/ok", good) == (0, "")
+    finally:
+        srv.shutdown()

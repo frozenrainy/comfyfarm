@@ -155,16 +155,17 @@ async def test_prefs_and_password(farm):
 
 
 # ---- statistics and history --------------------------------------------------------------------------------------
-async def finished_job(r, owner, status, *, finished_ago_h, run_s, wait_s, worker_id=None, note=None, error=None):
+async def finished_job(r, owner, status, *, finished_ago_h, run_s, wait_s, worker_id=None, note=None, error=None,
+                       outputs=None):
     now = dt.datetime.now(dt.timezone.utc)
     fin = now - dt.timedelta(hours=finished_ago_h)
     start = fin - dt.timedelta(seconds=run_s)
     created = start - dt.timedelta(seconds=wait_s)
     async with r.db.conn() as c:
         return await c.fetchval(
-            "INSERT INTO jobs(prompt_id, status, priority, owner, created_at, dispatched_at, started_at, finished_at, worker_id, note, error) "
-            "VALUES ($1, $2, 0, $3, $4, $5, $5, $6, $7, $8, $9) RETURNING prompt_id",
-            uuid.uuid4(), status, owner, created, start, fin, worker_id, note, error)
+            "INSERT INTO jobs(prompt_id, status, priority, owner, created_at, dispatched_at, started_at, finished_at, worker_id, note, error, "
+            "outputs) VALUES ($1, $2, 0, $3, $4, $5, $5, $6, $7, $8, $9, $10) RETURNING prompt_id",
+            uuid.uuid4(), status, owner, created, start, fin, worker_id, note, error, outputs)
 
 
 async def test_stats_periods_and_numbers(farm):
@@ -214,6 +215,19 @@ async def test_history_search_filters_and_pages(farm):
     old = (dt.date.today() - dt.timedelta(days=400)).isoformat()
     assert (await ok(await c.get(f"/api/farm/history?start={old}&end={old}", headers=H("ann"))))["total"] == 0
     assert (await c.get("/api/farm/history?status=running", headers=H("ann"))).status_code == 400
+
+
+async def test_history_shows_the_first_saved_file(farm):
+    r, c = farm
+    await finished_job(r, "ann", "completed", finished_ago_h=1, run_s=10, wait_s=1, outputs={
+        "7": {"text": ["a caption"]},
+        "9": {"images": [{"filename": "shot_00001_.png", "subfolder": "ann", "type": "output"},
+                         {"filename": "shot_00002_.png", "subfolder": "ann", "type": "output"}]}})
+    await finished_job(r, "ann", "failed", finished_ago_h=2, run_s=5, wait_s=1, error={"message": "boom"})
+    done, failed = (await ok(await c.get("/api/farm/history", headers=H("ann"))))["jobs"]
+    assert done["outputs"] == 3
+    assert done["preview"] == {"filename": "shot_00001_.png", "subfolder": "ann", "type": "output", "mediaType": "images"}
+    assert failed["outputs"] == 0 and "preview" not in failed
 
 
 async def test_queue_badge_summary(farm):

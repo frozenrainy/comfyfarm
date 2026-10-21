@@ -34,17 +34,26 @@ export function rollout(root, { refresh }) {
   const startBtn = button(t("Start rollout"), async () => {
     const ready = insts.filter((i) => i.instance);
     if (!profiles.length || !ready.length) return act(async () => { throw new Error(t("needs a profile and at least one configured instance")); });
+    // a UI profile (--cpu) goes to the UI worker, a GPU profile to the GPU workers: only those are ticked
+    const forUi = (pid) => (profiles.find((p) => String(p.id) === pid)?.flags || []).includes("--cpu");
+    const fitting = (pid) => ready.filter((i) => !i.maintenance && (i.instance.role === "ui") === forUi(pid)).map((i) => String(i.worker_id));
+    const gpuProfiles = profiles.filter((p) => !(p.flags || []).includes("--cpu"));
+    const first = String((gpuProfiles.length ? gpuProfiles : profiles).reduce((a, b) => (b.id > a.id ? b : a)).id);   // the newest
     const v = await formDialog(t("Start a rollout"), [
-      { name: "profile", label: t("Roll out profile"), type: "select", options: profiles.map((p) => ({ value: String(p.id), label: p.name })) },
+      { name: "profile", label: t("Roll out profile"), type: "select", value: first,
+        options: profiles.map((p) => ({ value: String(p.id), label: p.name + ((p.flags || []).includes("--cpu") ? ` (${t("UI worker")})` : "") })),
+        onChange: (pid, set) => set("workers", fitting(pid)) },
       { name: "workers", label: t("Workers (one at a time unless the window is larger)"), type: "checkboxes",
-        value: ready.filter((i) => !i.maintenance).map((i) => String(i.worker_id)),
-        options: ready.map((i) => ({ value: String(i.worker_id), label: t("{worker} — now {profile} ({badge})", { worker: i.worker, profile: i.profile ?? t("unassigned"), badge: t(i.badge) }) })) },
+        value: fitting(first),
+        options: ready.map((i) => ({ value: String(i.worker_id), label: t("{worker} — now {profile} ({badge})", { worker: i.worker, profile: i.profile ?? t("unassigned"), badge: t(i.badge) })
+          + (i.instance.role === "ui" ? ` · ${t("UI worker")}` : "") })) },
       { name: "window", label: t("Window (workers out of service at the same time)"), type: "number", value: 1, min: 1 },
       { name: "drain", label: t("Give up draining after (minutes, 0 = wait for the running job however long)"), type: "number", value: 0, min: 0 },
       { name: "start", label: t("Wait for the new version at most (minutes)"), type: "number", value: 15, min: 1 },
       { name: "smoke", label: t("Verify"), type: "checkbox", text: t("also run a tiny smoke workflow on each worker") },
     ], t("Start"));
     if (!v) return;
+    if (!v.workers.length) return toast(t("pick at least one worker"), true);
     const options = { start_timeout: (v.start || 15) * 60, smoke: v.smoke };
     if (v.drain) options.drain_timeout = v.drain * 60;
     const res = await act(() => api("POST", "/api/admin/rollouts", { profile_id: Number(v.profile), worker_ids: v.workers.map(Number),
@@ -200,19 +209,22 @@ export function rollout(root, { refresh }) {
     let got;
     try { got = await storeTemplates(); } catch (e) { return toast(e.message, true); }
     const { all, buildable, via } = got;
-    const templates = all.filter((x) => !(x.missing || []).length), stale = all.filter((x) => (x.missing || []).length);
+    const age = (a, b) => String(a.created || "").localeCompare(String(b.created || ""));     // the store lists by name
+    const templates = all.filter((x) => !(x.missing || []).length).sort(age), stale = all.filter((x) => (x.missing || []).length);
     const where = via ? via.worker : t("the control plane");
     if (!templates.length && !buildable.length) {
       return toast(stale.length ? t("no template is usable: {names}", { names: stale.map((x) => `${x.template} ${t("(artifacts missing)")}`).join(", ") })
                                 : got.detail || t("no template in the artifact store yet"), true);
     }
-    const buildFirst = async () => {
-      if (!via) return buildOnPlane();
+    const buildFirst = async (recipe = null) => {
+      if (!via) return buildOnPlane(recipe);
       const b = await formDialog(t("Build a recipe on {name}", { name: where }), [
-        { name: "recipe", label: t("Recipe"), type: "select", value: buildable[0], options: buildable.map((x) => ({ value: x, label: x })),
+        { name: "recipe", label: t("Recipe"), type: "select", value: buildable.includes(recipe) ? recipe : buildable[0],
+          options: buildable.map((x) => ({ value: x, label: x })),
           hint: t("the host downloads ComfyUI, PyTorch and the nodes and publishes them to its artifact store — minutes, mostly the PyTorch download") },
       ], t("Build"));
-      if (b && await runBuild(via, b.recipe)) return fromRecipe();
+      const built = b && await runBuild(via, b.recipe);
+      if (built) return fromRecipe(typeof built === "string" ? built : null);
     };
     if (!templates.length) return buildFirst();            // nothing published yet: build, then come back here
     let allow = "";
@@ -222,7 +234,8 @@ export function rollout(root, { refresh }) {
       if (/^[0-9.]+$/.test(host)) allow = host;                 // the allow-list takes addresses, not names
     } catch { /* a guess only */ }
     const v = await formDialog(via ? t("Profiles from a recipe (read through {name})", { name: via.worker }) : t("Profiles from a recipe"), [
-      { name: "template", label: t("Template"), type: "select", value: pick || templates[templates.length - 1].template,
+      { name: "template", label: t("Template"), type: "select",
+        value: templates.some((x) => x.template === pick) ? pick : templates[templates.length - 1].template,
         tip: t("What one build left in the artifact store: ComfyUI, a venv and the node sets for the GPU workers and the UI worker. The newest is last."),
         options: templates.map((x) => ({ value: x.template, label: (x.about ? `${x.template} — ${x.about}` : x.template)
           + ((x.roles || ["gpu", "ui"]).length < 2 ? ` (${(x.roles || []).map((r) => r === "ui" ? t("UI worker") : t("GPU workers")).join("")})` : "") })) },
@@ -230,13 +243,13 @@ export function rollout(root, { refresh }) {
         tip: t("Optional: addresses the workers take requests from, added to what setup allowed on each host (the router's address). Leave it empty unless a worker reaches the router or the gateway over another address."),
         hint: t("the addresses the workers take requests from: the router's and the gateway's, as the workers see them") },
       ...(buildable.length ? [{ name: "build", type: "checkbox", value: false, label: t("Build"),
-                               text: t("Build {recipe} again on {name} first", { recipe: buildable[0], name: where }),
+                               text: t("Build the chosen template's recipe again on {name} first", { name: where }),
                                tip: t("Makes a new template instead of using one of these: after adding or updating node packs, or after a ComfyFarm upgrade that changed the recipe. The build takes minutes; its profiles then roll out like any.") }] : []),
     ], t("Create the profiles"), { wide: true });
     if (!v) return;
-    if (v.build) return buildFirst();
     const tpl = templates.find((x) => x.template === v.template);
-    const made = [];
+    if (v.build) return buildFirst(tpl?.recipe);
+    const made = [], kept = [];
     for (const [role, what] of [["gpu", t("GPU workers")], ["ui", t("UI worker")]]) {
       if (!tpl[role]) continue;                                // a template may hold one half (the first start's: UI only)
       const name = `${tpl.template}-${role}`, p = tpl[role];
@@ -246,12 +259,17 @@ export function rollout(root, { refresh }) {
           env: { ...(p.env || {}), ...(v.allow.trim() ? { COMFYFARM_ALLOW: v.allow.trim() } : {}) }, note: `${what} · ${tpl.template}` });
         made.push(name);
       } catch (e) {
-        if (e.status === 409) { toast(t("profile {name} exists — kept", { name })); continue; }   // a second click, or half of a pair
+        if (e.status === 409) { kept.push(name); continue; }      // a second click, or half of a pair
         toast(e.message, true);
         return refresh();
       }
     }
-    if (made.length) toast(t("Profiles created: {names} — roll them out (UI worker first), or pick them in Set up a worker", { names: made.join(", ") }));
+    if (made.length) {
+      toast(t("Profiles created: {names} — roll them out (UI worker first), or pick them in Set up a worker", { names: made.join(", ") })
+            + (kept.length ? " " + t("({names} existed already — kept)", { names: kept.join(", ") }) : ""));
+    } else if (kept.length) {
+      toast(t("{names}: these profiles exist already — this template made them. Roll them out as they are; for new node packs or a new recipe, build again (the checkbox below the template).", { names: kept.join(", ") }));
+    }
     refresh();
   }
   // A build, followed until done or failed. On a worker host (its setup allowed builds) the host answers "queued" until
@@ -349,12 +367,13 @@ export function rollout(root, { refresh }) {
     act(() => api("PATCH", `/api/admin/node-packs/${p.id}`, { ui: !!v.ui, requirements_file: v.requirements_file.trim(),
       constraints: words(v.constraints), note: v.note }), t("Saved — Build to use it"), refresh);
   }
-  async function buildOnPlane() {
+  async function buildOnPlane(recipe = null) {
     if (!builder?.configured) return toast(t("no control-plane builder here — build on a worker host (From a recipe) or with publish.py"), true);
     if (!builder.up) return toast(t("the builder is not running (docker compose ps builder)"), true);
     // the recipe for the GPU the farm's workers have, when they say (their ComfyUI reports cuda or rocm)
     const backends = new Set(insts.filter((i) => i.instance && i.instance.role !== "ui").map((i) => i.backend).filter(Boolean));
-    const guess = builder.recipes.find((r) => [...backends].some((b) => r.startsWith(b))) || builder.recipes[0];
+    const guess = builder.recipes.includes(recipe) ? recipe
+                : builder.recipes.find((r) => [...backends].some((b) => r.startsWith(b))) || builder.recipes[0];
     const v = await formDialog(t("Build on the control plane"), [
       { name: "recipe", label: t("Recipe (the kind of GPU)"), type: "select", value: guess,
         options: builder.recipes.map((x) => ({ value: x, label: builder.about?.[x] ? `${x} — ${builder.about[x]}` : x })),

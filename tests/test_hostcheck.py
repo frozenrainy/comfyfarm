@@ -260,3 +260,37 @@ def test_the_gpu_probe_reports_an_old_driver_for_real(tmp_path):
     assert "comfyfarm-gpu-error: The NVIDIA driver on your system is too old (found version 12020). (torch built for CUDA 13.0)" in p.stdout
     p = subprocess.run([sys.executable, "-c", captured["probe"]], capture_output=True, text=True, env={"PYTHONPATH": str(tmp_path)})
     assert "gpu-error" not in p.stdout and "torch 2.14.1+cu130" in p.stdout
+
+
+def test_a_uid_without_a_passwd_entry_still_checks(monkeypatch):
+    # the UI worker container runs as the workers' uid, which its image's /etc/passwd does not list: the check printed
+    # nothing (a KeyError before any output) and the dashboard showed an empty result
+    def missing(uid):
+        raise KeyError(f"getpwuid(): uid not found: {uid}")
+    monkeypatch.setattr(hostcheck.pwd, "getpwuid", missing)
+    monkeypatch.setenv("USER", "comfyfarm")
+    assert hostcheck.Check({}, {"container": True}).user == "comfyfarm"
+    monkeypatch.delenv("USER")
+    assert hostcheck.Check({}, {"container": True}).user == f"uid {os.getuid()}"
+
+
+def test_models_missing_empty_or_there(tmp_path, router):
+    out, paths = check(tmp_path / "a", router)
+    models = lambda o: next(r for r in o if r["name"] == "models")            # noqa: E731
+    assert models(out)["level"] == "WARN" and "empty" in models(out)["detail"]
+    # ComfyUI's own tree holds empty placeholders only: still nothing to load
+    os.makedirs(os.path.join(paths["models"], "checkpoints"))
+    open(os.path.join(paths["models"], "checkpoints", "put_checkpoints_here"), "w").close()
+    root, _, art, local = host(tmp_path / "b")
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    run = lambda cfg: hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()     # noqa: E731
+    assert models(run({"gpu": "amd", "paths": paths}))["level"] == "WARN"
+    with open(os.path.join(paths["models"], "checkpoints", "sd15.safetensors"), "wb") as f:
+        f.write(b"x")
+    assert models(run({"gpu": "amd", "paths": paths}))["level"] == "OK"
+    # the UI worker needs none
+    empty = dict(paths, models=str(tmp_path / "empty-models")); os.makedirs(empty["models"])
+    assert models(run({"gpu": "none", "role": "ui", "paths": empty}))["level"] == "OK"
+    gone = dict(paths, models=str(tmp_path / "no-models"))
+    m = models(run({"gpu": "amd", "paths": gone}))
+    assert m["level"] == "FAIL" and "mount the models there" in m["detail"]

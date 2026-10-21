@@ -435,6 +435,10 @@ def directories(h: Host, spec: dict):
             except KeyError:
                 owner = f"uid {st.st_uid}"
             h.log(f"using the existing {key} directory {path} (owner {owner}, {oct(st.st_mode & 0o777)[2:]}, left as it is)")
+    # the models: read by the service account, written by whoever places them (root here; a share keeps its own)
+    if paths.get("models") and h.mkdir(paths["models"], 0o755):
+        h.log(f"{paths['models']} is new and empty: put the models there (checkpoints/, loras/, vae/ … as in ComfyUI's "
+              "models directory) or mount the shared models directory at this path")
 
 
 def ssh_access(h: Host, spec: dict, home: str):

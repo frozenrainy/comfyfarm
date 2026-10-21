@@ -73,8 +73,8 @@ LOGIN_FORM = """<form method=post action=/comfyfarm/login><h1>ComfyFarm</h1>{msg
 {user_field}<input name=password type=password placeholder="{password}" autocomplete=current-password><button>{login}</button></form>"""
 # A fresh install (no administrator): the first one is made here with the setup code from the router's log.
 SETUP_FORM = """<form method=post action=/comfyfarm/setup><h1>{title}</h1><p class=note>{note}</p>{msg}
-<input name=code placeholder="{code}" autocomplete=off autofocus spellcheck=false>
-<input name=username placeholder="{user}" autocomplete=username>
+<input name=code placeholder="{code}" value="{code_v}" autocomplete=off autofocus spellcheck=false>
+<input name=username placeholder="{user}" value="{user_v}" autocomplete=username>
 <input name=password type=password placeholder="{password}" autocomplete=new-password>
 <input name=again type=password placeholder="{again}" autocomplete=new-password><button>{create}</button></form>"""
 IDENTITY_HEADERS = {"x-comfyfarm-user", "x-comfyfarm-roles", "x-comfyfarm-gateway", "comfy-user",
@@ -298,12 +298,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         needed = await first_admin_needed() if s.provider == "local" else False
         if needed:
             err = request.query_params.get("s")
-            msg = f'<p class=bad>{tx["s_" + err]}</p>' if err in ("code", "differ", "short", "name") else ""
-            if request.query_params.get("e") == "2":
-                msg = f'<p class=bad>{tx["down"]}</p>'
-            return HTMLResponse(LOGIN_PAGE.format(lang=lang, form=SETUP_FORM.format(
-                title=tx["setup"], note=html.escape(tx["setup_note"]), msg=msg, code=tx["code"], user=tx["user"],
-                password=tx["password"], again=tx["again"], create=tx["create"])))
+            return setup_page(request, "down" if request.query_params.get("e") == "2" else err)
         err = request.query_params.get("e")
         note = tx["pw"] if request.query_params.get("m") == "pw" else ""
         nxt = safe_next(request.query_params.get("next"))
@@ -318,6 +313,17 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         return HTMLResponse(LOGIN_PAGE.format(lang=lang, form=LOGIN_FORM.format(
             next=html.escape(nxt), user_field=user_field, msg=msg, password=tx["password"], login=tx["login"])))
 
+    def setup_page(request: Request, err: str | None, form=None) -> HTMLResponse:
+        """The first-administrator form; after a mistake it comes back with the code and the name as typed (only the
+        passwords are typed again) — the code is long and comes from a log."""
+        tx = LOGIN_TEXT[login_lang(request)]
+        key = "down" if err == "down" else f"s_{err}" if err in ("code", "differ", "short", "name") else None
+        msg = f'<p class=bad>{tx[key]}</p>' if key else ""
+        kept = {k: html.escape(str((form or {}).get(k, ""))[:200], quote=True) for k in ("code", "username")}
+        return HTMLResponse(LOGIN_PAGE.format(lang=login_lang(request), form=SETUP_FORM.format(
+            title=tx["setup"], note=html.escape(tx["setup_note"]), msg=msg, code=tx["code"], user=tx["user"],
+            password=tx["password"], again=tx["again"], create=tx["create"], code_v=kept["code"], user_v=kept["username"])))
+
     async def setup(request: Request):
         """The first administrator (fresh install): the router checks the setup code; on success the new administrator
         is logged in like after a password login."""
@@ -325,17 +331,17 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             return Response(status_code=403)
         form = await request.form()
         if form.get("password", "") != form.get("again", ""):
-            return RedirectResponse("/comfyfarm/login?s=differ", status_code=303)
+            return setup_page(request, "differ", form)
         try:
             r = await http.post(f"{s.router_url}/api/internal/first-admin", headers={"x-comfyfarm-gateway-login": s.secret},
                                 json={k: form.get(k, "") for k in ("code", "username", "password")})
         except httpx.HTTPError:
-            return RedirectResponse("/comfyfarm/login?e=2", status_code=303)
+            return setup_page(request, "down", form)
         if r.status_code == 403:
-            return RedirectResponse("/comfyfarm/login?s=code", status_code=303)
+            return setup_page(request, "code", form)
         if r.status_code == 400:
             detail = str((r.json() if r.headers.get("content-type", "").startswith("application/json") else {}).get("detail", ""))
-            return RedirectResponse(f"/comfyfarm/login?s={'short' if detail.startswith('password') else 'name'}", status_code=303)
+            return setup_page(request, "short" if detail.startswith("password") else "name", form)
         if r.status_code != 200:
             return RedirectResponse("/comfyfarm/login", status_code=303)      # an administrator exists: the login form
         d = r.json()

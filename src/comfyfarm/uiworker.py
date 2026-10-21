@@ -162,8 +162,8 @@ def make_do(sup: Supervisor, lay: dict, env: dict):
         if verb == "check":
             p = subprocess.run([sys.executable, os.path.join(HERE, "hostcheck.py"), instance, "--json"], capture_output=True,
                                text=True, timeout=180, env={**env, "COMFYFARM_ETC": lay["etc"], "USER": env.get("USER") or "comfyfarm"})
-            if p.returncode not in (0, 1):
-                return p.returncode, (p.stderr or p.stdout).strip()
+            if p.returncode not in (0, 1) or not p.stdout.strip():         # it did not run: say why, not "no output"
+                return p.returncode or 1, (p.stderr or p.stdout).strip()[-2000:] or "the host check printed nothing"
             return 0, p.stdout.strip()
         raise agent.Refused(f"unknown command {verb!r}")
     return do

@@ -67,12 +67,40 @@ def run_cmd(argv: list[str], timeout: float = 20) -> tuple[int, str]:
         return 127, f"{type(e).__name__}: {e}"
 
 
+def has_models(path: str, depth: int = 3, budget: int = 5000) -> bool:
+    """Any file with content within a few levels (ComfyUI's own tree has empty put_…_here placeholders)."""
+    todo = [(path, 0)]
+    while todo and budget > 0:
+        d, level = todo.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            budget -= 1
+            if e.name.startswith("."):
+                continue
+            try:
+                if e.is_file() and e.stat().st_size > 0:
+                    return True
+                if e.is_dir() and level + 1 < depth:
+                    todo.append((e.path, level + 1))
+            except OSError:
+                continue
+    return False
+
+
 class Check:
     """`root` prefixes the device and system paths (/dev, /sys, /var/lib/systemd) so tests can build a fake host."""
 
     def __init__(self, env: dict, cfg: dict, *, root: str = "", cmd=run_cmd, user: str | None = None):
         self.env, self.cfg, self.root, self.cmd = env, cfg, root.rstrip("/"), cmd
-        self.user = user or pwd.getpwuid(os.getuid()).pw_name
+        if not user:
+            try:
+                user = pwd.getpwuid(os.getuid()).pw_name
+            except KeyError:                    # a container's uid without an /etc/passwd entry (the UI worker)
+                user = os.environ.get("USER") or f"uid {os.getuid()}"
+        self.user = user
         self.out: list[dict] = []
 
     def add(self, level: str, name: str, detail: str, **data):
@@ -203,8 +231,15 @@ class Check:
                      "shared storage give that uid write access there (every host uses the same uid)"))
         if dirs.get("models"):
             m = dirs["models"]
-            ok = os.path.isdir(m) and os.access(m, os.R_OK | os.X_OK)
-            self.add(OK if ok else FAIL, "models", f"{m}" + ("" if ok else " — missing or not readable"))
+            if not (os.path.isdir(m) and os.access(m, os.R_OK | os.X_OK)):
+                self.add(FAIL, "models", f"{m} — missing or not readable: mount the models there (the same on every "
+                         "GPU worker) or make the directory and copy them in")
+            elif self.cfg.get("role") == "ui" or self.cfg.get("gpu") == "none" or has_models(m):
+                self.add(OK, "models", m)          # the UI worker needs none: the GPU workers' snapshot names them
+            else:
+                self.add(WARN, "models", f"{m} is empty — ComfyUI will list no models and every job that loads one "
+                         "fails: put them in its subdirectories as in ComfyUI's own models directory (checkpoints/, "
+                         "loras/, vae/, …)")
         try:
             try:
                 import launcher                                          # on a worker: installed next to this file

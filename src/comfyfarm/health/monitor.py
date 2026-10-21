@@ -18,6 +18,7 @@ class HealthMonitor:
         # worker id → last inventory attempt, answered or not: a worker whose /object_info fails (multi-MB, up to 90 s,
         # read serially) must not be asked again every tick
         self.inventory_tried: dict[int, float] = {}
+        self.last_failure: dict[int, tuple] = {}            # worker id → (kind, detail) last logged
 
     async def run(self):
         while True:
@@ -67,19 +68,28 @@ class HealthMonitor:
                     await c.execute(
                         "UPDATE workers SET state = 'online', failing_since = NULL, failure_kind = NULL, offline_since = NULL,"
                         " last_ok_at = now(), capabilities = coalesce($2, capabilities) WHERE id = $1", w["id"], caps)
+                if self.last_failure.pop(w["id"], None):
+                    log.info("worker %s answers again", w["id"])
                 became_online |= w["state"] != "online"
                 continue
             async with self.db.conn() as c:
                 # thresholds are measured from the first failure of the streak, cleared on success (D-11)
+                # refused (its allow-list lacks the router's address): as unusable as a dead one, and the dashboard
+                # names the address — the warning, not the state, says why
                 await c.execute("""
                     UPDATE workers SET failing_since = coalesce(failing_since, now()), failure_kind = $2,
                       state = CASE
-                        WHEN $2 = 'dead' AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3) THEN 'offline'
+                        WHEN $2 IN ('dead', 'refused') AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3) THEN 'offline'
                         WHEN $2 = 'busy' AND now() - coalesce(failing_since, now()) >= make_interval(secs => $4) THEN 'busy_unresponsive'
                         ELSE state END,
-                      offline_since = CASE WHEN $2 = 'dead' AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3)
-                                           THEN coalesce(offline_since, now()) ELSE offline_since END
-                    WHERE id = $1""", w["id"], kind, self.s.dead_after, self.s.busy_after)
-            log.info("worker %s probe failed (%s): %s", w["id"], kind, detail)
+                      offline_since = CASE WHEN $2 IN ('dead', 'refused') AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3)
+                                           THEN coalesce(offline_since, now()) ELSE offline_since END,
+                      capabilities = CASE WHEN $2 = 'refused' THEN coalesce(capabilities, '{}'::jsonb)
+                                            || jsonb_build_object('refused_as', $5::text) ELSE capabilities END
+                    WHERE id = $1""", w["id"], kind, self.s.dead_after, self.s.busy_after, detail)
+            # the same failure every tick is one line, not one every 5 s
+            if (kind, detail) != self.last_failure.get(w["id"]):
+                log.warning("worker %s probe failed (%s): %s", w["id"], kind, detail)
+            self.last_failure[w["id"]] = (kind, detail)
         if became_online and self.wake:
             self.wake.set()
