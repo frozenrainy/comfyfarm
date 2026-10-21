@@ -107,7 +107,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
   };
   const keep = again ? t("kept: setting a worker up again changes its host settings, not its identity") : "";
   // The form comes back with what was typed when the router refuses it (a name taken, a bad path): nothing to retype.
-  let typed = null, made = null, v = null, body = null, inst = null, errors = {};
+  let typed = null, made = null, v = null, body = null, inst = null, errors = {}, warned = null;
   // a refusal that names a field ("host: …", "paths.input must be …", "instance name … is taken") marks that field
   const FIELD = [[/^host\b/, "host"], [/^instance\b/, "instance"], [/^router_url\b/, "router_url"], [/^account\b/, "account"],
                  [/^uid\b/, "uid"], [/^port\b/, "port"], [/^listen\b/, "listen"], [/^paths\.(\w+)/, (m) => `path_${m[1]}`],
@@ -141,7 +141,8 @@ export async function setupWorker(refresh, again = null, fix = null) {
         hint: t("the same number on every host: shared storage checks numbers, not names") },
       { name: "router_url", required: true, label: t("Router address as the worker sees it"), value: last?.router_url ?? routerGuess, placeholder: "http://10.0.0.5:8188",
         hint: t("http://<router address>:<router port> — the address the launcher fetches its render from") },
-      ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
+      ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d),
+        hint: (k === "art" ? dflt.art : shared[k]) ? t("the control plane's: {path}", { path: k === "art" ? dflt.art : shared[k] }) : "" })),
       // builds on a worker host: for farms without the control-plane builder (or a host that already has them on)
       ...(!builderState?.configured || (src && last?.builds) ? [
       { name: "builds", type: "checkbox", value: !!last?.builds, text: t("Allow builds from the dashboard on this host"),
@@ -163,6 +164,26 @@ export async function setupWorker(refresh, again = null, fix = null) {
       paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),
       builds: !!v.builds, worker_id: again ? again.worker_id : null, replaces: fix ? fix.id : null,
     };
+    // The control plane's own paths (compose): the artifact store its builder publishes to and the storage its UI
+    // worker serves — every host must see both at those same paths. Different ones are marked once (QA: a GPU host set
+    // up with other paths passed the form and failed only at its host check); Next again keeps them, for a site that
+    // mounts or copies them there on purpose.
+    const same = (a, b) => a.replace(/\/+$/, "") === b.replace(/\/+$/, "");
+    const differ = {};
+    if (dflt.art && !same(body.paths.art, dflt.art)) {
+      differ.path_art = t("The control plane publishes to {path}: every host must see the artifact store at that same path (mount or copy it there)", { path: dflt.art });
+    }
+    for (const k of ["input", "output", "user"]) {
+      if (shared[k] && !same(body.paths[k], shared[k])) {
+        differ[`path_${k}`] = t("The UI worker uses {path}: every host must use that same storage at that same path, or uploads and results go missing", { path: shared[k] });
+      }
+    }
+    const sig = JSON.stringify(Object.keys(differ).map((k) => [k, v[k]]));
+    if (Object.keys(differ).length && sig !== warned) {
+      warned = sig; typed = v; errors = differ;
+      toast(t("Some paths differ from the control plane's — correct them, or press Next again to keep them"), true);
+      continue;
+    }
     try {
       made = await api("POST", "/api/admin/setups", body);
     } catch (e) {

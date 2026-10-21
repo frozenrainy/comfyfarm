@@ -460,6 +460,13 @@ export default {
   "not 8188 when it shares the host with the router": "라우터와 같은 호스트라면 8188은 피하세요",
   "Continue: {name} on {host} ({status}, {at})": "이어서: {host}의 {name} ({status}, {at})",
   "ComfyUI listens on": "ComfyUI 수신 주소",
+  "the control plane's: {path}": "제어 영역의 값: {path}",
+  "The control plane publishes to {path}: every host must see the artifact store at that same path (mount or copy it there)":
+    "제어 영역은 {path}에 게시합니다: 모든 호스트가 아티팩트 저장소를 바로 그 경로로 봐야 합니다 (그 경로에 마운트하거나 복사하세요)",
+  "The UI worker uses {path}: every host must use that same storage at that same path, or uploads and results go missing":
+    "UI 워커는 {path}를 씁니다: 모든 호스트가 같은 저장소를 같은 경로로 써야 합니다. 아니면 업로드와 결과물이 보이지 않습니다",
+  "Some paths differ from the control plane's — correct them, or press Next again to keep them":
+    "제어 영역과 다른 경로가 있습니다 — 고치거나, 그대로 두려면 다음을 한 번 더 누르세요",
   "0.0.0.0: every address of the host (the worker's allow-list still refuses all but the router and the gateway); this host's address: that one only":
     "0.0.0.0: 호스트의 모든 주소 (워커의 허용 목록이 라우터와 게이트웨이 말고는 여전히 거부합니다). 이 호스트 주소를 쓰면 그 주소에서만 받습니다",
   "ComfyUI's --listen. 0.0.0.0 answers on every address of the host — the worker's allow-list refuses everyone but the router and the gateway either way. One address (this host's) when your site wants nothing open on all addresses.":

@@ -147,7 +147,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.12                                                 # a release tag without the v
+V=0.1.0-dev.13                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
@@ -355,7 +355,8 @@ On one control-plane host that holds them locally, export them, e.g. NFS (`/etc/
 
 On SMB the owner comes from the mount (`uid=47800,gid=47800`), not from `chown`. Mount before Docker and setup start: a
 directory used before its share is mounted fills the local disk under the mount point. Then *Set up a worker* for that
-machine (its address, port 8188 is fine there). The same kind of GPU: the same group and profile. Another kind: a new
+machine (its address, port 8188 is fine there); the form shows the control plane's paths under its fields and marks one
+that differs. The same kind of GPU: the same group and profile. Another kind: a new
 group, a *Build* with its recipe, its own profiles. Network: the GPU machine reaches the router's 8188; the
 control-plane host reaches the GPU machine's ssh (22) and its ComfyUI port.
 
