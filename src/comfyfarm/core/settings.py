@@ -32,4 +32,5 @@ class Settings:
     ui_home: str = "/var/lib/comfyfarm-ui"  # the container's own directories (local copies, models, temp)
     ui_shared: str | None = None           # input/output/user below it: the storage the GPU workers use
     ui_instance: str = "ui-1"
+    public_router: str | None = None       # the compose ROUTER_PORT ("8188" or "<ip>:<port>"): the setup form's default
     first_recipe: str = "rocm-gfx1201"     # its first build (the UI half: ComfyUI on the CPU — the same in every recipe)

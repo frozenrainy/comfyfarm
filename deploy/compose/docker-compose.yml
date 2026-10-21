@@ -54,6 +54,7 @@ services:
       COMFYFARM_UI_AGENT: ${COMFYFARM_UI_AGENT:-}
       COMFYFARM_UI_SHARED: ${COMFYFARM_SHARED:-}
       COMFYFARM_FIRST_RECIPE: ${COMFYFARM_FIRST_RECIPE:-rocm-gfx1201}
+      COMFYFARM_PUBLIC_ROUTER: ${ROUTER_PORT:-8188}
     secrets: [db_password, gateway_secret]
     # Launchers on the workers fetch their render here; /metrics and /api/health/dispatch are here too.
     # Browsers never come here — firewall this port to the worker hosts and your monitoring.

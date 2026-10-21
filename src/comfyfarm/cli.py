@@ -47,7 +47,8 @@ def settings_from_env(env=None) -> Settings:
     for key, attr in (("INSTANCE", "instance"), ("GATEWAY_SECRET", "gateway_secret"), ("DEFAULT_GROUP", "default_group"),
                       ("ARTIFACTS_DIR", "artifacts_dir"), ("DEV_IDENTITY", "dev_identity"), ("KEYS_DIR", "keys_dir"),
                       ("BUILDS_DIR", "builds_dir"), ("UI_SERVICE", "ui_service"), ("UI_AGENT", "ui_agent"),
-                      ("UI_HOME", "ui_home"), ("UI_SHARED", "ui_shared"), ("FIRST_RECIPE", "first_recipe")):
+                      ("UI_HOME", "ui_home"), ("UI_SHARED", "ui_shared"), ("FIRST_RECIPE", "first_recipe"),
+                      ("PUBLIC_ROUTER", "public_router")):
         if env.get(ENV_PREFIX + key):
             kw[attr] = env[ENV_PREFIX + key]
     if env.get("COMFYFARM_DEV_ADMINS"):

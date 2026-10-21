@@ -65,8 +65,18 @@ export async function setupWorker(refresh, again = null, fix = null) {
     return;
   }
   const ui = pickRole.role === "ui";
-  const [groups, profiles, recent, builderState] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
-                                                       api("GET", "/api/admin/setups"), api("GET", "/api/admin/builder").catch(() => null)]);
+  const [groups, profiles, recent, builderState, dflt] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
+    api("GET", "/api/admin/setups"), api("GET", "/api/admin/builder").catch(() => null), api("GET", "/api/admin/defaults").catch(() => ({}))]);
+  // a first setup takes the deployment's own paths and router address (compose knows them); a later one, the last setup's
+  const shared = dflt.shared ? { input: `${dflt.shared}/input`, output: `${dflt.shared}/output`, user: `${dflt.shared}/user` } : {};
+  const routerGuess = (() => {
+    const r = String(dflt.router || "");
+    if (!r) return "";
+    const m = /^(.*):(\d+)$/.exec(r);
+    const host = m && m[1] && !["0.0.0.0", "::", "[::]"].includes(m[1]) ? m[1] : location.hostname;
+    return `http://${host}:${m ? m[2] : r}`;
+  })();
+  const roleProfiles = profiles.filter((p) => ((p.flags || []).includes("--cpu")) === (pickRole?.role === "ui"));
   const last = src ? src.spec : recent[0]?.spec;
   const lastX = src ? src.extra : {};
   const pathOf = (k, d) => {
@@ -74,7 +84,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
       const lt = last?.paths?.temp, li = last?.instance;
       return lt && li && lt.endsWith("/" + li) ? lt.slice(0, -li.length) + "{instance}" : d;
     }
-    return (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? d;
+    return (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? (k === "art" ? dflt.art : shared[k]) ?? d;
   };
   const keep = again ? t("kept: setting a worker up again changes its host settings, not its identity") : "";
   // The form comes back with what was typed when the router refuses it (a name taken, a bad path): nothing to retype.
@@ -92,9 +102,12 @@ export async function setupWorker(refresh, again = null, fix = null) {
       ...(ui ? [] : [
         { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
           options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })), hint: t("ComfyFarm checks the driver; it never installs one") },
-        { name: "group", label: t("Group"), type: "select", value: src ? lastX.group ?? "" : groups[0]?.name ?? "",
-          options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] }]),
-      { name: "profile", label: t("Profile to run"), type: "select", value: fix && lastX.profile_id ? String(lastX.profile_id) : "",
+        groups.length ? { name: "group", label: t("Group"), type: "select", value: src ? lastX.group ?? "" : groups[0]?.name ?? "",
+          options: [{ value: "", label: t("(no group)") }, ...groups.map((g) => ({ value: g.name, label: g.name }))] }
+        : { name: "group", label: t("Group"), value: "default",            // a new farm has none: made with the worker
+            hint: t("no group yet: this one is made with the worker (jobs go to a group's workers; users get groups)") }]),
+      { name: "profile", label: t("Profile to run"), type: "select",
+        value: fix && lastX.profile_id ? String(lastX.profile_id) : again ? "" : String(roleProfiles[roleProfiles.length - 1]?.id ?? ""),
         options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))],
         hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
       { name: "port", label: t("ComfyUI port"), type: "number", value: src ? last.port : ui ? 8189 : 8188,
@@ -104,7 +117,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
         hint: t("not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it") },
       { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
         hint: t("the same number on every host: shared storage checks numbers, not names") },
-      { name: "router_url", required: true, label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188",
+      { name: "router_url", required: true, label: t("Router address as the worker sees it"), value: last?.router_url ?? routerGuess, placeholder: "http://10.0.0.5:8188",
         hint: t("http://<router address>:<router port> — the address the launcher fetches its render from") },
       ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
       // builds on a worker host: for farms without the control-plane builder (or a host that already has them on)
@@ -252,6 +265,9 @@ function runSetup(made, refresh) {
                            : api("POST", `/api/admin/instances/${made.again}/start`),
                   up ? t("Restarting it — see Rollout") : t("Worker updated and starting"), refresh);
         return;
+      }
+      if (setup.worker.group && !(await api("GET", "/api/admin/groups")).some((g) => g.name === setup.worker.group)) {
+        await api("POST", "/api/admin/groups", { name: setup.worker.group });     // the group typed at setup (a new farm's first)
       }
       const w = await api("POST", "/api/admin/workers", setup.worker);
       await api("PUT", `/api/admin/instances/${w.id}`, setup.instance_config);

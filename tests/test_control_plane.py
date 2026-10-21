@@ -295,3 +295,16 @@ def test_the_container_layout_and_its_allow_list(tmp_path, monkeypatch):
     assert le["COMFY_LAUNCH_INSTANCE"] == "ui-1" and le["COMFYFARM_ALLOW_NETWORK"] == "172.30.0.0/16"
     assert le["COMFY_LAUNCH_PREFIXES"].split(",")[0] == str(tmp_path / "shared/input") and le["USER"] == "comfyfarm"
     assert le["COMFY_LAUNCH_ARTIFACTS"] == "/srv/comfyfarm/art" and le["COMFY_LAUNCH_LOCAL"] == str(tmp_path / "home/local")
+
+
+async def test_the_setup_form_gets_the_deployments_own_defaults(dsn, tmp_path):
+    """QA (newcomer path): the setup form offered /mnt/farm/... for the shared directories while compose put them under
+    /srv/comfyfarm/shared, and left the router address empty — on one machine the UI worker and the GPU worker then
+    used different storage. The router says what the deployment knows."""
+    app = create_app(fast_settings(dsn, artifacts_dir="/srv/comfyfarm/art", ui_shared="/srv/comfyfarm/shared",
+                                   public_router="192.0.2.10:18188"))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            d = (await c.get("/api/admin/defaults", headers=H)).json()
+            assert d == {"art": "/srv/comfyfarm/art", "shared": "/srv/comfyfarm/shared", "router": "192.0.2.10:18188"}
+            assert (await c.get("/api/admin/defaults", headers={"X-ComfyFarm-User": "mallory"})).status_code == 403

@@ -24,7 +24,7 @@
 name: comfyfarm
 
 x-image: &image
-  image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.10}
+  image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.11}
   build:                                    # only for `docker compose build` (a change of your own, a closed network)
     context: ../..
     dockerfile: deploy/Dockerfile
@@ -90,6 +90,7 @@ services:
       COMFYFARM_UI_AGENT: http://ui:8399
       COMFYFARM_UI_SHARED: ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
       COMFYFARM_FIRST_RECIPE: ${COMFYFARM_FIRST_RECIPE:-rocm-gfx1201}
+      COMFYFARM_PUBLIC_ROUTER: ${ROUTER_PORT:-8188}          # what workers connect to: the setup form's default
     ports:
       - "${ROUTER_PORT:-8188}:8188"         # workers' launchers, /metrics — not for users' browsers
     volumes:

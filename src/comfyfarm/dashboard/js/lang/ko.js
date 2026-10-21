@@ -277,6 +277,7 @@ export default {
   "Optional: addresses the workers take requests from, added to what setup allowed on each host (the router's address). Leave it empty unless a worker reaches the router or the gateway over another address.": "선택: 워커가 요청을 받을 주소. 설치가 각 호스트에 허용한 주소(라우터 주소)에 더해집니다. 워커가 다른 주소로 라우터나 게이트웨이에 닿는 경우가 아니면 비워 두세요.",
   "Build {recipe} again on {name} first": "먼저 {name}에서 {recipe}를 다시 빌드",
   "Makes a new template instead of using one of these: after adding or updating node packs, or after a ComfyFarm upgrade that changed the recipe. The build takes minutes; its profiles then roll out like any.": "여기 있는 견본 대신 새 견본을 만듭니다: 노드팩을 추가하거나 업데이트한 뒤, 또는 ComfyFarm 업그레이드로 레시피가 바뀐 뒤에 쓰세요. 빌드는 몇 분 걸리고, 만든 프로필은 다른 프로필처럼 롤아웃합니다.",
+  "no group yet: this one is made with the worker (jobs go to a group's workers; users get groups)": "아직 그룹이 없습니다: 이 이름으로 워커와 함께 만듭니다 (작업은 그룹의 워커로 가고, 사용자는 그룹 단위로 권한을 받습니다)",
   // ---- node packs, control-plane builds (docs/design/15) ----
   "Add a node pack": "노드팩 추가",
   "Add node pack": "노드팩 추가",

@@ -168,6 +168,13 @@ def make_router(ctx: Ctx) -> APIRouter:
                 "node_sources": (p or {}).get("node_sources", []), "artifacts": bool(s.artifacts_dir),
                 "first_start": dict(first)}
 
+    @api.get("/api/admin/defaults")
+    async def deployment_defaults(x_comfyfarm_user: str | None = Header(default=None)):
+        """What the deployment knows that a setup form should not ask a newcomer to guess: the artifact store and the
+        shared storage (the compose paths) and the router's published port."""
+        ctx.admin(x_comfyfarm_user)
+        return {"art": s.artifacts_dir, "shared": s.ui_shared, "router": s.public_router}
+
     @api.post("/api/admin/builds")
     async def request_build(body: BuildIn, x_comfyfarm_user: str | None = Header(default=None)):
         who = ctx.admin(x_comfyfarm_user)
