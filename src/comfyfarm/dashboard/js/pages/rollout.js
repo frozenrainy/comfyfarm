@@ -223,12 +223,15 @@ export function rollout(root, { refresh }) {
     } catch { /* a guess only */ }
     const v = await formDialog(via ? t("Profiles from a recipe (read through {name})", { name: via.worker }) : t("Profiles from a recipe"), [
       { name: "template", label: t("Template"), type: "select", value: pick || templates[templates.length - 1].template,
+        tip: t("What one build left in the artifact store: ComfyUI, a venv and the node sets for the GPU workers and the UI worker. The newest is last."),
         options: templates.map((x) => ({ value: x.template, label: (x.about ? `${x.template} — ${x.about}` : x.template)
           + ((x.roles || ["gpu", "ui"]).length < 2 ? ` (${(x.roles || []).map((r) => r === "ui" ? t("UI worker") : t("GPU workers")).join("")})` : "") })) },
       { name: "allow", label: "COMFYFARM_ALLOW", value: allow,
+        tip: t("Optional: addresses the workers take requests from, added to what setup allowed on each host (the router's address). Leave it empty unless a worker reaches the router or the gateway over another address."),
         hint: t("the addresses the workers take requests from: the router's and the gateway's, as the workers see them") },
       ...(buildable.length ? [{ name: "build", type: "checkbox", value: false, label: t("Build"),
-                               text: t("Build {recipe} on {name} first (a new template after a recipe update)", { recipe: buildable[0], name: where }) }] : []),
+                               text: t("Build {recipe} again on {name} first", { recipe: buildable[0], name: where }),
+                               tip: t("Makes a new template instead of using one of these: after adding or updating node packs, or after a ComfyFarm upgrade that changed the recipe. The build takes minutes; its profiles then roll out like any.") }] : []),
     ], t("Create the profiles"), { wide: true });
     if (!v) return;
     if (v.build) return buildFirst();

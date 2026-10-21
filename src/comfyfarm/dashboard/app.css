@@ -161,6 +161,9 @@ pre.code { font: .78rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; back
 #toast { position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%); background: var(--toast); color: #fff;
          padding: .5rem 1rem; border-radius: 6px; max-width: 90vw; z-index: 10; }
 #toast.bad { background: var(--bad); }
+#toast[popover] { inset: auto auto 1rem 50%; margin: 0; border: 0; overflow: visible; color: #fff; }   /* the UA's popover box off */
+.field.invalid input, .field.invalid select, .field.invalid textarea { border-color: var(--bad); }
+.hint.err { color: var(--bad); }
 
 /* Workflow tab: ComfyUI below the header, in an iframe that lives as long as the page (state survives tab switches) */
 body.workflow { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }

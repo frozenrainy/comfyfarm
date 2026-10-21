@@ -70,9 +70,28 @@ export function setBar(el, frac) {
 
 // ---- feedback --------------------------------------------------------------------------------------------------
 let toastTimer;
+// The toast is a popover: the browser's top layer, so it shows above an open dialog (a modal dialog covers everything
+// else on the page — a refused form's message was hidden behind the form itself).
+const popover = (el) => typeof el.showPopover === "function" && el.hasAttribute("popover");
+function raise(el) {
+  if (!popover(el)) return;
+  if (el.matches(":popover-open")) el.hidePopover();
+  el.showPopover();                                    // shown last = on top of what is open now
+}
 export function toast(msg, bad = false) {
-  const t = $("#toast"); t.textContent = msg; t.className = bad ? "bad" : ""; t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 4500);
+  const el = $("#toast"); el.textContent = msg; el.className = bad ? "bad" : ""; el.hidden = false;
+  raise(el);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.hidden = true; if (popover(el) && el.matches(":popover-open")) el.hidePopover(); },
+                                                    bad ? 8000 : 4500);
+}
+// a dialog opened while a toast shows would cover it: lift the toast again
+if (typeof HTMLDialogElement !== "undefined") {
+  const showModal = HTMLDialogElement.prototype.showModal;
+  HTMLDialogElement.prototype.showModal = function () {
+    showModal.call(this);
+    const el = document.getElementById("toast");
+    if (el && !el.hidden) raise(el);
+  };
 }
 
 // ---- HTTP ------------------------------------------------------------------------------------------------------
@@ -164,7 +183,7 @@ export function button(label, onclick, opts = {}) {
 
 // ---- dialogs ---------------------------------------------------------------------------------------------------
 // fields: [{name, label, type: text|password|number|checkbox|checkboxes|select, value, options:[{value,label}], hint}]
-export function formDialog(title, fields, submitLabel = t("Save"), { wide = false, noSubmit = false } = {}) {
+export function formDialog(title, fields, submitLabel = t("Save"), { wide = false, noSubmit = false, errors = {} } = {}) {
   return new Promise((resolve) => {
     const inputs = {};
     const rows = fields.map((f) => {
@@ -195,14 +214,16 @@ export function formDialog(title, fields, submitLabel = t("Save"), { wide = fals
         control = sel;
       } else {
         const inp = h("input", { type: f.type || "text", value: f.value ?? "", placeholder: f.placeholder, autocomplete: f.autocomplete || "off",
-                                 min: f.min, step: f.step });
+                                 min: f.min, step: f.step, required: !!f.required });
         inputs[f.name] = () => (f.type === "number" ? (inp.value === "" ? null : Number(inp.value)) : inp.value);
         control = inp;
       }
       if (f.tip && control.setAttribute) control.setAttribute("title", f.tip);
       const label = h("div", { class: "label" }, f.label,
         f.tip ? h("span", { class: "tip", "data-tip": f.tip, tabindex: "0", role: "img", "aria-label": f.tip }, "?") : null);
-      return h("div", { class: "field" }, label, control, f.hint ? h("div", { class: "hint" }, f.hint) : null);
+      // errors: what the server said about a field (the form came back after it refused) — shown at the field itself
+      return h("div", { class: errors[f.name] ? "field invalid" : "field", "data-name": f.name }, label, control,
+        errors[f.name] ? h("div", { class: "hint err" }, errors[f.name]) : null, f.hint ? h("div", { class: "hint" }, f.hint) : null);
     });
     const dlg = h("dialog", { class: wide ? "form wide" : "form" });
     const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };
@@ -216,7 +237,9 @@ export function formDialog(title, fields, submitLabel = t("Save"), { wide = fals
     dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(null); });
     document.body.append(dlg);
     dlg.showModal();
-    form.querySelector("input:not([type=checkbox]), select, textarea")?.focus();
+    const bad = form.querySelector(".field.invalid");
+    (bad?.querySelector("input, select, textarea") || form.querySelector("input:not([type=checkbox]), select, textarea"))?.focus();
+    bad?.scrollIntoView({ block: "center" });
   });
 }
 

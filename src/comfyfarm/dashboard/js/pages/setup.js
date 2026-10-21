@@ -65,8 +65,8 @@ export async function setupWorker(refresh, again = null, fix = null) {
     return;
   }
   const ui = pickRole.role === "ui";
-  const [groups, profiles, recent] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
-                                                       api("GET", "/api/admin/setups")]);
+  const [groups, profiles, recent, builderState] = await Promise.all([api("GET", "/api/admin/groups"), api("GET", "/api/admin/profiles"),
+                                                       api("GET", "/api/admin/setups"), api("GET", "/api/admin/builder").catch(() => null)]);
   const last = src ? src.spec : recent[0]?.spec;
   const lastX = src ? src.extra : {};
   const pathOf = (k, d) => {
@@ -78,12 +78,17 @@ export async function setupWorker(refresh, again = null, fix = null) {
   };
   const keep = again ? t("kept: setting a worker up again changes its host settings, not its identity") : "";
   // The form comes back with what was typed when the router refuses it (a name taken, a bad path): nothing to retype.
-  let typed = null, made = null, v = null, body = null, inst = null;
+  let typed = null, made = null, v = null, body = null, inst = null, errors = {};
+  // a refusal that names a field ("host: …", "paths.input must be …", "instance name … is taken") marks that field
+  const FIELD = [[/^host\b/, "host"], [/^instance\b/, "instance"], [/^router_url\b/, "router_url"], [/^account\b/, "account"],
+                 [/^uid\b/, "uid"], [/^port\b/, "port"], [/^paths\.(\w+)/, (m) => `path_${m[1]}`],
+                 [/^a worker with this name or address/, "name"]];
+  const fieldOf = (msg) => { for (const [re, f] of FIELD) { const m = re.exec(msg); if (m) return typeof f === "function" ? f(m) : f; } return null; };
   while (!made) {
     const fields = [
       { name: "name", label: t("Worker name (shown in the dashboard)"), value: src ? lastX.name : ui ? "ui" : "", hint: keep },
-      { name: "host", label: t("Host address"), value: lastX.host ?? "", placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
-      { name: "instance", label: t("Instance name"), value: src ? last.instance : ui ? "ui-1" : "gpu-1", hint: keep || t("one ComfyUI on this host; letters, digits, . _ -") },
+      { name: "host", required: true, label: t("Host address"), value: lastX.host ?? "", placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
+      { name: "instance", required: true, label: t("Instance name"), value: src ? last.instance : ui ? "ui-1" : "gpu-1", hint: keep || t("one ComfyUI on this host; letters, digits, . _ -") },
       ...(ui ? [] : [
         { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
           options: GPUS.map(([v, l]) => ({ value: v, label: t(l) })), hint: t("ComfyFarm checks the driver; it never installs one") },
@@ -99,18 +104,20 @@ export async function setupWorker(refresh, again = null, fix = null) {
         hint: t("not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it") },
       { name: "uid", label: t("Service account uid"), type: "number", value: last?.uid ?? 47800,
         hint: t("the same number on every host: shared storage checks numbers, not names") },
-      { name: "router_url", label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188",
+      { name: "router_url", required: true, label: t("Router address as the worker sees it"), value: last?.router_url ?? "", placeholder: "http://10.0.0.5:8188",
         hint: t("http://<router address>:<router port> — the address the launcher fetches its render from") },
       ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d) })),
+      // builds on a worker host: for farms without the control-plane builder (or a host that already has them on)
+      ...(!builderState?.configured || (src && last?.builds) ? [
       { name: "builds", type: "checkbox", value: !!last?.builds, text: t("Allow builds from the dashboard on this host"),
         label: t("Builds"),
-        hint: t("the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet and git on the host; setup brings a pinned uv") },
+        hint: t("the dashboard may then ask this host to build a recipe that setup installs here (it names one, never sends one); a build account owns the artifact store, the service account still only reads it. Needs internet and git on the host; setup brings a pinned uv") }] : []),
     ];
     for (const f of fields) if (TIPS[f.name]) f.tip = t(TIPS[f.name]);
     if (typed) for (const f of fields) if (f.name in typed) f.value = typed[f.name];
     v = await formDialog(fix ? t("Correct the setup of {name}", { name: lastX.name || last.instance })
                          : again ? t("Set up {name} again", { name: lastX.name }) : ui ? t("Set up the UI worker") : t("Set up a GPU worker"),
-                         fields, t("Next"), { wide: true });
+                         fields, t("Next"), { wide: true, errors });
     if (!v) return;
     inst = v.instance.trim();
     body = {
@@ -126,9 +133,26 @@ export async function setupWorker(refresh, again = null, fix = null) {
     } catch (e) {
       toast(e.message, true);
       typed = v;
+      const f = fieldOf(e.message);
+      errors = f ? { [f]: e.message } : {};
     }
   }
   if (made) runSetup({ ...made, instance: inst, account: body.account, again: body.worker_id }, refresh);
+}
+
+// After setup without a profile (a new farm has none yet): pick one and start the worker now, or later in Rollout.
+async function askStart(workerId, name, kind) {
+  const profiles = (await api("GET", "/api/admin/profiles")).filter((p) => (kind === "ui") === (p.flags || []).includes("--cpu"));
+  if (!profiles.length) return toast(t("Worker added — make a profile (System → Rollout → From a recipe), then assign and start it"));
+  const v = await formDialog(t("Start {name} now?", { name }), [
+    { name: "profile", label: t("Profile"), type: "select", value: String(profiles[profiles.length - 1].id),
+      options: profiles.map((p) => ({ value: String(p.id), label: p.name })),
+      hint: t("what it runs; a later change goes through a rollout") }], t("Assign and start"));
+  if (!v) return toast(t("Worker added — assign a profile and start it in System → Rollout"));
+  await act(async () => {
+    await api("POST", `/api/admin/instances/${workerId}/assign`, { profile_id: Number(v.profile) });
+    return api("POST", `/api/admin/instances/${workerId}/start`);
+  }, t("Worker added and starting — watch its badge in System → Rollout"));
 }
 
 // Step 2: get root on the host — the operator picks the way; then watch the report come in.
@@ -211,23 +235,23 @@ function runSetup(made, refresh) {
         const pid = setup.extra.profile_id;
         if (pid) await api("POST", `/api/admin/instances/${made.again}/assign`, { profile_id: pid });
         await api("POST", `/api/admin/setups/${made.id}/finished?worker_id=${made.again}`);
-        // the new tools and environment take effect when it starts again: a running worker restarts through a rollout
-        // of its own profile (it finishes its job first); one that is not running is started
+        // the new tools and environment take effect when it starts again — ask: a running worker restarts through a
+        // rollout of its own profile (it finishes its job first); one that is not running is started
+        close();
         const inst = (await api("GET", "/api/admin/instances")).find((x) => x.worker_id === made.again);
         const prof = pid || inst?.instance?.profile_id;
-        if (!prof) { toast(t("Worker updated — assign a profile and start it in System → Rollout")); return close(); }
-        try {
-          if (inst?.state === "online") {
-            await api("POST", "/api/admin/rollouts", { profile_id: prof, worker_ids: [made.again], window: 1, options: { restart: true } });
-            toast(t("Worker updated — restarting it to use the new tools (it finishes its job first; see Rollout)"));
-          } else {
-            await api("POST", `/api/admin/instances/${made.again}/start`);
-            toast(t("Worker updated and starting"));
-          }
-        } catch (e) {
-          toast(t("Worker updated, not restarted yet: {why} — Restart it in System → Rollout", { why: e.message }), true);
-        }
-        return close();
+        if (!prof) return askStart(made.again, setup.worker.name, setup.worker.kind);
+        const up = inst?.state === "online";
+        const go = await formDialog(up ? t("Restart {name} now?", setup.worker) : t("Start {name} now?", setup.worker), [
+          { name: "why", type: "pre", label: "", value: up
+            ? t("The new worker tools and settings take effect when it starts again. A rollout of its own profile restarts it: it finishes its running job first, then it is verified.")
+            : t("The new worker tools and settings take effect when it starts.") }],
+          up ? t("Restart now") : t("Start now"));
+        if (!go) return toast(t("Worker updated — restart it later: System → Rollout → Restart"));
+        await act(() => up ? api("POST", "/api/admin/rollouts", { profile_id: prof, worker_ids: [made.again], window: 1, options: { restart: true } })
+                           : api("POST", `/api/admin/instances/${made.again}/start`),
+                  up ? t("Restarting it — see Rollout") : t("Worker updated and starting"), refresh);
+        return;
       }
       const w = await api("POST", "/api/admin/workers", setup.worker);
       await api("PUT", `/api/admin/instances/${w.id}`, setup.instance_config);
@@ -237,8 +261,9 @@ function runSetup(made, refresh) {
         await api("POST", `/api/admin/instances/${w.id}/start`);
       }
       await api("POST", `/api/admin/setups/${made.id}/finished?worker_id=${w.id}`);
-      toast(pid ? t("Worker added and starting — watch its badge in System → Rollout") : t("Worker added — assign a profile and start it in System → Rollout"));
       close();
+      if (pid) toast(t("Worker added and starting — watch its badge in System → Rollout"));
+      else askStart(w.id, setup.worker.name, setup.worker.kind);      // no profile picked at setup: ask now
     } catch (e) { toast(e.message, true); finish.disabled = false; poll(); }
   }
   poll();
