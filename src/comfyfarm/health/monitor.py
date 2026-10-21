@@ -6,7 +6,7 @@ import logging
 import time
 
 from ..adapter.comfy import ComfyAdapter
-from ..db import Busy, Database
+from ..db import Busy, BusyLog, Database
 from ..core.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -16,6 +16,7 @@ WAIT_REMIND = 600.0          # a worker that never answered: one more line after
 class HealthMonitor:
     def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None):
         self.db, self.adapter, self.s, self.wake = db, adapter, settings, wake
+        self.busy = BusyLog(log, "health")
         # worker id → last inventory attempt, answered or not: a worker whose /object_info fails (multi-MB, up to 90 s,
         # read serially) must not be asked again every tick
         self.inventory_tried: dict[int, float] = {}
@@ -26,8 +27,8 @@ class HealthMonitor:
         while True:
             try:
                 await self.tick()
-            except Busy:
-                log.warning("health: database busy")
+            except Busy as e:
+                self.busy(e)
             except Exception:
                 log.exception("health tick failed")
             await asyncio.sleep(self.s.health_period)

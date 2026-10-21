@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..adapter.comfy import DISPATCH_DEADLINE, ComfyAdapter, JobState, NoAnswer
-from ..db import Busy, Database
+from ..db import Busy, BusyLog, Database
 from .jobs import error_doc, transition
 from .settings import Settings
 
@@ -30,6 +30,7 @@ class Reconciler:
     def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None,
                  posting: dict[int, int] | None = None):
         self.db, self.adapter, self.s, self.wake = db, adapter, settings, wake
+        self.busy = BusyLog(log, "reconcile")
         self.posting = posting if posting is not None else {}    # the dispatcher's: jobs this process is POSTing now
         self.collected: dict[int, float] = {}                    # job id → when its outputs were read from /history
 
@@ -37,8 +38,8 @@ class Reconciler:
         while True:
             try:
                 await self.tick()
-            except Busy:
-                log.warning("reconcile: database busy")
+            except Busy as e:
+                self.busy(e)
             except Exception:
                 log.exception("reconcile tick failed")
             await asyncio.sleep(self.s.reconcile_period)

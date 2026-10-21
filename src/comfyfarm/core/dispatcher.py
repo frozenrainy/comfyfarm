@@ -6,7 +6,7 @@ import logging
 import uuid
 
 from ..adapter.comfy import Accepted, Ambiguous, ComfyAdapter, Rejected, Unreachable
-from ..db import Busy, Database
+from ..db import Busy, BusyLog, Database
 from .jobs import error_doc, transition
 from .settings import Settings
 
@@ -44,6 +44,7 @@ def worker_client_id(instance: str, worker_id: int) -> str:
 class Dispatcher:
     def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings):
         self.db, self.adapter, self.s = db, adapter, settings
+        self.busy = BusyLog(log, "dispatcher")
         self.wake = asyncio.Event()
         self.inflight: set[asyncio.Task] = set()
         self.posting: dict[int, int] = {}       # job id → worker id while this process POSTs it (reconcile must not ask)
@@ -55,8 +56,8 @@ class Dispatcher:
         while True:
             try:
                 await self.tick()
-            except Busy:
-                log.warning("dispatcher: database busy, retrying")
+            except Busy as e:
+                self.busy(e)
             except Exception:
                 log.exception("dispatcher tick failed")
             try:

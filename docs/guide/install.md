@@ -101,7 +101,7 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
 | Setting | Default | What |
 |---|---|---|
 | `GATEWAY_PORT`, `ROUTER_PORT` | `8080`, `8188` | `<host-ip>:<port>` publishes on one address only |
-| `COMFYFARM_DATA` | `/srv/comfyfarm/data` | everything this control plane keeps: secrets, keys, database, logs, caches |
+| `COMFYFARM_DATA` | `/srv/comfyfarm/data` | everything this control plane keeps: secrets, keys, database, logs, caches — on an SSD (*Later*, *Disks*) |
 | `COMFYFARM_ARTIFACTS_MOUNT` | `/srv/comfyfarm/art` | the artifact store — GPU workers see it at this **same path** |
 | `COMFYFARM_SHARED` | `/srv/comfyfarm/shared` | `input`, `output`, `user` below it — the storage GPU workers use too, at the same path |
 | `COMFYFARM_UID` | `47800` | the workers' service account uid (*Set up a worker*): the shared storage belongs to it |
@@ -113,6 +113,13 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
 
 - **Data**: `COMFYFARM_DATA` holds the secrets, the router's agent key (every worker trusts it), the database and
   the logs. Back it up (below); delete it only to start over — then every worker must be set up again.
+- **Disks**: put `COMFYFARM_DATA` on an SSD; the artifact store (`COMFYFARM_ARTIFACTS_MOUNT`) may sit on hard disks.
+  A build writes tens of thousands of files into the store, and on the same hard disk the database's commits wait
+  behind them — on one HDD a single statement waited over 30 s during a first start, and the router skipped work and
+  said `… took over 30 s — its disk is busy`. The database is small (tens of MB); the builder's caches in the same
+  directory (a few GB) make builds faster there too. To move it: `docker compose down`, `sudo cp -a` the directory
+  to the new place (owners matter: the database's files are uid 999's), set `COMFYFARM_DATA` in `.env`,
+  `docker compose up -d`.
 - **Upgrade**: check out the new release (`git fetch --tags && git checkout v<version>`) and `docker compose up -d`;
   `init` runs again and changes nothing; the database migrates when the router starts.
 - **From 0.1.0-dev.10 or earlier** (easy only): those kept the data in Docker volumes; 0.1.0-dev.11 and later read
@@ -147,7 +154,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.14                                                 # a release tag without the v
+V=0.1.0-dev.15                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz

@@ -23,7 +23,7 @@ import time
 import httpx
 
 from ..adapter.comfy import QUERY_TIMEOUT, classify_exception
-from ..db import Busy
+from ..db import Busy, BusyLog
 from . import backends as be
 from . import render as rd
 
@@ -80,6 +80,7 @@ class Engine:
     def __init__(self, router):
         self.r = router
         self.db, self.s = router.db, router.s
+        self.busy = BusyLog(log, "rollout")
         self.make_backend = functools.partial(be.make, keys_dir=self.s.keys_dir)     # tests replace it
         self.poll = 1.0                                  # probe interval while watching a restart
         self.fetch_poll = 5.0                            # asking a host how its copies come along (docs/design/16)
@@ -130,8 +131,8 @@ class Engine:
                         self.current = None
             except asyncio.CancelledError:
                 raise
-            except Busy:
-                log.warning("rollout: database busy")
+            except Busy as e:
+                self.busy(e)
             except Exception:
                 log.exception("rollout loop failed")
             await asyncio.sleep(1.0)

@@ -6,17 +6,51 @@ import contextlib
 import importlib.resources
 import logging
 import re
+import time
 
 import asyncpg
 
 log = logging.getLogger(__name__)
 ACQUIRE_TIMEOUT = 5.0
+COMMAND_TIMEOUT = 30.0
 MIGRATION_LOCK = 0x636F6D6679  # advisory lock id ("comfy")
 MIGRATION_NAME = re.compile(r"^\d{4}_[A-Za-z0-9_]+\.sql$")
 
 
 class Busy(Exception):
     """The database pool is exhausted — callers answer 503 + Retry-After instead of waiting."""
+
+
+class Slow(Busy):
+    """A statement waited longer than COMMAND_TIMEOUT: the database, or the disk under it, is overloaded (a build
+    writing tens of thousands of files to the same HDD made a commit wait over 30 s). Handled as Busy: a loop skips a
+    round, an API call answers 503 — not a traceback, which reads like a bug."""
+
+
+def _from_asyncpg(e: BaseException) -> bool:
+    tb = e.__traceback__
+    while tb is not None:
+        if "asyncpg" in tb.tb_frame.f_code.co_filename:
+            return True
+        tb = tb.tb_next
+    return False
+
+
+class BusyLog:
+    """One line per minute for a loop that keeps meeting a busy database, with how many rounds it skipped since."""
+
+    def __init__(self, logger: logging.Logger, what: str, every: float = 60.0):
+        self.log, self.what, self.every = logger, what, every
+        self.last, self.skipped = -every, 0
+
+    def __call__(self, e: Exception) -> None:
+        now = time.monotonic()
+        if now - self.last < self.every:
+            self.skipped += 1
+            return
+        more = f" ({self.skipped} more round(s) skipped since the last line)" if self.skipped else ""
+        self.log.warning("%s: %s — this round is skipped%s", self.what, e, more)
+        self.last, self.skipped = now, 0
 
 
 class Database:
@@ -26,7 +60,7 @@ class Database:
 
     async def start(self):
         self.pool = await asyncpg.create_pool(self.dsn, min_size=self.min_size, max_size=self.max_size,
-                                              init=self._init_conn, command_timeout=30)
+                                              init=self._init_conn, command_timeout=COMMAND_TIMEOUT)
         await self.migrate()
 
     @staticmethod
@@ -46,6 +80,11 @@ class Database:
             raise Busy("database pool exhausted") from e
         try:
             yield c
+        except TimeoutError as e:
+            if _from_asyncpg(e):                  # a statement's own timeout, not someone else's wait_for
+                raise Slow(f"a database statement took over {COMMAND_TIMEOUT:.0f} s — its disk is busy (a build, "
+                           "copies?) or the database is overloaded") from e
+            raise
         finally:
             await self.pool.release(c)
 
