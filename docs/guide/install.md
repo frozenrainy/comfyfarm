@@ -92,7 +92,9 @@ start until one exists). What the first start does by itself (docs/design/15):
    holds someone else's files is left alone and named in `docker compose logs init`.
 2. The **builder** builds ComfyUI on the CPU for the UI worker — this host needs internet for it (~2.5 GB).
 3. The router registers the **UI worker container**, gives it that profile and starts it. *Getting started* (Dashboard)
-   and *System → Rollout* show the state; workflows open in the browser once it is ready.
+   and *System → Rollout* show the state; workflows open in the browser once it is ready. The router's log says
+   `worker ui (#1) has not answered yet … — normal while it is set up, built or starting` until then, and
+   `worker ui (#1) answers — its first answer` when it is up.
 
 Settings, all optional, in a `.env` next to `compose.yaml`:
 

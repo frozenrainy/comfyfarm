@@ -10,6 +10,7 @@ from ..db import Busy, Database
 from ..core.settings import Settings
 
 log = logging.getLogger(__name__)
+WAIT_REMIND = 600.0          # a worker that never answered: one more line after this long (a build, or nothing started)
 
 
 class HealthMonitor:
@@ -19,6 +20,7 @@ class HealthMonitor:
         # read serially) must not be asked again every tick
         self.inventory_tried: dict[int, float] = {}
         self.last_failure: dict[int, tuple] = {}            # worker id → (kind, detail) last logged
+        self.reminded: set[int] = set()                     # never-answered workers told about after WAIT_REMIND
 
     async def run(self):
         while True:
@@ -42,11 +44,13 @@ class HealthMonitor:
     async def tick(self):
         async with self.db.conn() as c:
             workers = [dict(r) for r in await c.fetch(
-                "SELECT id, base_url, state, capabilities, failing_since, last_ok_at FROM workers "
+                "SELECT id, name, base_url, state, capabilities, failing_since, last_ok_at, now() AS at FROM workers "
                 "WHERE enabled AND deleted_at IS NULL")]
         results = await asyncio.gather(*(self.adapter.probe(w["base_url"]) for w in workers))
         became_online = refreshed_one = False
         for w, (ok, kind, detail) in zip(workers, results):
+            who = f"{w['name']} (#{w['id']})"
+            waited = (w["at"] - w["failing_since"]).total_seconds() if w["failing_since"] else 0.0
             if ok:
                 caps = None
                 # after any failure streak, not only after 'offline': a restart shorter than dead_after still changes
@@ -69,8 +73,12 @@ class HealthMonitor:
                     await c.execute(
                         "UPDATE workers SET state = 'online', failing_since = NULL, failure_kind = NULL, offline_since = NULL,"
                         " last_ok_at = now(), capabilities = coalesce($2, capabilities) WHERE id = $1", w["id"], caps)
-                if self.last_failure.pop(w["id"], None):
-                    log.info("worker %s answers again", w["id"])
+                was = self.last_failure.pop(w["id"], None)
+                self.reminded.discard(w["id"])
+                if w["last_ok_at"] is None:
+                    log.info("worker %s answers — its first answer%s", who, f", after {waited:.0f} s" if waited else "")
+                elif was:
+                    log.info("worker %s answers again", who)
                 became_online |= w["state"] != "online"
                 continue
             async with self.db.conn() as c:
@@ -88,15 +96,25 @@ class HealthMonitor:
                       capabilities = CASE WHEN $2 = 'refused' THEN coalesce(capabilities, '{}'::jsonb)
                                             || jsonb_build_object('refused_as', $5::text) ELSE capabilities END
                     WHERE id = $1 RETURNING state""", w["id"], kind, self.s.dead_after, self.s.busy_after, detail)
+            if w["last_ok_at"] is None:
+                # never answered: it is being set up, built or started (the first start builds the UI worker for a
+                # minute or two). Refused, timing out, refused again is all the same news — one line says what is
+                # going on, the next is its first answer (QA: a first start printed a handful of failures, each a
+                # different error while the port opened); a reminder if it takes long
+                if w["id"] not in self.last_failure:
+                    log.info("worker %s has not answered yet (%s: %s) — normal while it is set up, built or starting; "
+                             "the next line is its first answer", who, kind, detail)
+                elif waited >= WAIT_REMIND and w["id"] not in self.reminded:
+                    self.reminded.add(w["id"])
+                    log.info("worker %s still has not answered after %d min (%s: %s) — if it should be running, see its "
+                             "log: docker compose logs ui (the UI worker), journalctl --user -u comfyfarm@<instance> on a "
+                             "GPU host", who, waited // 60, kind, detail)
             # a warning when it goes offline or stops answering; the failure itself once (a restart is a few seconds
-            # of refused connections — not a warning, and not one line every 5 s). A worker that never answered is
-            # being set up or built (the first start's UI worker): offline is what it is until then, not news
-            if new != w["state"] and new in ("offline", "busy_unresponsive") and w["last_ok_at"]:
-                log.warning("worker %s %s (%s: %s)", w["id"], new.replace("_", " "), kind, detail)
+            # of refused connections — not a warning, and not one line every 5 s)
             elif new != w["state"] and new in ("offline", "busy_unresponsive"):
-                log.info("worker %s %s (%s: %s) — it has not answered yet", w["id"], new.replace("_", " "), kind, detail)
+                log.warning("worker %s %s (%s: %s)", who, new.replace("_", " "), kind, detail)
             elif (kind, detail) != self.last_failure.get(w["id"]):
-                log.info("worker %s probe failed (%s): %s", w["id"], kind, detail)
+                log.info("worker %s probe failed (%s): %s", who, kind, detail)
             self.last_failure[w["id"]] = (kind, detail)
         if became_online and self.wake:
             self.wake.set()

@@ -113,8 +113,10 @@ class BrowserHub:
 class WorkerStream:
     """One WebSocket per worker with a deterministic clientId (D-13)."""
 
-    def __init__(self, hub: "EventHub", worker_id: int, base_url: str):
+    def __init__(self, hub: "EventHub", worker_id: int, base_url: str, name: str | None = None):
         self.hub, self.worker_id, self.base_url = hub, worker_id, base_url
+        self.who = f"{name} (#{worker_id})" if name else str(worker_id)
+        self.ever_connected = False                 # before the first connection its failures are the monitor's news
         self.client_id = worker_client_id(hub.s.instance, worker_id)
         # The job the worker is executing, as this connection saw it start: the only owner of frames that carry no
         # prompt_id (type-1 previews, older events). None = not positively known → such frames are dropped (D-28).
@@ -135,17 +137,21 @@ class WorkerStream:
                     # whatever ran before the gap may have ended, or the worker restarted and runs another user's job
                     self.current = None
                     self.connected, attempt = True, 0
-                    if self.last_error:
-                        log.info("worker %s ws: connected again", self.worker_id)
-                        self.last_error = None
+                    if not self.ever_connected:
+                        log.info("worker %s ws: event stream connected", self.who)
+                    elif self.last_error:
+                        log.info("worker %s ws: connected again", self.who)
+                    self.ever_connected, self.last_error = True, None
                     await ws.send(json.dumps({"type": "feature_flags", "data": {"supports_preview_metadata": True}}))
                     async for msg in ws:
                         await self.on_message(msg)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                if type(e).__name__ != self.last_error:
-                    log.info("worker %s ws: %s", self.worker_id, type(e).__name__)
+                if type(e).__name__ != self.last_error and self.ever_connected:
+                    log.info("worker %s ws: %s", self.who, type(e).__name__)
+                elif type(e).__name__ != self.last_error:              # not up yet: the health monitor says so
+                    log.debug("worker %s ws: %s", self.who, type(e).__name__)
                 self.last_error = type(e).__name__
             if self.connected:
                 self.down_since = time.monotonic()
@@ -284,14 +290,15 @@ class EventHub:
     async def sync_workers(self):
         """Keep one stream per enabled worker; called periodically."""
         async with self.db.conn() as c:
-            rows = await c.fetch("SELECT id, base_url FROM workers WHERE enabled AND deleted_at IS NULL")
+            rows = await c.fetch("SELECT id, name, base_url FROM workers WHERE enabled AND deleted_at IS NULL")
         want = {r["id"]: r["base_url"] for r in rows}
+        names = {r["id"]: r["name"] for r in rows}
         for wid in list(self.streams):
             if wid not in want or self.streams[wid][0].base_url != want[wid]:
                 self.streams.pop(wid)[1].cancel()
         for wid, url in want.items():
             if wid not in self.streams:
-                st = WorkerStream(self, wid, url)
+                st = WorkerStream(self, wid, url, names[wid])
                 self.streams[wid] = (st, asyncio.create_task(st.run()))
 
     async def run(self):

@@ -173,35 +173,54 @@ async def test_a_worker_that_refuses_the_router_is_named_not_busy(dsn, monkeypat
         await runner.cleanup()
 
 
-async def test_offline_is_a_warning_only_for_a_worker_that_answered_before(dsn, fakes, caplog):
-    """QA (dev.11): the first start logged a WARNING for the UI worker going offline while it was still being built —
-    it had never answered. A worker that ran and stopped answering is still a warning."""
+async def test_a_worker_that_never_answered_says_so_once_until_it_does(dsn, fakes, caplog, monkeypatch):
+    """QA (dev.11/dev.12): while the first start built the UI worker the router logged a handful of lines — each
+    probe error that differed (refused, timed out, refused) and an "offline" — for a worker that had simply not started
+    yet. One line now says what is going on, a reminder if it takes long, then its first answer. A worker that ran and
+    stopped answering is still a warning."""
     import logging
+    from aiohttp import web
+    from comfyfarm.health import monitor
+    from comfyfarm.testing.fake_worker import FakeWorker
     from conftest import free_port
+    monkeypatch.setattr(monitor, "WAIT_REMIND", 1.5)
+    port = free_port()
     app = create_app(fast_settings(dsn))
-    async with app.router.lifespan_context(app):
-        r = app.state.router
-        live = await fakes()
-        await add_worker(r, f"http://127.0.0.1:{free_port()}", name="never")
-        await add_worker(r, live.url, name="was-up")
+    runner = None
+    with caplog.at_level(logging.INFO, logger="comfyfarm.health.monitor"):
+        async with app.router.lifespan_context(app):
+            r = app.state.router
+            live = await fakes()
+            await add_worker(r, f"http://127.0.0.1:{port}", name="late")
+            await add_worker(r, live.url, name="was-up")
 
-        async def until(name, state):
-            for _ in range(60):
-                await r.health.tick()
-                async with r.db.conn() as c:
-                    if await c.fetchval("SELECT state FROM workers WHERE name = $1", name) == state:
-                        return
-                await asyncio.sleep(0.1)
-            raise AssertionError(f"{name} never became {state}")
-        await until("was-up", "online")
-        await live.stop()
-        with caplog.at_level(logging.INFO, logger="comfyfarm.health.monitor"):
-            await until("never", "offline")
+            async def until(name, state):
+                for _ in range(80):
+                    await r.health.tick()
+                    async with r.db.conn() as c:
+                        if await c.fetchval("SELECT state FROM workers WHERE name = $1", name) == state:
+                            return
+                    await asyncio.sleep(0.1)
+                raise AssertionError(f"{name} never became {state}")
+            await until("was-up", "online")
+            await live.stop()
             await until("was-up", "offline")
-        offline = [(x.levelname, x.getMessage()) for x in caplog.records if " offline (" in x.getMessage()]
-        ids = {}
-        async with r.db.conn() as c:
-            for name in ("never", "was-up"):
-                ids[name] = await c.fetchval("SELECT id FROM workers WHERE name = $1", name)
-        assert [lv for lv, m in offline if m.startswith(f"worker {ids['never']} ")] == ["INFO"], offline
-        assert [lv for lv, m in offline if m.startswith(f"worker {ids['was-up']} ")] == ["WARNING"], offline
+            await until("late", "offline")
+            for _ in range(10):                                  # past WAIT_REMIND
+                await r.health.tick()
+                await asyncio.sleep(0.1)
+            runner = web.AppRunner(FakeWorker().app)            # it starts at last
+            await runner.setup()
+            await web.TCPSite(runner, "127.0.0.1", port).start()
+            await until("late", "online")
+    try:
+        lines = [(x.levelname, x.getMessage()) for x in caplog.records if x.name == "comfyfarm.health.monitor"]
+        late = [(lv, m) for lv, m in lines if m.startswith("worker late (#")]
+        assert [lv for lv, _ in late] == ["INFO", "INFO", "INFO"], late
+        assert "has not answered yet" in late[0][1] and "normal while it is set up, built or starting" in late[0][1]
+        assert "still has not answered after" in late[1][1] and "docker compose logs ui" in late[1][1]
+        assert "its first answer, after" in late[2][1]
+        assert [lv for lv, m in lines if m.startswith("worker was-up (#") and " offline (" in m] == ["WARNING"], lines
+    finally:
+        if runner:
+            await runner.cleanup()
