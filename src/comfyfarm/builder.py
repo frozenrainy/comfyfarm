@@ -127,25 +127,41 @@ class Builder:
         except (OSError, TypeError):
             return None
 
+    def signed_by_me(self, lst: str, signers: str) -> bool:
+        try:
+            with open(lst, "rb") as f, open(lst + ".sig", "rb") as g:
+                fetch.verify(f.read(), g.read(), signers)
+            return True
+        except (OSError, fetch.Refused):
+            return False
+
     def sign_store(self) -> int:
-        """Sign every published artifact not signed yet — new builds, and what the store held before signatures:
-        <ART>/signed/<kind>/<name>.json (the list of its files) and .json.sig."""
-        if not self.key or not os.path.exists(self.key):
+        """Sign every published artifact not signed by this key — new builds, what the store held before signatures,
+        and what an earlier key signed (a builder whose home was deleted makes a new key while the store stays: hosts
+        that pin the new one would refuse every copy): <ART>/signed/<kind>/<name>.json (the list of its files) and
+        .json.sig. A list already there is signed again as it is (artifacts never change); a missing one is made."""
+        pub = self.public_key()
+        if not self.key or not os.path.exists(self.key) or not pub:
             return 0
+        signers = os.path.join(os.path.dirname(self.key), "allowed_signers")
+        with open(signers, "w") as f:
+            f.write(f'{fetch.PRINCIPAL} namespaces="{fetch.NAMESPACE}" {pub}\n')
         n = 0
         for kind in fetch.KINDS:
             d = os.path.join(self.art, kind)
             for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
                 lst = os.path.join(self.art, "signed", kind, name + ".json")
-                if (not fetch.NAME.match(name) or not os.path.isfile(os.path.join(d, name, "READY"))
-                        or os.path.exists(lst + ".sig")):
+                if not fetch.NAME.match(name) or not os.path.isfile(os.path.join(d, name, "READY")):
+                    continue
+                if os.path.exists(lst + ".sig") and self.signed_by_me(lst, signers):
                     continue
                 try:
                     os.makedirs(os.path.dirname(lst), exist_ok=True)
-                    with open(lst + ".tmp", "wb") as f:
-                        f.write(fetch.file_list(os.path.join(d, name), kind, name))
-                    os.chmod(lst + ".tmp", 0o644)
-                    os.replace(lst + ".tmp", lst)
+                    if not os.path.isfile(lst):
+                        with open(lst + ".tmp", "wb") as f:
+                            f.write(fetch.file_list(os.path.join(d, name), kind, name))
+                        os.chmod(lst + ".tmp", 0o644)
+                        os.replace(lst + ".tmp", lst)
                     fetch.sign(lst, self.key)
                     os.chmod(lst + ".sig", 0o644)
                     n += 1

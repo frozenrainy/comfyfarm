@@ -425,3 +425,28 @@ def test_a_builder_that_cannot_make_its_key_still_builds(tmp_path, monkeypatch, 
     monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 255, "", "No user exists for uid 10002"))
     b.ensure_key()
     assert "copies on GPU hosts are off" in capsys.readouterr().out and b.public_key() is None
+
+
+def test_a_new_builder_key_signs_the_store_again(tmp_path):
+    """Field (dev.15): the control plane's data directory was deleted and started anew while the artifact store stayed.
+    The new builder key must not leave the old key's signatures in place — hosts that pin the new key would refuse
+    every copy. What another key signed is signed again (the lists are kept: artifacts never change)."""
+    from comfyfarm import fetch
+    from test_fetch import published
+    for d in ("requests", "status", "art"):
+        (tmp_path / d).mkdir(parents=True)
+    published(tmp_path / "art", "venv", "v-1")
+    mk = lambda home: builder.Builder(str(tmp_path / "requests"), str(tmp_path / "status"), str(tmp_path / "art"),  # noqa: E731
+                                      str(tmp_path), None, [], key=str(tmp_path / home / "signing" / "artifacts"))
+    old = mk("old-home")
+    old.ensure_key()
+    assert old.sign_store() == 1
+    lst = tmp_path / "art" / "signed" / "venv" / "v-1.json"
+    before = lst.read_bytes()
+    new = mk("new-home")                                 # the builder's home was deleted: a new key
+    new.ensure_key()
+    assert new.sign_store() == 1 and new.sign_store() == 0
+    signers = tmp_path / "pinned"
+    signers.write_text(f'{fetch.PRINCIPAL} namespaces="{fetch.NAMESPACE}" {new.public_key()}\n')
+    fetch.verify(lst.read_bytes(), (tmp_path / "art" / "signed" / "venv" / "v-1.json.sig").read_bytes(), str(signers))
+    assert lst.read_bytes() == before                    # the list itself was not made again
