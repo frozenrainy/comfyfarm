@@ -1,6 +1,7 @@
 // Worker setup (docs/design/14): describe the host → run the setup script on it (the operator, or the router over ssh —
 // the operator chooses, D-41) → read the host check → add the worker, configure its instance, assign, start.
 import { act, api, button, formDialog, h, pill, setText, t, toast } from "../core.js";
+import { locale } from "../i18n.js";
 
 const GPUS = [["amd", "AMD (ROCm)"], ["nvidia", "NVIDIA (CUDA)"], ["any", "Any / not sure"], ["none", "None (CPU only)"]];
 const PATHS = [["art", "Artifact store <ART> (same path on every host)", "/srv/comfyfarm/art"],
@@ -37,6 +38,7 @@ const TIPS = {
   path_output: "Results. Shared by every worker and the UI worker: the same storage everywhere — never {instance}. Mount it before setup: setup never mounts storage.",
   path_user: "Users' workflows and settings. Shared by every worker and the UI worker — never {instance}. Mount it before setup: setup never mounts storage.",
   path_temp: "Previews and other temporary files of this instance, on this host. {instance} becomes the instance name.",
+  listen: "ComfyUI's --listen. 0.0.0.0 answers on every address of the host — the worker's allow-list refuses everyone but the router and the gateway either way. One address (this host's) when your site wants nothing open on all addresses.",
   builds: "Lets System → Rollout → Profiles → From a recipe ask this host to build a recipe installed here. A separate build account owns the artifact store; ComfyUI's account only reads it. Needs internet and git; setup brings a pinned uv.",
 };
 
@@ -48,12 +50,15 @@ export async function setupWorker(refresh, again = null, fix = null) {
   // unfinished setups can be continued: the dialog may have been closed while the host ran the script
   const open = (await api("GET", "/api/admin/setups")).filter((x) => ["waiting", "failed", "reported"].includes(x.status));
   const src = fix || again;                               // where the form's values come from
+  // a host that ran the script and waits to be added (the dialog was closed) is the likely next step: offered first
+  const ready = open.find((x) => x.status === "reported");
+  const at = (x) => new Date(x.created_at).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" });
   const pickRole = src ? { role: src.spec.role || "gpu" } : await formDialog(t("Set up a worker"), [
-    { name: "role", label: t("What will this host be?"), type: "select", value: "gpu",
-      options: [{ value: "gpu", label: t("GPU worker — runs the jobs") },
-                { value: "ui", label: t("UI worker — serves the screen and the users' files (no GPU, no jobs)") },
-                ...open.map((x) => ({ value: `continue:${x.id}`,
-                  label: t("Continue: {name} on {host} ({status})", { name: x.spec.instance, host: x.extra.host, status: t(x.status) }) }))],
+    { name: "role", label: t("What will this host be?"), type: "select", value: ready ? `continue:${ready.id}` : "gpu",
+      options: [...open.map((x) => ({ value: `continue:${x.id}`,
+                  label: t("Continue: {name} on {host} ({status}, {at})", { name: x.spec.instance, host: x.extra.host, status: t(x.status), at: at(x) }) })),
+                { value: "gpu", label: t("GPU worker — runs the jobs") },
+                { value: "ui", label: t("UI worker — serves the screen and the users' files (no GPU, no jobs)") }],
       hint: t("A farm has one UI worker (often on the control-plane host) and any number of GPU workers. The gateway finds the UI worker by itself.") },
   ], t("Next"));
   if (!pickRole) return;
@@ -80,7 +85,9 @@ export async function setupWorker(refresh, again = null, fix = null) {
   // its address is most likely the one this page was opened at
   const routerPort = Number((/(\d+)$/.exec(String(dflt.router || "")) || [])[1] || 0);
   const firstGpu = !src && pickRole?.role !== "ui" && !(await api("GET", "/api/admin/workers")).some((w) => w.kind !== "ui");
-  const hereHost = /^(localhost|127\.|::1|\[)/.test(location.hostname) ? "" : location.hostname;
+  const loop = (x) => !x || /^(localhost|127\.|::1|\[|0\.0\.0\.0)/.test(x);
+  const routerHost = (() => { try { return new URL(routerGuess).hostname; } catch { return ""; } })();
+  const hereHost = !loop(location.hostname) ? location.hostname : !loop(routerHost) ? routerHost : "";
   const roleProfiles = profiles.filter((p) => ((p.flags || []).includes("--cpu")) === (pickRole?.role === "ui"));
   // the GPU of a new worker: what this farm's GPU profiles were built for (their venv names the accelerator)
   const builtFor = new Set(roleProfiles.map((p) => /rocm/i.test(p.venv) ? "amd" : /cu\d|cuda/i.test(p.venv) ? "nvidia" : "any"));
@@ -99,7 +106,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
   let typed = null, made = null, v = null, body = null, inst = null, errors = {};
   // a refusal that names a field ("host: …", "paths.input must be …", "instance name … is taken") marks that field
   const FIELD = [[/^host\b/, "host"], [/^instance\b/, "instance"], [/^router_url\b/, "router_url"], [/^account\b/, "account"],
-                 [/^uid\b/, "uid"], [/^port\b/, "port"], [/^paths\.(\w+)/, (m) => `path_${m[1]}`],
+                 [/^uid\b/, "uid"], [/^port\b/, "port"], [/^listen\b/, "listen"], [/^paths\.(\w+)/, (m) => `path_${m[1]}`],
                  [/^a worker with this name or address/, "name"]];
   const fieldOf = (msg) => { for (const [re, f] of FIELD) { const m = re.exec(msg); if (m) return typeof f === "function" ? f(m) : f; } return null; };
   while (!made) {
@@ -121,6 +128,8 @@ export async function setupWorker(refresh, again = null, fix = null) {
         hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
       { name: "port", label: t("ComfyUI port"), type: "number", value: src ? last.port : ui ? 8189 : routerPort === 8188 ? 8288 : 8188,
         hint: ui ? t("not 8188 when it shares the host with the router") : "" },
+      { name: "listen", label: t("ComfyUI listens on"), value: src ? last.listen ?? "0.0.0.0" : "0.0.0.0",
+        hint: t("0.0.0.0: every address of the host (the worker's allow-list still refuses all but the router and the gateway); this host's address: that one only") },
       { name: "ssh_port", label: t("ssh port"), type: "number", value: lastX.ssh_port ?? 22 },
       { name: "account", label: t("Service account (its own, made by setup)"), value: last?.account ?? "comfyfarm",
         hint: t("not your login account: setup creates it to run ComfyUI, and only the router's key — restart, query, check — logs in as it") },
@@ -145,7 +154,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
     body = {
       role: ui ? "ui" : "gpu", name: v.name.trim() || inst, host: v.host.trim(), instance: inst,
       gpu: ui ? "none" : v.gpu, group: ui ? null : v.group || null,
-      profile_id: v.profile ? Number(v.profile) : null, port: v.port || 8188, ssh_port: v.ssh_port || 22,
+      profile_id: v.profile ? Number(v.profile) : null, port: v.port || 8188, listen: v.listen.trim() || "0.0.0.0", ssh_port: v.ssh_port || 22,
       account: v.account.trim(), uid: v.uid || null, router_url: v.router_url.trim(),
       paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),
       builds: !!v.builds, worker_id: again ? again.worker_id : null, replaces: fix ? fix.id : null,

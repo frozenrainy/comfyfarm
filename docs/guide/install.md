@@ -43,10 +43,14 @@ Dashboard page, for administrators) shows where you are.
 4. **The GPU worker**: put your models under `/srv/comfyfarm/models` (`checkpoints/`, `loras/`, `vae/` …, readable by
    everyone; setup makes the directory if it is not there, and the host check warns while it is empty).
    *System → Workers → Set up a worker*: the form is filled for this server — its address, the router, the paths, port
-   8288 (the router has 8188), the newest GPU profile, and a group `gpu` made with the worker. Run the command it shows
-   (as a user with sudo), *Add the worker*. It starts.
+   8288 (the router has 8188), the newest GPU profile, and a group `gpu` made with the worker. ComfyUI listens on every
+   address (`0.0.0.0`; its allow-list refuses all but the router and the gateway) — put this host's address in
+   *ComfyUI listens on* if nothing may listen on all addresses. Run the command it shows (as a user with sudo), *Add the
+   worker*. It starts.
 5. **Artists**: *System → Users → New user* — every group is ticked. They open `http://<this server>:8080`.
-6. **Check**: `docker compose exec router comfyfarm doctor`, and one workflow as an artist.
+6. **Check**: `docker compose exec router comfyfarm doctor`, and one workflow as an artist. ComfyUI's own first
+   workflow names models you may not have: open *Templates*, take a basic image generation one, and pick your
+   checkpoint in its loader. The image shows in ComfyUI's queue and in the dashboard's *History*.
 
 More GPU machines: §3, *Adding a GPU machine*. A different kind of GPU: a second group, and a build with its recipe.
 
@@ -109,6 +113,23 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
   the logs. Back it up (below); delete it only to start over — then every worker must be set up again.
 - **Upgrade**: check out the new release (`git fetch --tags && git checkout v<version>`) and `docker compose up -d`;
   `init` runs again and changes nothing; the database migrates when the router starts.
+- **From 0.1.0-dev.10 or earlier** (easy only): those kept the data in Docker volumes; 0.1.0-dev.11 reads
+  `COMFYFARM_DATA`. Copy the volumes before its first start — otherwise it starts as a new, empty farm (the volumes
+  stay untouched; stop it, `sudo rm -rf /srv/comfyfarm/data`, and copy then):
+
+  ```sh
+  docker compose down                     # still the old release; not -v
+  git fetch --tags && git checkout v0.1.0-dev.11
+  sudo mkdir -p /srv/comfyfarm/data       # or your COMFYFARM_DATA
+  for v in state db logs builds ui-agent builder-home ui-home; do
+    docker run --rm --user 0:0 --network none -v comfyfarm_$v:/from:ro -v /srv/comfyfarm/data:/to \
+      --entrypoint sh ghcr.io/frozenrainy/comfyfarm:0.1.0-dev.11 -c "mkdir -p /to/$v && cp -a /from/. /to/$v/"
+  done
+  docker compose up -d
+  ```
+
+  Sessions, accounts, workers and the UI worker carry over (rehearsed from 0.1.0-dev.10). Once it runs, the old volumes
+  can go: `docker volume rm comfyfarm_state comfyfarm_db …`.
 - **Backups**: `docker compose exec router comfyfarm backup /state/backups --user-dir /userdata` (the users' workflows:
   `COMFYFARM_SHARED/user`, mounted read-only into the router); the result is in `COMFYFARM_DATA/state/backups` —
   copy it off the host ([backup.md](backup.md)).
@@ -334,6 +355,22 @@ directory used before its share is mounted fills the local disk under the mount 
 machine (its address, port 8188 is fine there). The same kind of GPU: the same group and profile. Another kind: a new
 group, a *Build* with its recipe, its own profiles. Network: the GPU machine reaches the router's 8188; the
 control-plane host reaches the GPU machine's ssh (22) and its ComfyUI port.
+
+### Removing a worker host
+
+*System → Workers → Delete* (a running job is reported lost), then on the host:
+
+```sh
+sudo systemctl --user -M comfyfarm@ stop 'comfyfarm@*'           # its ComfyUI instances
+sudo loginctl disable-linger comfyfarm && sudo loginctl terminate-user comfyfarm
+sudo systemctl disable --now comfyfarm-build.path 2>/dev/null     # only if builds were allowed there
+sudo rm -rf /etc/comfyfarm /opt/comfyfarm /etc/systemd/user/comfyfarm@.service /etc/systemd/system/comfyfarm-build.*
+sudo userdel -r comfyfarm             # its home: the router's key, the local copies, temp; -r comfyfarm-build likewise
+```
+
+Storage is the site's and stays: the models, the shared storage, the artifact store. A host that keeps other instances
+keeps all of this: stop and disable `comfyfarm@<instance>` only, and remove its `/etc/comfyfarm/<instance>.env` and
+`.check.json`.
 
 ## 4. In the dashboard
 

@@ -28,6 +28,8 @@ def box(tmp_path):
 
     def runner(argv, **kw):
         calls.append(argv)
+        running = [json.load(open(f)) for f in (tmp_path / "status").glob("*.json") if builder.REQUEST.match(f.name[:-5])]
+        assert any(x["state"] == "running" and x["recipe"] == "rocm-x" for x in running)     # shown while it builds
         kw["stderr"].write(b"building...\n")
         return subprocess.CompletedProcess(argv, 0, json.dumps({"template": "rocm-x-1"}).encode(), b"")
     b = builder.Builder(str(tmp_path / "requests"), str(tmp_path / "status"), str(tmp_path / "art"), str(tmp_path / "share"),
@@ -226,6 +228,7 @@ async def test_the_ui_worker_container_is_registered_built_for_and_started(dsn, 
                 await asyncio.sleep(0.1)
             workers = (await c.get("/api/admin/workers", headers=H)).json()
             assert [(w["name"], w["kind"]) for w in workers] == [("ui", "ui")]
+            assert workers[0]["builtin"]          # compose sets it up: no "Set up again" (QA: a dead end)
             req = json.loads(reqs[0].read_text())
             assert req["roles"] == ["ui"] and req["recipe"] == "rocm-x" and req["nodes"] == []
             assert r.first_start["state"] == "building"
@@ -341,3 +344,11 @@ def test_the_builder_says_what_each_recipe_is_for(box):
     (tmp / "share/recipes/rocm-x.json").write_text(json.dumps({"recipe": "rocm-x", "about": "AMD RDNA4"}))
     p = b.policy()
     assert p["recipes"] == ["rocm-x"] and p["about"] == {"rocm-x": "AMD RDNA4"}
+
+
+def test_device_names_read_like_the_card():
+    """QA (dev.11): the GPU column showed torch's device string ("cuda:0 AMD Radeon Graphics : native")."""
+    from comfyfarm.api.admin import device_name
+    assert device_name("cuda:0 AMD Radeon Graphics : native") == "AMD Radeon Graphics"
+    assert device_name("cuda:1 NVIDIA GeForce RTX 3080 Ti : cudaMallocAsync") == "NVIDIA GeForce RTX 3080 Ti"
+    assert device_name("Some Card") == "Some Card" and device_name(None) is None

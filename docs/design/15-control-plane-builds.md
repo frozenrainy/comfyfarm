@@ -139,3 +139,19 @@ What they stumbled on, and what changed:
 - The router's log was one line per HTTP request (httpx); the builder said nothing about its requests. Both fixed.
 - The first-administrator form forgot the setup code and the name after a mistake.
 - Outputs are shared between users by design of stock ComfyUI; the security design says so (09).
+
+Then the same, on one real GPU server (AMD R9700, SD 1.5 from an artist's account in about 17 minutes, no blocker):
+
+- *Build* preselected the alphabetically first recipe (CUDA) on an AMD farm. Without GPU workers to tell, the recipe
+  is now picked, not guessed; *Build* and *From a recipe* are the highlighted buttons, in the first day's order.
+- *Set up a worker* left the host address empty when the page was opened on loopback (a tunnel): it falls back to the
+  router's published address. *ComfyUI listens on* is in the form (`0.0.0.0` by default; one address for sites that
+  want nothing on all addresses). A newer setup of the same host and instance replaces an unfinished one, and a
+  finished one closes the rest: one *Continue* per host.
+- On the router's own host the allow-list let in every Docker network — the builder's (node pack code with internet)
+  and the default bridge. Only the router's own networks now (the gateway shares them): checked from the builder's
+  network and the default bridge, both refused.
+- The setup command wrote the checked script to a fixed name in `/tmp`, which another account could have made first
+  and changed before `sudo`. It is piped to `sudo python3 -` now, written only once checked.
+- A build in progress is shown on the Rollout page after its dialog closes; the router's log has the audit events, and
+  a restart's refused connections are one line, not one every few seconds.

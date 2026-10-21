@@ -135,6 +135,8 @@ class Builder:
         try:
             req = self.take(rid)
             st["kind"] = req.get("kind")
+            if st["kind"] == "build":                    # the dashboard says what is building while it runs
+                st["recipe"] = str(req.get("recipe"))[:100]
             write_json(os.path.join(self.status, rid + ".json"), st)
             say(f"{rid}: {req.get('kind')} " + (f"{req.get('recipe')} ({','.join(req.get('roles') or publish.ROLES)}, "
                                                f"{len(req.get('nodes') or [])} node pack(s))" if req.get("kind") == "build"

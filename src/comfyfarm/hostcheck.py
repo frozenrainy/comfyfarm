@@ -198,7 +198,7 @@ class Check:
         if templates:
             usable = [t["template"] for t in templates if not t["missing"]]
             self.add(OK if usable else WARN, "recipes", ", ".join(usable or [t["template"] + " (artifacts missing)" for t in templates])
-                     + " — System → Rollout → Profiles → From a recipe", templates=templates)
+                     + " (templates: System → Rollout → From a recipe makes profiles of them)", templates=templates)
         else:
             self.add(WARN, "recipes", f"no profile template in {art} — on a host with internet that mounts it here: "
                      f"python3 publish.py recipe {art} rocm-gfx1201 (docs/guide/rollouts.md §1)")
@@ -219,7 +219,8 @@ class Check:
         else:
             free = shutil.disk_usage(local).free
             self.add(OK if free >= LOCAL_FREE_WARN else WARN, "local root",
-                     f"{local}: {free / 2**30:.0f} GB free" + ("" if free >= LOCAL_FREE_WARN else " (a core and node copies need room)"))
+                     f"{local}: {free / 2**30:.0f} GB free" + ("" if free >= LOCAL_FREE_WARN else
+                     f" — less than {LOCAL_FREE_WARN // 2**30} GB: copies of ComfyUI and the node sets go here"))
         dirs = self.cfg.get("paths", {})
         for key in ("input", "output", "user", "temp"):
             d = dirs.get(key)
@@ -316,10 +317,13 @@ class Check:
 
     # ---- time and network -----------------------------------------------------------------------------------------
     def time_and_network(self):
-        code, out = self.cmd(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
-        sync = out.strip() == "yes"
-        self.add(OK if sync else WARN, "clock", "NTP synchronised" if sync else
-                 "not synchronised — job times and session expiry compare clocks across hosts")
+        if self.cfg.get("container"):          # a container has the host's clock and no timedatectl of its own
+            self.add(OK, "clock", "the host's (a container keeps it); compared with the router's below")
+        else:
+            code, out = self.cmd(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+            sync = out.strip() == "yes"
+            self.add(OK if sync else WARN, "clock", "NTP synchronised" if sync else
+                     "not synchronised — job times and session expiry compare clocks across hosts")
         router = self.env.get("COMFY_LAUNCH_ROUTER", "").rstrip("/")
         try:
             t0 = time.time()

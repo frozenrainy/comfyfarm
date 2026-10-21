@@ -9,6 +9,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import secrets
 from importlib import metadata
@@ -79,6 +80,8 @@ def check_spec(body: SetupIn) -> None:
         raise HTTPException(400, f"gpu: one of {', '.join(GPU)}")
     if body.role == "ui" and body.group:
         raise HTTPException(400, "a UI worker belongs to no group: it serves the screen, jobs go to GPU workers")
+    if not be._is_ip(body.listen):
+        raise HTTPException(400, "listen: an IP address of the host (0.0.0.0 = every address)")
     for p in (body.port, body.ssh_port):
         if not 1 <= p <= 65535:
             raise HTTPException(400, "port out of range")
@@ -94,6 +97,16 @@ def check_spec(body: SetupIn) -> None:
                                  "under the local root (contract §4)")
     if body.mounts:
         raise HTTPException(400, "setup no longer mounts storage: mount it on the host yourself, then set the paths")
+
+
+def router_networks() -> list[str]:
+    """The router container's own networks (the compose ones: the gateway is on them too). A worker on the router's own
+    host allows these, not every Docker network there — the builder's (node pack code, internet) and the default
+    bridge (any container) are not the farm's (QA, dev.11). Empty outside a container: the router's address is enough."""
+    if not os.path.exists("/.dockerenv"):
+        return []
+    from ..uiworker import own_networks
+    return own_networks()
 
 
 def instance_config(spec: dict, extra: dict, seen: str | None = None) -> dict:
@@ -159,7 +172,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         spec = {"instance": body.instance, "role": body.role, "account": body.account, "uid": body.uid, "router_url": base,
                 "art": body.paths["art"], "local": body.paths["local"], "gpu": "none" if body.role == "ui" else body.gpu, "port": body.port, "listen": body.listen,
                 "paths": {k: v for k, v in body.paths.items() if k not in ("art", "local")},
-                "agent_pubkey": pub,
+                "agent_pubkey": pub, "router_networks": router_networks(),
                 "builds": body.builds, **({"previous_account": previous_account} if previous_account else {})}
         extra = {"name": body.name.strip(), "host": body.host, "ssh_port": body.ssh_port, "group": body.group,
                  "profile_id": body.profile_id, "again": body.worker_id}
@@ -180,6 +193,12 @@ def make_router(ctx: Ctx) -> APIRouter:
                     if old is None:
                         raise HTTPException(409, "the setup to correct is running, finished or unknown")
                     await audit(c, who, "worker setup replaced", body.instance, setup=body.replaces, by=sid)
+                # an unfinished setup of the same instance on the same host is superseded: one Continue per host, and
+                # its command stops working (QA: two identical entries, the wrong one picked)
+                for old in await c.fetch("UPDATE worker_setups SET status = 'replaced', expires_at = now() WHERE id <> $1 "
+                                         "AND status IN ('waiting', 'failed', 'reported') AND spec->>'instance' = $2 "
+                                         "AND extra->>'host' = $3 RETURNING id", sid, body.instance, body.host):
+                    await audit(c, who, "worker setup replaced", body.instance, setup=old["id"], by=sid)
         url = f"{base}/api/worker_setup/{token}/script"
         return {"id": sid, "script_url": url, "script_sha256": sha, "command": hostsetup.operator_command(url, sha),
                 "expires_in": int(TOKEN_TTL.total_seconds())}
@@ -282,10 +301,15 @@ def make_router(ctx: Ctx) -> APIRouter:
         async with db.conn() as c:
             async with c.transaction():
                 r = await c.fetchrow("UPDATE worker_setups SET status = 'finished', worker_id = $2, finished_at = now() "
-                                     "WHERE id = $1 AND status = 'reported' RETURNING spec", sid, worker_id)
+                                     "WHERE id = $1 AND status = 'reported' RETURNING spec, extra", sid, worker_id)
                 if r is None:
                     raise HTTPException(409, "only a reported setup can be finished")
                 await audit(c, who, "worker setup finished", r["spec"]["instance"], worker=worker_id)
+                # another unfinished setup of this instance on this host is done with: no "Continue" for a worker
+                # that exists (QA: a leftover was offered, and adding it again would fail)
+                await c.execute("UPDATE worker_setups SET status = 'replaced', expires_at = now() WHERE id <> $1 "
+                                "AND status IN ('waiting', 'failed', 'reported') AND spec->>'instance' = $2 "
+                                "AND extra->>'host' = $3", sid, r["spec"]["instance"], r["extra"]["host"])
         return {"finished": True}
 
     # ---- the worker host's calls (no user: the token is the credential) --------------------------------------------

@@ -294,3 +294,17 @@ def test_models_missing_empty_or_there(tmp_path, router):
     gone = dict(paths, models=str(tmp_path / "no-models"))
     m = models(run({"gpu": "amd", "paths": gone}))
     assert m["level"] == "FAIL" and "mount the models there" in m["detail"]
+
+
+def test_in_the_ui_worker_container_the_clock_is_the_hosts(tmp_path, router):
+    """QA (dev.11): every install showed "clock not synchronised" for the UI worker — a container has no timedatectl."""
+    asked = []
+
+    def cmd(argv, timeout=20):
+        asked.append(argv[0])
+        return 127, "not found"
+    out, _ = check(tmp_path, router, cfg_extra={"container": True, "gpu": "none", "role": "ui"}, cmd=cmd)
+    clock = next(r for r in out if r["name"] == "clock")
+    assert clock["level"] == "OK" and "timedatectl" not in asked
+    out, _ = check(tmp_path / "b", router, cmd=cmd)                    # on a host it is still checked
+    assert next(r for r in out if r["name"] == "clock")["level"] == "WARN"

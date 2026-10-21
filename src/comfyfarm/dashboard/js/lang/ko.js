@@ -170,7 +170,7 @@ export default {
     "각 호스트의 런처가 워커를 띄우는 방법입니다. 배지: 일치 = 워커가 할당된 렌더를 그대로 실행 중, 다름 = 다른 것을 실행 중 (아직 재시작 전이거나 시작 실패).",
   "A profile in use cannot be changed — copy it and roll the copy out.": "사용 중인 프로필은 바꿀 수 없습니다 — 복사해서 그 사본을 배포하세요.",
   "Instance": "인스턴스", "Profile": "프로필", "Badge": "배지", "Rev": "리비전", "Restart via": "재시작 방식",
-  "Core": "코어", "Venv": "Venv", "Nodes": "노드", "Flags": "플래그", "Assigned": "할당", "When": "시각", "Who": "누가",
+  "Core": "코어", "Venv": "가상환경(venv)", "Nodes": "노드", "Flags": "플래그", "Assigned": "할당", "When": "시각", "Who": "누가",
   "What": "무엇을", "Target": "대상", "Detail": "내용",
   "Instance of {worker}": "{worker}의 인스턴스",
   "Instance name (the launcher's COMFY_LAUNCH_INSTANCE)": "인스턴스 이름 (런처의 COMFY_LAUNCH_INSTANCE)",
@@ -458,7 +458,36 @@ export default {
   "UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>":
     "UI용 프로필: GPU 워커와 같은 코어, CPU venv, 노드 comfyfarm_ui·comfyfarm_worker, 플래그 --cpu, env COMFYFARM_ALLOW=<게이트웨이·라우터 주소>",
   "not 8188 when it shares the host with the router": "라우터와 같은 호스트라면 8188은 피하세요",
-  "Continue: {name} on {host} ({status})": "이어서: {host}의 {name} ({status})",
+  "Continue: {name} on {host} ({status}, {at})": "이어서: {host}의 {name} ({status}, {at})",
+  "ComfyUI listens on": "ComfyUI 수신 주소",
+  "0.0.0.0: every address of the host (the worker's allow-list still refuses all but the router and the gateway); this host's address: that one only":
+    "0.0.0.0: 호스트의 모든 주소 (워커의 허용 목록이 라우터와 게이트웨이 말고는 여전히 거부합니다). 이 호스트 주소를 쓰면 그 주소에서만 받습니다",
+  "ComfyUI's --listen. 0.0.0.0 answers on every address of the host — the worker's allow-list refuses everyone but the router and the gateway either way. One address (this host's) when your site wants nothing open on all addresses.":
+    "ComfyUI의 --listen. 0.0.0.0은 호스트의 모든 주소에서 받습니다 — 어느 쪽이든 워커의 허용 목록이 라우터와 게이트웨이 말고는 거부합니다. 사이트 규칙상 모든 주소에 열어 두면 안 된다면 이 호스트의 주소 하나를 넣으세요.",
+  "not started yet": "아직 시작 전", "manual": "수동", "Show": "보기", "Show the log": "로그 보기",
+  "— pick the kind of GPU your workers have —": "— 워커의 GPU 종류를 고르세요 —",
+  "optional — usually empty: setup already lets the router and the gateway in on each host":
+    "선택 — 보통 비워 둡니다: 설치가 이미 각 호스트에서 라우터와 게이트웨이를 허용합니다",
+  "Build of {recipe} on the control plane — {min} min so far": "제어 영역에서 {recipe} 빌드 중 — {min}분 경과",
+  "Build of {recipe} done: template {template}": "{recipe} 빌드 완료: 견본 {template}",
+  "Build of {recipe} failed: {error}": "{recipe} 빌드 실패: {error}",
+  "A build of {recipe} is running: its template appears here when it is done": "{recipe} 빌드가 진행 중입니다: 끝나면 그 견본이 여기에 나타납니다",
+  "Profiles created: {names} — next, Set up a worker picks the GPU profile (the UI worker already runs what it needs)":
+    "프로필을 만들었습니다: {names} — 다음은 워커 설치에서 GPU 프로필을 고르세요 (UI 워커는 이미 필요한 것을 실행 중)",
+  "Profiles created: {names} — roll the UI profile out to the UI worker (Start rollout) for the node packs; the GPU profile goes to GPU workers (Set up a worker, or a rollout)":
+    "프로필을 만들었습니다: {names} — 노드팩을 쓰려면 UI 프로필을 UI 워커에 롤아웃하세요(롤아웃 시작). GPU 프로필은 GPU 워커용입니다(워커 설치 또는 롤아웃)",
+  // ---- audit actions (the router's fixed words) ----
+  "comfyfarm (first start)": "comfyfarm (첫 시작)", "assign": "할당", "build requested": "빌드 요청",
+  "first administrator created": "첫 관리자 생성", "instance configured": "인스턴스 설정", "instance removed": "인스턴스 삭제",
+  "instance started": "인스턴스 시작", "maintenance off": "점검 끝", "maintenance on": "점검 시작",
+  "node pack added": "노드팩 추가", "node pack changed": "노드팩 변경", "node pack removed": "노드팩 삭제",
+  "profile changed": "프로필 변경", "profile created": "프로필 생성", "profile deleted": "프로필 삭제",
+  "rollout abort": "롤아웃 중단", "rollout resumed": "롤아웃 재개", "rollout started": "롤아웃 시작",
+  "worker setup created": "워커 설치 생성", "worker setup finished": "워커 설치 완료", "worker setup over ssh": "ssh로 워커 설치",
+  "worker setup renewed": "워커 설치 명령 갱신", "worker setup replaced": "워커 설치 대체", "worker changed": "워커 변경",
+  "setting changed": "설정 변경", "rollout succeeded": "롤아웃 성공", "rollout failed": "롤아웃 실패",
+  "rollout aborted": "롤아웃 중단됨", "worker setup reported": "워커 설치 보고", "UI worker container added": "UI 워커 컨테이너 추가",
+  "worker setup": "워커 설치",
   "(the host has reported — no need to run the script again)": "(호스트가 이미 보고했습니다 — 스크립트를 다시 실행할 필요 없음)",
   "http://<router address>:<router port> — the address the launcher fetches its render from": "http://<라우터 주소>:<라우터 포트> — 런처가 렌더를 받아 가는 주소",
 };

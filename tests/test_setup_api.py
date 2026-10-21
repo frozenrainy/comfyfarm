@@ -47,7 +47,7 @@ async def test_setup_from_command_to_worker(farm, tmp_path):
     r, c, keys = farm
     made = (await c.post("/api/admin/setups", json=spec(), headers=H)).json()
     assert made["script_url"].startswith("http://10.0.0.5:8188/api/worker_setup/")
-    assert made["script_sha256"] in made["command"] and "sudo python3 /tmp/comfyfarm-setup.py" in made["command"]
+    assert made["script_sha256"] in made["command"] and made["command"].endswith(" | sudo python3 -")
     assert (keys / "comfyfarm-agent").exists() and (keys / "comfyfarm-agent.pub").exists()
     path = "/" + made["script_url"].split("/", 3)[3]
     got = await c.get(path)                                       # no user: the token is the credential
@@ -71,7 +71,13 @@ async def test_setup_from_command_to_worker(farm, tmp_path):
     assert put.status_code == 200, put.text
     cfg = s["instance_config"]["restart_config"]
     assert cfg == {"host": "10.0.0.21", "user": "comfyfarm", "key": "comfyfarm-agent", "known_hosts": "known_hosts"}
+    async with r.db.conn() as x:                     # a leftover of the same host and instance (made before dev.11)
+        stale = await x.fetchval("INSERT INTO worker_setups(token_sha256, spec, extra, script, script_sha256, created_by, "
+                                 "expires_at, status) SELECT 'x' || token_sha256, spec, extra, script, script_sha256, created_by, "
+                                 "expires_at, 'reported' FROM worker_setups WHERE id = $1 RETURNING id", made["id"])
     assert (await c.post(f"/api/admin/setups/{made['id']}/finished?worker_id={w['id']}", headers=H)).status_code == 200
+    left = {x["id"]: x["status"] for x in (await c.get("/api/admin/setups", headers=H)).json()}
+    assert left[stale] == "replaced"                 # no "Continue" offered for a worker that exists
     assert (await c.get(path)).status_code == 404                                  # the token is spent
 
 
@@ -243,6 +249,24 @@ async def test_an_unfinished_setup_gets_a_new_command(farm):
     assert (await c.post(f"/api/admin/setups/{made['id']}/renew", headers=H)).status_code == 409    # reported: add it instead
 
 
+async def test_a_new_setup_of_the_same_host_supersedes_the_unfinished_one(farm, monkeypatch):
+    """QA (dev.11): a second setup of gpu-1 on the same host left two identical "Continue" entries, and the wrong one
+    was picked. The newer one replaces it; a setup of another host is left alone."""
+    from comfyfarm.api import setup as setup_api
+    r, c, keys = farm
+    first = (await c.post("/api/admin/setups", json=spec(), headers=H)).json()
+    other = (await c.post("/api/admin/setups", json=spec(host="10.0.0.22", instance="gpu-2", name="gpu two"), headers=H)).json()
+    monkeypatch.setattr(setup_api, "router_networks", lambda: ["10.200.2.0/24"])
+    second = (await c.post("/api/admin/setups", json=spec(listen="10.0.0.21"), headers=H)).json()
+    states = {x["id"]: x["status"] for x in (await c.get("/api/admin/setups", headers=H)).json()}
+    assert states[first["id"]] == "replaced" and states[second["id"]] == "waiting" and states[other["id"]] == "waiting"
+    assert (await c.get("/" + first["script_url"].split("/", 3)[3])).status_code == 404       # its command stopped
+    got = (await c.get(f"/api/admin/setups/{second['id']}", headers=H)).json()
+    assert got["spec"]["listen"] == "10.0.0.21" and got["spec"]["router_networks"] == ["10.200.2.0/24"]
+    bad = await c.post("/api/admin/setups", json=spec(listen="everywhere"), headers=H)
+    assert bad.status_code == 400 and bad.json()["detail"].startswith("listen:")
+
+
 async def test_correcting_a_setup_replaces_it(farm, tmp_path):
     """Correct the values: a new setup with the fixed values; the old one's token stops working and it leaves the
     Continue list. Only a setup nobody is running or has added can be corrected."""
@@ -277,7 +301,9 @@ async def test_correcting_a_setup_replaces_it(farm, tmp_path):
 
 
 def test_the_operator_command_says_what_went_wrong(tmp_path):
-    """QA (dev.11): running a command that setting up again had replaced printed a urllib traceback (HTTP 404)."""
+    """QA (dev.11): running a command that setting up again had replaced printed a urllib traceback (HTTP 404). And the
+    checked script went to /tmp/comfyfarm-setup.py, a name another account could take first: it is piped now, and
+    only once checked."""
     import hashlib
     import http.server
     import subprocess
@@ -296,14 +322,15 @@ def test_the_operator_command_says_what_went_wrong(tmp_path):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base, good = f"http://127.0.0.1:{srv.server_port}", hashlib.sha256(b"print('hi')\n").hexdigest()
     try:
-        def fetch(url, sha):
-            p = subprocess.run(["sh", "-c", hostsetup.operator_command(url, sha).split(" && ")[0]], capture_output=True,
-                               text=True, timeout=30)
-            return p.returncode, p.stderr.strip()
-        rc, err = fetch(base + "/gone", good)
-        assert rc != 0 and err.startswith("comfyfarm: the router answered 404 — this command was used, replaced or has "
-                                          "expired") and "Traceback" not in err
-        assert fetch(base + "/ok", "0" * 64) == (1, "comfyfarm: checksum mismatch: not the script the dashboard made")
-        assert fetch(base + "/ok", good) == (0, "")
+        def fetch(url, sha):                         # the part before sudo: what it hands on, and what it says
+            first, rest = hostsetup.operator_command(url, sha).split(" | ")
+            assert rest == "sudo python3 -"
+            p = subprocess.run(["sh", "-c", first], capture_output=True, timeout=30)
+            return p.returncode, p.stdout, p.stderr.decode().strip()
+        rc, out, err = fetch(base + "/gone", good)
+        assert rc != 0 and out == b"" and "Traceback" not in err
+        assert err.startswith("comfyfarm: the router answered 404 — this command was used, replaced or has expired")
+        assert fetch(base + "/ok", "0" * 64) == (1, b"", "comfyfarm: checksum mismatch: not the script the dashboard made")
+        assert fetch(base + "/ok", good) == (0, b"print('hi')\n", "")
     finally:
         srv.shutdown()

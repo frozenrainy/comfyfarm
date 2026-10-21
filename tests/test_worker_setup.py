@@ -243,8 +243,14 @@ def test_the_router_is_allowed_by_default(tmp_path):
                     {"ifname": "br-1a2b", "addr_info": [{"family": "inet", "local": "10.200.1.1", "prefixlen": 24}]}])
             return super().__call__(argv)
     root = fake_root(tmp_path / "b")
-    ws.setup(payload(), ws.Host(root=str(root), run=SameHost()))
+    ws.setup(payload(), ws.Host(root=str(root), run=SameHost()))           # a router that does not name its networks
     assert "COMFYFARM_ALLOW_NETWORK=10.0.0.5,172.17.0.0/16,10.200.1.0/24" in (root / "etc/comfyfarm/gpu-1.env").read_text()
+    # QA (dev.11): every bridge let in the builder's network (node pack code with internet) and the default bridge (any
+    # container) — only the router's own compose networks now, when they are bridges here
+    root = fake_root(tmp_path / "c")
+    ws.setup(payload(router_networks=["10.200.1.0/24", "10.200.9.0/24"]), ws.Host(root=str(root), run=SameHost()))
+    env = (root / "etc/comfyfarm/gpu-1.env").read_text()
+    assert "COMFYFARM_ALLOW_NETWORK=10.0.0.5,10.200.1.0/24\n" in env and "172.17" not in env
 
 
 
@@ -255,7 +261,7 @@ def test_a_missing_tool_or_a_bug_is_a_report_not_a_half_done_stop(tmp_path, monk
     assert h.run(["comfyfarm-no-such-command"], check=False) == (127, "comfyfarm-no-such-command: command not found")
     with pytest.raises(ws.Failed, match="command not found"):
         h.run(["comfyfarm-no-such-command"])
-    monkeypatch.setattr(ws, "router_allow", lambda h, url: (_ for _ in ()).throw(ValueError("odd host")))
+    monkeypatch.setattr(ws, "router_allow", lambda *a: (_ for _ in ()).throw(ValueError("odd host")))
     res = ws.setup(payload(), ws.Host(root=str(fake_root(tmp_path)), run=Recorder()))
     assert not res["ok"] and res["steps"][-1] == {"step": "configuration", "ok": False,
                                                   "error": "configuration: ValueError: odd host"}

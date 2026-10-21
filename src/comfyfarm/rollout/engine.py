@@ -48,8 +48,14 @@ class Aborted(Exception):
     pass
 
 
+audit_log = logging.getLogger("comfyfarm.audit")
+
+
 async def audit(c, actor: str, action: str, target: str | None, **detail):
     await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ($1, $2, $3, $4)", actor, action, target, detail)
+    # the router's log tells what happened too (QA: it held a setup code and request lines, no events); who, what, on
+    # what — the detail stays in the ledger
+    audit_log.info("%s: %s%s", actor, action, f" {target}" if target else "")
 
 
 async def profile_doc(c, profile_id: int) -> dict | None:

@@ -77,6 +77,14 @@ def iso(t):
 CUSTOM_NODES_FAILED = "custom nodes failed to import (missing on this worker, see its log): "
 
 
+def device_name(name) -> str | None:
+    """torch's device string without its index and allocator: "cuda:0 AMD Radeon Graphics : native" → "AMD Radeon
+    Graphics" (ROCm reports as cuda)."""
+    if not isinstance(name, str):
+        return None
+    return re.sub(r"\s*:\s*(native|cudaMallocAsync)\s*$", "", re.sub(r"^(cuda|xpu|mps|npu):\d+\s+", "", name)).strip() or name
+
+
 def security_warnings(caps: dict) -> list[str]:
     """docs/design/09: a worker is 'secured' only when the comfyfarm_worker extension enforces a source allow-list.
     Unknown (worker never probed) says nothing rather than crying wolf."""
@@ -226,13 +234,14 @@ def make_router(ctx: Ctx) -> APIRouter:
                             "or to the profile's COMFYFARM_ALLOW, then restart the worker")
             warn += security_warnings(caps)
             warn += consistency.warnings(rep.get(r["group_id"], {}).get("workers", {}).get(r["id"]))
-            devs = [d for d in caps.get("devices") or [] if isinstance(d, dict)]
-            vram = max((d.get("vram_total") or 0 for d in devs), default=0)
+            devs = [d for d in caps.get("devices") or [] if isinstance(d, dict) and d.get("type") != "cpu"]
+            vram = max((d.get("vram_total") or 0 for d in devs), default=0)          # a CPU's "vram" is the host's RAM
             out.append({"id": r["id"], "name": r["name"], "kind": r["kind"], "base_url": r["base_url"], "group": r["group_name"],
                         "group_id": r["group_id"], "state": r["state"], "enabled": r["enabled"],
                         "maintenance": r["maintenance"], "note": r["note"], "warnings": warn,
                         "failing_since": iso(r["failing_since"]), "last_ok_at": iso(r["last_ok_at"]),
-                        "backend": caps.get("backend"), "gpu": devs[0].get("name") if devs else None,
+                        "backend": caps.get("backend"), "gpu": device_name(devs[0].get("name")) if devs else None,
+                        "builtin": bool(ctx.settings.ui_service) and r["base_url"].rstrip("/") == ctx.settings.ui_service.rstrip("/"),
                         "vram_gb": round(vram / 2**30, 1) if vram else None, "comfyui": caps.get("comfyui"),
                         "capabilities": caps,
                         "job": {"prompt_id": str(r["job_prompt_id"]), "owner": r["job_owner"], "progress": r["job_progress"]}

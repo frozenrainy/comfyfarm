@@ -209,7 +209,7 @@ export function formDialog(title, fields, submitLabel = t("Save"), { wide = fals
         inputs[f.name] = () => null;
         control = h("pre", { class: "code" }, f.value ?? "");
       } else if (f.type === "select") {
-        const sel = h("select", {}, ...(f.options || []).map((o) => h("option", { value: o.value }, o.label)));
+        const sel = h("select", { required: !!f.required }, ...(f.options || []).map((o) => h("option", { value: o.value }, o.label)));
         sel.value = f.value ?? "";
         inputs[f.name] = () => sel.value;
         if (f.onChange) sel.addEventListener("change", () => f.onChange(sel.value, (name, v) => setters[name]?.(v)));

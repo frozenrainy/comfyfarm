@@ -360,11 +360,13 @@ def tools(h: Host, files: dict, version: str):
     h.write(f"{TOOLS}/VERSION", version + "\n", 0o644)
 
 
-def router_allow(h: Host, router_url: str) -> list[str]:
+def router_allow(h: Host, router_url: str, router_networks: list | None = None) -> list[str]:
     """Who may talk to this worker by default (the worker extension's COMFYFARM_ALLOW_NETWORK, added to a profile's
     COMFYFARM_ALLOW): the router's address as this host reaches it — the gateway, on the same control-plane host, comes
     from there too. With the router on this very host its containers come from Docker's bridge networks instead: those
-    are added. Without it every worker started "unsecured" until someone filled the profile's allow-list."""
+    are added — only the router's own (`router_networks`, its compose networks, which the gateway shares) when they are
+    bridges here; all of them for a router that did not say. Without it every worker started "unsecured" until someone
+    filled the profile's allow-list."""
     import ipaddress
     host = re.sub(r"^https?://\[?([^\]/:]+)\]?.*$", r"\1", router_url)
     try:
@@ -379,12 +381,11 @@ def router_allow(h: Host, router_url: str) -> list[str]:
     local = {a.get("local") for link in links for a in link.get("addr_info", [])}
     allow = list(addrs)
     if any(a in local or ipaddress.ip_address(a).is_loopback for a in addrs):
-        for link in links:
-            name = link.get("ifname", "")
-            if name == "docker0" or name.startswith("br-"):
-                for a in link.get("addr_info", []):
-                    if a.get("family") == "inet":
-                        allow.append(str(ipaddress.ip_network(f"{a['local']}/{a['prefixlen']}", strict=False)))
+        bridges = [str(ipaddress.ip_network(f"{a['local']}/{a['prefixlen']}", strict=False))
+                   for link in links if link.get("ifname") == "docker0" or link.get("ifname", "").startswith("br-")
+                   for a in link.get("addr_info", []) if a.get("family") == "inet"]
+        own = [n for n in bridges if n in (router_networks or [])]
+        allow += own or bridges
     return allow
 
 
@@ -408,7 +409,7 @@ def configure(h: Host, spec: dict, home: str):
         # VideoHelperSuite lets any user list and load server paths unless told not to (custom-nodes.md §7): off by
         # default here; a site that wants it changes this line (setup keeps an edit only until it runs again)
         "VHS_STRICT_PATHS=1"]
-        + ([f"COMFYFARM_ALLOW_NETWORK={','.join(allow)}"] if (allow := router_allow(h, spec["router_url"])) else []) + [""]))
+        + ([f"COMFYFARM_ALLOW_NETWORK={','.join(allow)}"] if (allow := router_allow(h, spec["router_url"], spec.get("router_networks"))) else []) + [""]))
     h.write(f"{ETC}/{inst}.check.json", json.dumps({
         "gpu": spec.get("gpu", "any"), "paths": paths, "port": spec.get("port", 8188),
         "listen": spec.get("listen", "0.0.0.0"), "account": user, "uid": spec.get("uid")}, indent=1) + "\n")

@@ -124,6 +124,7 @@ function workers(root, { refresh }) {
       if (!s) return toast(t("this worker was not set up from the dashboard — Set up a worker, with another name"), true);
       setupWorker(refresh, { worker_id: id(), spec: s.spec, extra: s.extra });
     });
+    tr.again = again;
     tr.c.actions.append(tr.maint, tr.enable, again, edit, del);
     return tr;
   }
@@ -138,12 +139,16 @@ function workers(root, { refresh }) {
     }
     if (document.activeElement !== tr.sel) tr.sel.value = w.group ?? "";
     tr.sel.hidden = w.kind === "ui"; tr.uiNote.hidden = w.kind !== "ui";      // a UI worker belongs to no group
-    const st = !w.enabled ? "disabled" : w.state;
+    // never answered yet (a first start still building, a worker not started): not a red "offline"
+    const fresh = w.state !== "online" && !w.last_ok_at && w.enabled;
+    const st = !w.enabled ? "disabled" : fresh ? "unknown" : w.state;
     const sig2 = `${st}|${w.maintenance}`;
     if (c.state.dataset.v !== sig2) {
       c.state.dataset.v = sig2;
-      c.state.replaceChildren(pill(st), w.maintenance ? " " : "", w.maintenance ? pill("maintenance") : "");
+      c.state.replaceChildren(pill(st, fresh ? t("not started yet") : undefined), w.maintenance ? " " : "",
+                              w.maintenance ? pill("maintenance") : "");
     }
+    tr.again.hidden = !!w.builtin;      // the compose deployment's own UI worker: its container is set up by compose
     setText(c.gpu, [w.gpu, w.vram_gb ? `${w.vram_gb} GB` : null, w.backend, w.comfyui ? `ComfyUI ${w.comfyui}` : null]
       .filter(Boolean).join(" · ") || "—");
     const frac = w.job ? progressOf(w.job.progress) : null;

@@ -121,6 +121,7 @@ export function groupCards(groups) {
       ? t("No worker group yet: set up the first GPU worker (System → Workers) — it makes the first group.")
       : t("You may not use any worker group yet. Ask an administrator."))];
   }
+  const admin = document.body.classList.contains("is-admin");     // operator numbers are for operators (QA, dev.11)
   return groups.map((g) => {
     const hh = g.health || {};
     const stall = hh.dispatch_idle_seconds;
@@ -132,10 +133,10 @@ export function groupCards(groups) {
         row(t("Idle workers"), String(hh.idle_workers ?? "—")),
         row(t("Waiting"), String(hh.pending ?? "—")),
         row(t("Running"), String(hh.running ?? "—")),
-        row(t("Paused"), String(hh.paused ?? "—")),
-        row(t("Dispatch stalled"), stall == null ? "—" : dur(stall), stallCls),
+        admin ? row(t("Paused"), String(hh.paused ?? "—")) : null,
+        admin ? row(t("Dispatch stalled"), stall == null ? "—" : dur(stall), stallCls) : null,
         row(t("Longest running"), dur(hh.running_longest_seconds)),
         hh.unsatisfiable_pending ? row(t("Cannot run"), t("{n} job(s)", { n: hh.unsatisfiable_pending }), "alert") : null,
-        hh.inconsistent_workers ? row(t("Consistency"), t("{n} worker(s) differ", { n: hh.inconsistent_workers }), "caution") : null));
+        admin && hh.inconsistent_workers ? row(t("Consistency"), t("{n} worker(s) differ", { n: hh.inconsistent_workers }), "caution") : null));
   });
 }

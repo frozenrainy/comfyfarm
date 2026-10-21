@@ -167,10 +167,9 @@ async def run(s: Settings, ui_url: str | None = None, pg_bin: str | None = None)
             continue
         fails = [r for r in rows or [] if r.get("level") == FAIL]
         warns = [r for r in rows or [] if r.get("level") == WARN]
-        if fails or warns:
-            worst = (fails or warns)[0]
-            out.append((FAIL if fails else WARN, label, f"{len(fails)} failed, {len(warns)} warning(s) — {worst['name']}: "
-                        f"{worst['detail']}"))
+        if fails or warns:                     # each one named: a count with one name hid the others (QA, dev.11)
+            out.append((FAIL if fails else WARN, label, f"{len(fails)} failed, {len(warns)} warning(s) — "
+                        + "; ".join(f"{r['name']}: {r['detail']}" for r in fails + warns)))
         else:
             out.append((OK, label, f"{len(rows or [])} checks OK"))
 

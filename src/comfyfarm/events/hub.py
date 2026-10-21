@@ -123,6 +123,7 @@ class WorkerStream:
         self.last_written = None
         self.connected = False
         self.down_since = time.monotonic()
+        self.last_error: str | None = None          # logged once per streak, not on every retry
 
     async def run(self):
         backoff = [1, 2, 5, 10]
@@ -134,13 +135,18 @@ class WorkerStream:
                     # whatever ran before the gap may have ended, or the worker restarted and runs another user's job
                     self.current = None
                     self.connected, attempt = True, 0
+                    if self.last_error:
+                        log.info("worker %s ws: connected again", self.worker_id)
+                        self.last_error = None
                     await ws.send(json.dumps({"type": "feature_flags", "data": {"supports_preview_metadata": True}}))
                     async for msg in ws:
                         await self.on_message(msg)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.info("worker %s ws: %s", self.worker_id, type(e).__name__)
+                if type(e).__name__ != self.last_error:
+                    log.info("worker %s ws: %s", self.worker_id, type(e).__name__)
+                self.last_error = type(e).__name__
             if self.connected:
                 self.down_since = time.monotonic()
             self.connected, self.current = False, None

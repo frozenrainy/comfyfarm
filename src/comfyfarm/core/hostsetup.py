@@ -100,15 +100,18 @@ def build_script(spec: dict, report_url: str, version: str) -> tuple[str, str]:
 def operator_command(url: str, sha256: str) -> str:
     """What the operator runs on the host: python3 is there anyway (the launcher needs it); curl may not be. The
     download is checked against the checksum the dashboard shows before anything runs as root."""
-    # one line, no traceback: an error says what to do (a 404 is a command that was used, replaced or has expired)
+    # one line, no traceback: an error says what to do (a 404 is a command that was used, replaced or has expired).
+    # The script reaches sudo through a pipe, written only once checked — no file: a fixed name in /tmp could be made
+    # first and changed between the check and sudo by another account (QA, dev.11), and root may not read the user's
+    # home (NFS root_squash). Nothing written = nothing run.
     fetch = ('import sys,hashlib,urllib.request;'
              'sys.excepthook=lambda t,v,b:print("comfyfarm: "+(f"the router answered {v.code} — this command was used, '
              'replaced or has expired: copy the current one from the dashboard" if hasattr(v,"code") else '
              'f"cannot reach the router: {v.reason}" if hasattr(v,"reason") else str(v)),file=sys.stderr);'
              'd=urllib.request.urlopen(sys.argv[1],timeout=60).read();'
              'assert hashlib.sha256(d).hexdigest()==sys.argv[2],"checksum mismatch: not the script the dashboard made";'
-             'open("/tmp/comfyfarm-setup.py","wb").write(d)')
-    return f"python3 -c {shlex.quote(fetch)} {shlex.quote(url)} {sha256} && sudo python3 /tmp/comfyfarm-setup.py"
+             'sys.stdout.buffer.write(d)')
+    return f"python3 -c {shlex.quote(fetch)} {shlex.quote(url)} {sha256} | sudo python3 -"
 
 
 def pin_host_keys(keys_dir: str, host: str, keys: list[str], port: int = 22) -> int:

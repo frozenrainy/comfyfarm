@@ -21,8 +21,8 @@ function storedGroup() {
 
 // The dashboard's language choice (comfyfarm.lang), else the browser's — same rule as the dashboard.
 const KO = {
-  "Worker group for Run": "실행할 워커 그룹", "Site default": "사이트 기본값",
-  "No worker group available to you.": "사용할 수 있는 워커 그룹이 없습니다.", "Group": "그룹", "default": "기본값",
+  "Worker group for Run": "실행할 워커 그룹", "Any of my groups": "내 그룹 중 아무 곳", "{n} online": "{n}대 온라인",
+  "No worker group available to you.": "사용할 수 있는 워커 그룹이 없습니다.", "Group": "그룹", "any": "아무 곳",
   "Worker group for Run — the node list follows it": "실행할 워커 그룹 — 노드 목록도 이 그룹을 따릅니다",
 };
 function lang() {
@@ -111,8 +111,8 @@ function openPicker(ev) {
     r.onclick = onclick;
     return r;
   };
-  box.append(row(tr("Site default"), "", !cur, () => pick(null)));
-  for (const g of groups) box.append(row(g.name, `${g.online} online`, cur?.id === g.id, () => pick(g)));
+  box.append(row(tr("Any of my groups"), "", !cur, () => pick(null)));
+  for (const g of groups) box.append(row(g.name, tr("{n} online").replace("{n}", g.online), cur?.id === g.id, () => pick(g)));
   if (!groups.length) {
     const none = document.createElement("div");
     none.textContent = tr("No worker group available to you.");
@@ -147,7 +147,7 @@ app.registerExtension({
       name: "comfyfarm.ui.group",
       actionBarButtons: [{
         icon: "icon-[lucide--server]",
-        label: `${tr("Group")}: ${cur ? cur.name : tr("default")}`,
+        label: `${tr("Group")}: ${cur ? cur.name : tr("any")}`,
         tooltip: tr("Worker group for Run — the node list follows it"),
         onClick: openPicker,
       }],

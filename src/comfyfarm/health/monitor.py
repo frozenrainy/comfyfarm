@@ -76,7 +76,7 @@ class HealthMonitor:
                 # thresholds are measured from the first failure of the streak, cleared on success (D-11)
                 # refused (its allow-list lacks the router's address): as unusable as a dead one, and the dashboard
                 # names the address — the warning, not the state, says why
-                await c.execute("""
+                new = await c.fetchval("""
                     UPDATE workers SET failing_since = coalesce(failing_since, now()), failure_kind = $2,
                       state = CASE
                         WHEN $2 IN ('dead', 'refused') AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3) THEN 'offline'
@@ -86,10 +86,13 @@ class HealthMonitor:
                                            THEN coalesce(offline_since, now()) ELSE offline_since END,
                       capabilities = CASE WHEN $2 = 'refused' THEN coalesce(capabilities, '{}'::jsonb)
                                             || jsonb_build_object('refused_as', $5::text) ELSE capabilities END
-                    WHERE id = $1""", w["id"], kind, self.s.dead_after, self.s.busy_after, detail)
-            # the same failure every tick is one line, not one every 5 s
-            if (kind, detail) != self.last_failure.get(w["id"]):
-                log.warning("worker %s probe failed (%s): %s", w["id"], kind, detail)
+                    WHERE id = $1 RETURNING state""", w["id"], kind, self.s.dead_after, self.s.busy_after, detail)
+            # a warning when it goes offline or stops answering; the failure itself once (a restart is a few seconds
+            # of refused connections — not a warning, and not one line every 5 s)
+            if new != w["state"] and new in ("offline", "busy_unresponsive"):
+                log.warning("worker %s %s (%s: %s)", w["id"], new.replace("_", " "), kind, detail)
+            elif (kind, detail) != self.last_failure.get(w["id"]):
+                log.info("worker %s probe failed (%s): %s", w["id"], kind, detail)
             self.last_failure[w["id"]] = (kind, detail)
         if became_online and self.wake:
             self.wake.set()

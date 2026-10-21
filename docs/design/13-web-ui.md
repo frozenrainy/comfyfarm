@@ -30,7 +30,9 @@ dashboard. *System → Settings → login user list* turns the user field into a
 Inside the Workflow frame an expired session would show the login page; it takes over the whole window instead.
 
 **Group picker in ComfyUI.** The extension adds a `Group: …` button to ComfyUI's action bar next to Run (official
-`actionBarButtons` API). It lists the groups the user may use plus *Site default*; the choice is kept in the browser
+`actionBarButtons` API). It lists the groups the user may use plus *Any of my groups* (no group: the job runs on any
+group the user may use; the dashboard's history says *(any)*, and the node list is `COMFYFARM_DEFAULT_GROUP`'s when
+set); the choice is kept in the browser
 (localStorage) and sent with every submit and node-list request. Changing it reloads ComfyUI (node definitions are per
 group, D-20; the open workflow is restored). A remembered group the user may no longer use is dropped in the
 extension's `init` hook, which runs before the node definitions are fetched.

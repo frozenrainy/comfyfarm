@@ -22,7 +22,8 @@ const words = (s) => s.split(/[\s,]+/).filter(Boolean);
 export function rollout(root, { refresh }) {
   let profiles = [], insts = [], artifacts = null, builder = null, packs = [];
   const banner = h("div");
-  const firstStart = h("div");
+  const firstStart = h("div"), buildInfo = h("div");
+  let builds = [];
   const packInfo = h("p", { class: "muted small" });
   const active = h("div");
   const instT = table([[t("Worker")], [t("Instance")], [t("Profile")], [t("Badge")], [t("Rev")], [t("Running")], [t("Restart via")], ["", "actions"]]);
@@ -62,15 +63,15 @@ export function rollout(root, { refresh }) {
   }, { cls: "primary" });
 
   root.append(
-    h("section", {}, head(t("Rollout"), startBtn), firstStart, banner, active, history),
+    h("section", {}, head(t("Rollout"), startBtn), firstStart, buildInfo, banner, active, history),
     h("section", {}, head(t("Instances")), h("p", { class: "muted small" },
       t("How the launcher on each host starts the worker. Badge: match = the worker runs exactly its assigned render; " +
       "differs = it runs something else (not restarted yet, or a failed start).")), instT.el),
-    h("section", {}, head(t("Profiles"), button(t("From a recipe"), () => fromRecipe()),
-                          button(t("New profile"), () => editProfile(null), { cls: "primary" })),
+    h("section", {}, head(t("Profiles"), button(t("From a recipe"), () => fromRecipe(), { cls: "primary" }),
+                          button(t("New profile"), () => editProfile(null))),
       h("p", { class: "muted small" }, t("A profile in use cannot be changed — copy it and roll the copy out.")), profT.el),
-    h("section", {}, head(t("Node packs"), button(t("Build"), () => buildOnPlane()),
-                          button(t("Add node pack"), () => addPack(), { cls: "primary" })), packInfo, packT.el),
+    h("section", {}, head(t("Node packs"), button(t("Build"), () => buildOnPlane(), { cls: "primary" }),
+                          button(t("Add node pack"), () => addPack())), packInfo, packT.el),
     h("section", {}, head(t("Audit log")), auditT.el));
 
   // ---- instances ---------------------------------------------------------------------------------------------
@@ -87,7 +88,8 @@ export function rollout(root, { refresh }) {
       { name: "role", label: t("Role"), type: "select", value: cur.role, options: [{ value: "gpu", label: t("GPU worker") }, { value: "ui", label: t("UI worker") }] },
       ...PATHS.map(([k, label]) => ({ name: `path_${k}`, label: t(label), value: cur.paths[k] ?? "" })),
       { name: "restart_backend", label: t("Restart via"), type: "select", value: cur.restart_backend,
-        options: Object.keys(BACKEND_HINT).map((b) => ({ value: b, label: ADVANCED.includes(b) ? t("{name} (advanced)", { name: b }) : b })) },
+        options: Object.keys(BACKEND_HINT).map((b) => ({ value: b, label: ADVANCED.includes(b) ? t("{name} (advanced)", { name: b })
+                                                                         : b === "manual" ? t("manual") : b })) },
       { name: "restart_config", label: t("Restart configuration (JSON)"), type: "textarea", rows: 3, value: JSON.stringify(cur.restart_config),
         hint: Object.entries(BACKEND_HINT).filter(([k]) => !ADVANCED.includes(k) || k === cur.restart_backend)
           .map(([k, [ex, why]]) => `${k}: ${ex}  — ${t(why)}`).join("  ·  ") },
@@ -235,13 +237,14 @@ export function rollout(root, { refresh }) {
     } catch { /* a guess only */ }
     const v = await formDialog(via ? t("Profiles from a recipe (read through {name})", { name: via.worker }) : t("Profiles from a recipe"), [
       { name: "template", label: t("Template"), type: "select",
+        hint: (() => { const r = builds.find((x) => x.state === "running"); return r ? t("A build of {recipe} is running: its template appears here when it is done", r) : ""; })(),
         value: templates.some((x) => x.template === pick) ? pick : templates[templates.length - 1].template,
         tip: t("What one build left in the artifact store: ComfyUI, a venv and the node sets for the GPU workers and the UI worker. The newest is last."),
         options: templates.map((x) => ({ value: x.template, label: (x.about ? `${x.template} — ${x.about}` : x.template)
           + ((x.roles || ["gpu", "ui"]).length < 2 ? ` (${(x.roles || []).map((r) => r === "ui" ? t("UI worker") : t("GPU workers")).join("")})` : "") })) },
       { name: "allow", label: "COMFYFARM_ALLOW", value: allow,
         tip: t("Optional: addresses the workers take requests from, added to what setup allowed on each host (the router's address). Leave it empty unless a worker reaches the router or the gateway over another address."),
-        hint: t("the addresses the workers take requests from: the router's and the gateway's, as the workers see them") },
+        hint: t("optional — usually empty: setup already lets the router and the gateway in on each host") },
       ...(buildable.length ? [{ name: "build", type: "checkbox", value: false, label: t("Build"),
                                text: t("Build the chosen template's recipe again on {name} first", { name: where }),
                                tip: t("Makes a new template instead of using one of these: after adding or updating node packs, or after a ComfyFarm upgrade that changed the recipe. The build takes minutes; its profiles then roll out like any.") }] : []),
@@ -265,7 +268,8 @@ export function rollout(root, { refresh }) {
       }
     }
     if (made.length) {
-      toast(t("Profiles created: {names} — roll them out (UI worker first), or pick them in Set up a worker", { names: made.join(", ") })
+      toast((packs.length ? t("Profiles created: {names} — roll the UI profile out to the UI worker (Start rollout) for the node packs; the GPU profile goes to GPU workers (Set up a worker, or a rollout)", { names: made.join(", ") })
+                          : t("Profiles created: {names} — next, Set up a worker picks the GPU profile (the UI worker already runs what it needs)", { names: made.join(", ") }))
             + (kept.length ? " " + t("({names} existed already — kept)", { names: kept.join(", ") }) : ""));
     } else if (kept.length) {
       toast(t("{names}: these profiles exist already — this template made them. Roll them out as they are; for new node packs or a new recipe, build again (the checkbox below the template).", { names: kept.join(", ") }));
@@ -373,10 +377,11 @@ export function rollout(root, { refresh }) {
     // the recipe for the GPU the farm's workers have, when they say (their ComfyUI reports cuda or rocm)
     const backends = new Set(insts.filter((i) => i.instance && i.instance.role !== "ui").map((i) => i.backend).filter(Boolean));
     const guess = builder.recipes.includes(recipe) ? recipe
-                : builder.recipes.find((r) => [...backends].some((b) => r.startsWith(b))) || builder.recipes[0];
+                : builder.recipes.find((r) => [...backends].some((b) => r.startsWith(b))) || "";
     const v = await formDialog(t("Build on the control plane"), [
-      { name: "recipe", label: t("Recipe (the kind of GPU)"), type: "select", value: guess,
-        options: builder.recipes.map((x) => ({ value: x, label: builder.about?.[x] ? `${x} — ${builder.about[x]}` : x })),
+      { name: "recipe", label: t("Recipe (the kind of GPU)"), type: "select", value: guess, required: true,
+        options: [...(guess ? [] : [{ value: "", label: t("— pick the kind of GPU your workers have —") }]),
+                  ...builder.recipes.map((x) => ({ value: x, label: builder.about?.[x] ? `${x} — ${builder.about[x]}` : x }))],
         tip: t("Which PyTorch the GPU workers get: rocm-… for AMD, cuda-… for NVIDIA (see the description). The UI worker's part is the same in every recipe.") },
       { name: "roles", label: t("For"), type: "select", value: "both", options: [
         { value: "both", label: t("GPU workers and the UI worker") }, { value: "gpu", label: t("GPU workers only") },
@@ -402,6 +407,20 @@ export function rollout(root, { refresh }) {
     setText(tr.c.name, p.name); setText(tr.c.repo, p.repo.replace(/^https:\/\//, ""));
     setText(tr.c.commit, p.commit.slice(0, 12) + (p.ref ? ` (${p.ref})` : ""));
     setText(tr.c.ui, p.ui ? t("yes") : t("no — GPU only")); setText(tr.c.note, p.note ?? "");
+  }
+  function renderBuilds(list) {
+    const b = list.find((x) => x.state === "running") || list[0];
+    const recent = b && (b.state === "running" || (b.finished && Date.now() - Date.parse(b.finished) < 3600e3));
+    if (!recent) return buildInfo.replaceChildren();
+    const what = { recipe: b.recipe, min: Math.max(1, Math.round((Date.now() - Date.parse(b.started)) / 60000)) };
+    const follow = () => followBuild(t("Building {recipe} on the control plane", what), () => api("GET", `/api/admin/builds/${b.id}`))
+      .then((tpl) => { if (tpl) fromRecipe(typeof tpl === "string" ? tpl : null); });
+    buildInfo.replaceChildren(h("div", { class: "callout" }, ...(b.state === "running"
+      ? [pill("running", t("building")), " ", t("Build of {recipe} on the control plane — {min} min so far", what), " ", button(t("Show"), follow)]
+      : b.state === "done"
+      ? [pill("done", t("done")), " ", t("Build of {recipe} done: template {template}", { ...what, template: b.template || "?" }), " ",
+         button(t("From a recipe"), () => fromRecipe(b.template || null), { cls: "primary" })]
+      : [pill("failed", t("failed")), " ", t("Build of {recipe} failed: {error}", { ...what, error: b.error || "" }), " ", button(t("Show the log"), follow)])));
   }
   function renderBuilder(b) {
     const fs = b.first_start || {};
@@ -477,6 +496,8 @@ export function rollout(root, { refresh }) {
         api("GET", "/api/admin/node-packs")]);
       insts = i; profiles = p; builder = b; packs = np;
       renderBuilder(b);
+      builds = b.configured ? await api("GET", "/api/admin/builds").catch(() => []) : [];
+      renderBuilds(builds);
       syncRows(packT.tbody, np, (x) => x.id, buildPack, updatePackRow);
       if (artifacts === null) artifacts = await api("GET", "/api/admin/artifacts");
       syncRows(instT.tbody, i, (x) => x.worker_id, buildInst, updateInst);
@@ -484,8 +505,10 @@ export function rollout(root, { refresh }) {
       renderActive(r);
       const sig = JSON.stringify(r.filter((x) => !ACTIVE.includes(x.status)).map((x) => [x.id, x.status]));
       if (history.dataset.v !== sig) { history.dataset.v = sig; renderHistory(r); }
-      auditT.tbody.replaceChildren(...a.map((e) => h("tr", {}, h("td", { class: "nowrap" }, when(e.at)), h("td", { class: "nowrap" }, e.actor),
-        h("td", { class: "nowrap" }, e.action), h("td", { class: "nowrap" }, e.target ?? ""), h("td", { class: "muted small" }, Object.keys(e.detail || {}).length ? JSON.stringify(e.detail).slice(0, 160) : ""))));
+      // the actions are fixed English words from the router: shown in the page's language (names stay as they are)
+      auditT.tbody.replaceChildren(...a.map((e) => h("tr", {}, h("td", { class: "nowrap" }, when(e.at)),
+        h("td", { class: "nowrap" }, ["comfyfarm (first start)", "worker setup"].includes(e.actor) ? t(e.actor) : e.actor),
+        h("td", { class: "nowrap" }, t(e.action)), h("td", { class: "nowrap" }, e.target ?? ""), h("td", { class: "muted small" }, Object.keys(e.detail || {}).length ? JSON.stringify(e.detail).slice(0, 160) : ""))));
     },
   };
 }
