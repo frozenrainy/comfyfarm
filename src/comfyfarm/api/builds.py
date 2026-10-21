@@ -100,6 +100,42 @@ def templates(art: str | None) -> list[dict]:
     return out
 
 
+def write_builder_request(builds_dir: str, doc: dict) -> str:
+    """A request for the builder (docs/design/15): a new file in requests/, written whole then renamed."""
+    rid = f"{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+    req = os.path.join(builds_dir, "requests")
+    tmp = os.path.join(req, f".{rid}.tmp")
+    with open(tmp, "w") as f:
+        json.dump(doc, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, os.path.join(req, rid + ".json"))
+    return rid
+
+
+def builder_status(builds_dir: str, rid: str) -> dict | None:
+    """What the builder wrote about a request; {"state": "queued"} while it waits; None when it is unknown."""
+    try:
+        with open(os.path.join(builds_dir, "status", rid + ".json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"id": rid, "state": "queued"} if os.path.exists(os.path.join(builds_dir, "requests", rid + ".json")) else None
+
+
+def read_policy(builds_dir: str | None) -> dict | None:
+    """What the builder says it does (its policy file, rewritten every 30 s), and whether it is up."""
+    if not builds_dir:
+        return None
+    try:
+        path = os.path.join(builds_dir, "status", "policy.json")
+        with open(path) as f:
+            p = json.load(f)
+        p["alive_for"] = time.time() - os.path.getmtime(path)
+        p["up"] = p["alive_for"] < ALIVE
+        return p
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def signing_key(builds_dir: str | None) -> str | None:
     """The builder's public key (its policy): what GPU hosts pin to check their copies of the artifacts with."""
     try:
@@ -122,16 +158,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         return os.path.join(s.builds_dir, "requests"), os.path.join(s.builds_dir, "status")
 
     def policy() -> dict | None:
-        if not s.builds_dir:
-            return None
-        try:
-            with open(os.path.join(s.builds_dir, "status", "policy.json")) as f:
-                p = json.load(f)
-            p["alive_for"] = time.time() - os.path.getmtime(os.path.join(s.builds_dir, "status", "policy.json"))
-            p["up"] = p["alive_for"] < ALIVE
-            return p
-        except (OSError, ValueError):
-            return None
+        return read_policy(s.builds_dir)
 
     def need_builder() -> dict:
         dirs()
@@ -141,14 +168,8 @@ def make_router(ctx: Ctx) -> APIRouter:
         return p
 
     def write_request(doc: dict) -> str:
-        req, _ = dirs()
-        rid = f"{int(time.time() * 1000)}-{secrets.token_hex(4)}"
-        tmp = os.path.join(req, f".{rid}.tmp")
-        with open(tmp, "w") as f:
-            json.dump(doc, f)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, os.path.join(req, rid + ".json"))
-        return rid
+        dirs()
+        return write_builder_request(s.builds_dir, doc)
 
     def read_status(rid: str) -> dict:
         if not REQUEST.match(rid):
@@ -199,10 +220,10 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.get("/api/admin/defaults")
     async def deployment_defaults(x_comfyfarm_user: str | None = Header(default=None)):
-        """What the deployment knows that a setup form should not ask a newcomer to guess: the artifact store and the
-        shared storage (the compose paths) and the router's published port."""
+        """What the deployment knows that a setup form should not ask a newcomer to guess: the artifact store, the model
+        store and the shared storage (the compose paths) and the router's published port."""
         ctx.admin(x_comfyfarm_user)
-        return {"art": s.artifacts_dir, "shared": s.ui_shared, "router": s.public_router}
+        return {"art": s.artifacts_dir, "models": s.models_dir, "shared": s.ui_shared, "router": s.public_router}
 
     @api.post("/api/admin/builds")
     async def request_build(body: BuildIn, x_comfyfarm_user: str | None = Header(default=None)):

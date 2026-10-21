@@ -7,6 +7,7 @@ const GPUS = [["amd", "AMD (ROCm)"], ["nvidia", "NVIDIA (CUDA)"], ["any", "Any /
 const PATHS = [["art", "Artifact store <ART> (same path on every host)", "/srv/comfyfarm/art"],
                ["local", "Local root <LOCAL> (this host's disk)", "/var/lib/comfyfarm/local"],
                ["models", "Models directory", "/srv/comfyfarm/models"],
+               ["model_store", "Model store (models from the dashboard)", ""],
                ["input", "Input directory (shared)", "/mnt/farm/input"],
                ["output", "Output directory (shared)", "/mnt/farm/output"],
                ["user", "User directory (shared)", "/mnt/farm/user"],
@@ -38,6 +39,7 @@ const TIPS = {
   path_art: "Where published ComfyUI releases, venvs and node sets live — at the same path on every host (a shared mount or a copy).",
   path_local: "This host's own disk: its copies of ComfyUI and the node sets, and run files.",
   path_models: "The models ComfyUI reads (checkpoints, LoRAs, VAE …). Read only.",
+  path_model_store: "The models added in System → Models. Copied: the ones this worker's group uses are copied here, checked against the builder's signature (a directory of its own, not the models directory above). Mounted: mount the control plane's model store here. Empty: none on this host.",
   path_input: "Uploads. Shared by every worker and the UI worker: the same storage everywhere — never {instance}. Mount it before setup: setup never mounts storage.",
   path_output: "Results. Shared by every worker and the UI worker: the same storage everywhere — never {instance}. Mount it before setup: setup never mounts storage.",
   path_user: "Users' workflows and settings. Shared by every worker and the UI worker — never {instance}. Mount it before setup: setup never mounts storage.",
@@ -104,6 +106,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
       const lt = last?.paths?.temp, li = last?.instance;
       return lt && li && lt.endsWith("/" + li) ? lt.slice(0, -li.length) + "{instance}" : d;
     }
+    if (k === "model_store") return last?.paths?.model_store ?? dflt.models ?? "";   // same path everywhere, like <ART>
     return (k === "art" ? last?.art : k === "local" ? last?.local : last?.paths?.[k]) ?? (k === "art" ? dflt.art : shared[k]) ?? d;
   };
   const keep = again ? t("kept: setting a worker up again changes its host settings, not its identity") : "";
@@ -152,7 +155,8 @@ export async function setupWorker(refresh, again = null, fix = null) {
           ? t("copies: what a profile needs is copied before it starts, checked against the builder's signature; the first start of a new build waits for the copy")
           : t("this farm has no builder that signs: mount the control plane's store here (or copy it yourself)") },
       ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d),
-        hint: (k === "art" ? dflt.art : shared[k]) ? t("the control plane's: {path}", { path: k === "art" ? dflt.art : shared[k] }) : "" })),
+        hint: k === "model_store" ? (dflt.models ? t("the control plane's: {path}", { path: dflt.models }) : t("empty: no models from the dashboard on this host"))
+          : (k === "art" ? dflt.art : shared[k]) ? t("the control plane's: {path}", { path: k === "art" ? dflt.art : shared[k] }) : "" })),
       // builds on a worker host: for farms without the control-plane builder (or a host that already has them on)
       ...(!builderState?.configured || (src && last?.builds) ? [
       { name: "builds", type: "checkbox", value: !!last?.builds, text: t("Allow builds from the dashboard on this host"),

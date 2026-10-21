@@ -416,9 +416,13 @@ def configure(h: Host, spec: dict, home: str):
         "VHS_STRICT_PATHS=1"]
         # copies (docs/design/16): the launcher asks for the artifacts a render needs and waits for them
         + (["COMFY_LAUNCH_FETCH=1"] if store_mode(h, spec)[0] == "copy" else [])
+        # the farm's models (docs/design/17): ComfyUI lists them through the render's extra_model_paths, which the
+        # launcher takes only for this host's own directory
+        + ([f"COMFY_LAUNCH_MODEL_STORE={paths['model_store']}"] if paths.get("model_store") else [])
         + ([f"COMFYFARM_ALLOW_NETWORK={','.join(allow)}"] if (allow := router_allow(h, spec["router_url"], spec.get("router_networks"))) else []) + [""]))
     h.write(f"{ETC}/{inst}.check.json", json.dumps({
         "gpu": spec.get("gpu", "any"), "paths": paths, "port": spec.get("port", 8188), "store": store_mode(h, spec)[0],
+        "model_store": (model_store_mode(h, spec) or (None,))[0],
         "listen": spec.get("listen", "0.0.0.0"), "account": user, "uid": spec.get("uid")}, indent=1) + "\n")
     served = set()
     for line in h.read(f"{ETC}/agent.env").splitlines():
@@ -427,6 +431,13 @@ def configure(h: Host, spec: dict, home: str):
     h.write(f"{ETC}/agent.env", "\n".join([MARK, f"COMFYFARM_AGENT_INSTANCES={','.join(sorted(served | {inst}))}",
                                            "COMFYFARM_AGENT_USER=1"]
                                           + (["COMFYFARM_AGENT_BUILD=1"] if spec.get("builds") else []) + [""]))
+
+
+def _uid(name: str) -> int | None:
+    try:
+        return pwd.getpwnam(name).pw_uid
+    except KeyError:
+        return None
 
 
 def store_mode(h: Host, spec: dict) -> tuple[str, str]:
@@ -443,19 +454,36 @@ def store_mode(h: Host, spec: dict) -> tuple[str, str]:
     if os.path.ismount(art):
         return "mount", f"{spec['art']} is a mount"
     st = os.stat(art)
-
-    def uid(name):
-        try:
-            return pwd.getpwnam(name).pw_uid
-        except KeyError:
-            return None
-    if st.st_uid == uid(STORE_USER):
+    if st.st_uid == _uid(STORE_USER):
         return "copy", f"{spec['art']} holds this host's copies"
-    if not os.listdir(art) and st.st_uid in (0, uid(spec["account"])):
+    if not os.listdir(art) and st.st_uid in (0, _uid(spec["account"])):
         return "copy", f"{spec['art']} is empty: given to {STORE_USER}"
     # another account's, even empty: the control plane's own store on a one-server farm (the builder's) is never taken
     return "mount", (f"{spec['art']} belongs to {owner_name(st.st_uid)}" + (" and holds artifacts" if os.listdir(art) else "")
                      + " — a share, or the control plane's own store: used as it is")
+
+
+def model_store_mode(h: Host, spec: dict) -> tuple[str, str] | None:
+    """("copy" | "mount", why) for the farm's models here (docs/design/17), None without a model store: copied into it
+    when the artifacts are copied and the directory is new, the store account's or empty; a mount, or another account's
+    directory (the control plane's own model store on a one-server farm), is used as it is."""
+    d = spec.get("paths", {}).get("model_store")
+    if not d:
+        return None
+    if store_mode(h, spec)[0] != "copy":
+        return "mount", "the artifact store is mounted: mount the control plane's model store there too, or nothing is there"
+    p = h.p(d)
+    if not os.path.lexists(p):
+        return "copy", f"{d} is made for the copies"
+    if os.path.ismount(p):
+        return "mount", f"{d} is a mount"
+    st = os.stat(p)
+    if st.st_uid == _uid(STORE_USER):
+        return "copy", f"{d} holds this host's copies"
+    if not os.listdir(p) and st.st_uid in (0, _uid(spec["account"])):
+        return "copy", f"{d} is empty: given to {STORE_USER}"
+    return "mount", (f"{d} belongs to {owner_name(st.st_uid)}" + (" and holds files" if os.listdir(p) else "")
+                     + " — a share, or the control plane's own model store: used as it is")
 
 
 def directories(h: Host, spec: dict):
@@ -484,6 +512,9 @@ def store(h: Host, spec: dict):
     artifact names into, and the units that take them. A mounted store: the units go, the account and copies stay."""
     mode, why = store_mode(h, spec)
     h.log(f"artifact store: {mode} — {why}")
+    models = model_store_mode(h, spec)
+    if models:
+        h.log(f"model store: {models[0]} — {models[1]}")
     if mode != "copy":
         if any(os.path.exists(h.p(u)) for u in STORE_UNITS):
             h.run(["systemctl", "disable", "--now", "comfyfarm-fetch.path"], check=False)
@@ -512,6 +543,12 @@ def store(h: Host, spec: dict):
     elif not h.dry and os.stat(h.p(art)).st_uid != h.uid(STORE_USER):
         h.run(["chown", STORE_USER, art])               # empty (store_mode says so): given to the store account
         h.run(["chmod", "0755", art])
+    copied_models = spec["paths"]["model_store"] if models and models[0] == "copy" else None
+    if copied_models and not os.path.isdir(h.p(copied_models)):
+        h.mkdir(copied_models, 0o755, owner=STORE_USER)
+    elif copied_models and not h.dry and os.stat(h.p(copied_models)).st_uid != h.uid(STORE_USER):
+        h.run(["chown", STORE_USER, copied_models])     # empty (model_store_mode says so)
+        h.run(["chmod", "0755", copied_models])
     # as builds: root owns STORE_HOME, status/ and requests/ (what root writes there is never a link the store account
     # made); the service account passes through (0711) to drop a request (0730, its group) or read a state
     h.mkdir(STORE_HOME, 0o711)
@@ -523,7 +560,8 @@ def store(h: Host, spec: dict):
     h.run(["chmod", "0730", f"{STORE_HOME}/requests"])
     h.write(SIGNERS, f'comfyfarm-builder namespaces="comfyfarm-artifact" {signer}\n', 0o644)
     h.write(STORE_ENV, "\n".join([MARK, f"COMFYFARM_STORE_ROUTER={spec['router_url'].rstrip('/')}",
-                                   f"COMFYFARM_STORE_ART={art}", ""]), 0o644)
+                                   f"COMFYFARM_STORE_ART={art}"]
+                                  + ([f"COMFYFARM_STORE_MODELS={copied_models}"] if copied_models else []) + [""]), 0o644)
     h.write(STORE_UNITS[0], f"""{MARK}
 [Unit]
 Description=ComfyFarm: copies of artifacts asked for

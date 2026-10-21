@@ -15,6 +15,7 @@ cannot widen it (D-37 holds within the sources the operator allowed).
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import platform
@@ -30,6 +31,9 @@ REQUEST = re.compile(r"^[0-9]{10,20}-[0-9a-f]{8}$")
 REF = re.compile(r"^(?!-)[A-Za-z0-9][A-Za-z0-9._/+-]{0,120}$")
 HTTPS = re.compile(r"^https://[A-Za-z0-9][A-Za-z0-9._~:/@-]*$")
 NODE_KEYS = {"name", "repo", "commit", "ui", "requirements_file", "constraints"}
+HF_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+HF_PATH = re.compile(r"^(?!/)(?!.*(^|/)\.\.?(/|$))[A-Za-z0-9._ +()/-]{1,300}$")
+SAFE_MODELS = (".safetensors", ".sft", ".gguf")     # load as data; .ckpt/.pt/.pth/.bin can run code (docs/design/17)
 MAX_REQUEST = 256 * 1024
 MAX_NODES = 200
 HEARTBEAT = 30.0
@@ -59,8 +63,12 @@ def say(line: str) -> None:
 
 class Builder:
     def __init__(self, requests: str, status: str, art: str, share: str, uv: str | None, node_sources: list[str],
-                 platform_tag: str | None = None, runner=subprocess.run, key: str | None = None):
+                 platform_tag: str | None = None, runner=subprocess.run, key: str | None = None,
+                 models: str | None = None, hf_endpoint: str = "https://huggingface.co", hf_token_file: str | None = None,
+                 allow_pickle: bool = False):
         self.requests, self.status, self.art, self.share, self.uv = requests, status, art, share, uv
+        self.models = models                     # the farm's model store (docs/design/17); None: no models here
+        self.hf_endpoint, self.hf_token_file, self.allow_pickle = hf_endpoint.rstrip("/"), hf_token_file, allow_pickle
         self.node_sources = [s for s in node_sources if s]
         self.platform = platform_tag
         self.run = runner
@@ -103,7 +111,10 @@ class Builder:
 
     def policy(self) -> dict:
         return {"recipes": self.recipes(), "about": self.about(), "node_sources": self.node_sources,
-                "platform": self.platform, "signing_key": self.public_key(), "alive": now(), "pid": os.getpid()}
+                "platform": self.platform, "signing_key": self.public_key(), "models": bool(self.models),
+                "model_formats": None if self.allow_pickle else list(SAFE_MODELS),
+                "hf_token": bool(self.hf_token_file and os.path.isfile(self.hf_token_file)),
+                "alive": now(), "pid": os.getpid()}
 
     # ---- signatures (docs/design/16) ---------------------------------------------------------------------------
     def ensure_key(self) -> None:
@@ -147,6 +158,16 @@ class Builder:
         with open(signers, "w") as f:
             f.write(f'{fetch.PRINCIPAL} namespaces="{fetch.NAMESPACE}" {pub}\n')
         n = 0
+        mdir = os.path.join(self.models, "signed", "model") if self.models else None
+        for name in sorted(os.listdir(mdir)) if mdir and os.path.isdir(mdir) else []:
+            lst = os.path.join(mdir, name)
+            if name.endswith(".json") and not (os.path.exists(lst + ".sig") and self.signed_by_me(lst, signers)):
+                try:
+                    fetch.sign(lst, self.key)            # a model entry another key signed: this key signs it again
+                    os.chmod(lst + ".sig", 0o644)
+                    n += 1
+                except (OSError, fetch.Refused) as e:
+                    say(f"could not sign model entry {name}: {e}")
         for kind in fetch.KINDS:
             d = os.path.join(self.art, kind)
             for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
@@ -204,14 +225,18 @@ class Builder:
             st["kind"] = req.get("kind")
             if st["kind"] == "build":                    # the dashboard says what is building while it runs
                 st["recipe"] = str(req.get("recipe"))[:100]
+            if st["kind"] == "model":
+                st["model"] = f"{req.get('folder')}/{req.get('filename')}"[:300]
             write_json(os.path.join(self.status, rid + ".json"), st)
             say(f"{rid}: {req.get('kind')} " + (f"{req.get('recipe')} ({','.join(req.get('roles') or publish.ROLES)}, "
                                                f"{len(req.get('nodes') or [])} node pack(s))" if req.get("kind") == "build"
-                                               else f"{req.get('repo')} {req.get('ref') or 'HEAD'}"))
+                                               else f"{req.get('repo')} {req.get('path', '')} {req.get('ref') or 'HEAD'}".replace("  ", " ")))
             if req.get("kind") == "resolve":
                 st.update(self.resolve(req))
             elif req.get("kind") == "build":
                 st.update(self.build(rid, req))
+            elif req.get("kind") == "model":
+                st.update(self.model(rid, req, st))
             else:
                 raise Refused(f"unknown request kind {req.get('kind')!r}")
             st["state"] = "done"
@@ -278,6 +303,112 @@ class Builder:
             template = None
         return {"recipe": recipe, "roles": roles, "nodes": len(nodes), "template": (template or {}).get("template")}
 
+    # ---- models (docs/design/17) -------------------------------------------------------------------------------
+    def hf_headers(self) -> dict:
+        try:
+            with open(self.hf_token_file) as f:
+                token = f.read().strip()
+        except (OSError, TypeError):
+            return {}
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    @staticmethod
+    def gated(repo: str) -> Refused:
+        return Refused(f"{repo} is gated or private: accept its terms on Hugging Face with the account whose token is "
+                       "in the builder's hf_token file (docs/guide/models.md)")
+
+    def hf_file(self, repo: str, path: str, ref: str) -> dict:
+        """The commit a branch or tag names now, and the file's size and SHA-256 as Hugging Face publishes them."""
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        url = f"{self.hf_endpoint}/api/models/{repo}/revision/{urllib.parse.quote(ref, safe='')}?blobs=true"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=self.hf_headers()), timeout=60) as r:
+                info = json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise self.gated(repo)
+            raise Refused(f"{repo}@{ref}: Hugging Face answered {e.code}")
+        except (OSError, ValueError) as e:
+            raise Refused(f"cannot reach Hugging Face ({self.hf_endpoint}): {type(e).__name__}: {e}")
+        commit = info.get("sha")
+        f = next((s for s in info.get("siblings") or [] if s.get("rfilename") == path), None)
+        if not (isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)) or f is None:
+            raise Refused(f"no file {path!r} in {repo}@{ref}")
+        lfs = f.get("lfs") or {}
+        size = lfs.get("size", f.get("size"))
+        if not isinstance(size, int):
+            raise Refused(f"Hugging Face gave no size for {repo}/{path}")
+        sha = lfs.get("sha256") if isinstance(lfs.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", lfs["sha256"]) else None
+        return {"commit": commit, "size": size, "sha256": sha}
+
+    def model(self, rid: str, req: dict, st: dict) -> dict:
+        """A model from Hugging Face into the store: pinned to the commit its ref names, downloaded in ranges (an
+        interrupted one goes on), checked against the published SHA-256, put in place read-only, its entry signed."""
+        if not self.models:
+            raise Refused("this builder has no model store (COMFYFARM_MODELS)")
+        repo, path, ref = req.get("repo"), req.get("path"), (req.get("ref") or "main")
+        folder, filename = req.get("folder"), req.get("filename")
+        if not isinstance(repo, str) or not HF_REPO.match(repo):
+            raise Refused(f"not a Hugging Face model repository: {repo!r}")
+        if not isinstance(path, str) or not HF_PATH.match(path) or not isinstance(ref, str) or not REF.match(ref):
+            raise Refused(f"bad file or revision: {path!r}@{ref!r}")
+        if folder not in fetch.MODEL_FOLDERS or not isinstance(filename, str) or not fetch.MODEL_FILE.match(filename):
+            raise Refused(f"bad place for a model: {folder!r}/{filename!r}")
+        if not self.allow_pickle and not (filename.lower().endswith(SAFE_MODELS) and path.lower().endswith(SAFE_MODELS)):
+            raise Refused(f"{filename}: only {', '.join(SAFE_MODELS)} — other formats can run code when ComfyUI loads them "
+                          "(the builder's COMFYFARM_MODELS_ALLOW_PICKLE=1 allows them)")
+        hf = self.hf_file(repo, path, ref)
+        if hf["sha256"] and fetch.model_present(self.models, key := fetch.model_key(folder, filename, hf["sha256"])):
+            lst = os.path.join(self.models, "signed", "model", key + ".json")
+            if self.key and os.path.exists(self.key):  # in the store already (added again, a database started anew):
+                fetch.sign(lst, self.key)               # signed again by this key, nothing downloaded
+                os.chmod(lst + ".sig", 0o644)
+            return {"key": key, "sha256": hf["sha256"], "size": hf["size"], "revision": hf["commit"], "folder": folder,
+                    "filename": filename, "bytes": hf["size"], "total": hf["size"]}
+        incoming = os.path.join(self.models, ".incoming")
+        os.makedirs(incoming, exist_ok=True)
+        part = os.path.join(incoming, f"{hf['commit'][:12]}-{hashlib.sha256(path.encode()).hexdigest()[:12]}.part")
+        last = [0.0]
+
+        def progress(n):
+            if time.monotonic() - last[0] >= 2.0:
+                last[0] = time.monotonic()
+                write_json(os.path.join(self.status, rid + ".json"), {**st, "bytes": n, "total": hf["size"]})
+        import urllib.error
+        import urllib.parse
+        url = f"{self.hf_endpoint}/{repo}/resolve/{hf['commit']}/{urllib.parse.quote(path)}"
+        try:
+            sha = fetch.download(url, part, hf["size"], hf["sha256"], headers=self.hf_headers(), progress=progress,
+                                 timeout=600)
+        except urllib.error.HTTPError as e:      # a gated repository shows its files to anyone, and serves them not
+            if e.code in (401, 403):
+                raise self.gated(repo)
+            raise Refused(f"downloading {repo}/{path}: Hugging Face answered {e.code} — Retry goes on from there")
+        except OSError as e:
+            raise Refused(f"downloading {repo}/{path} broke off: {type(e).__name__}: {e} — Retry goes on from there")
+        except fetch.Refused as e:
+            raise Refused(str(e))
+        entry = fetch.model_entry(folder, filename, hf["size"], sha)
+        doc = fetch.model_doc(entry)
+        dest_dir = os.path.join(self.models, folder)
+        os.makedirs(dest_dir, exist_ok=True)
+        os.chmod(part, 0o444)
+        fetch.forget_others(self.models, doc)
+        os.replace(part, os.path.join(dest_dir, filename))
+        lst = os.path.join(self.models, "signed", "model", doc["key"] + ".json")
+        os.makedirs(os.path.dirname(lst), exist_ok=True)
+        with open(lst + ".tmp", "wb") as f:
+            f.write(entry)
+        os.chmod(lst + ".tmp", 0o644)
+        os.replace(lst + ".tmp", lst)
+        if self.key and os.path.exists(self.key):
+            fetch.sign(lst, self.key)
+            os.chmod(lst + ".sig", 0o644)
+        return {"key": doc["key"], "sha256": sha, "size": hf["size"], "revision": hf["commit"], "folder": folder,
+                "filename": filename, "bytes": hf["size"], "total": hf["size"]}
+
     # ---- the loop ----------------------------------------------------------------------------------------------
     def recover(self) -> None:
         """A build running when the builder stopped will not finish: say so instead of leaving it running."""
@@ -309,6 +440,7 @@ class Builder:
                 time.sleep(poll)
         threading.Thread(target=lane, args=("resolve",), daemon=True).start()     # a lookup never waits for a build
         threading.Thread(target=lane, args=("build",), daemon=True).start()
+        threading.Thread(target=lane, args=("model",), daemon=True).start()       # nor a build for a 30 GB download
         while True:
             write_json(os.path.join(self.status, "policy.json"), self.policy())
             time.sleep(HEARTBEAT)
@@ -327,6 +459,8 @@ def main(argv=None) -> int:
     ap.add_argument("--art", default=os.environ.get("COMFYFARM_ARTIFACTS", ""))
     ap.add_argument("--share", default="/opt/comfyfarm/share")
     ap.add_argument("--uv", default=os.environ.get("COMFYFARM_UV", "/usr/local/bin/uv"))
+    ap.add_argument("--models", default=os.environ.get("COMFYFARM_MODELS", ""),
+                    help="the farm's model store (docs/design/17), owned by this account; empty: no models")
     a = ap.parse_args(argv)
     if not a.art or not os.path.isabs(a.art) or not os.path.isdir(a.art):
         ap.error("--art (COMFYFARM_ARTIFACTS): the artifact store, an existing absolute path — the same path the "
@@ -336,9 +470,15 @@ def main(argv=None) -> int:
     sources = [s.strip() for s in os.environ.get("COMFYFARM_BUILD_NODE_SOURCES", "").split(",") if s.strip()]
     plat = os.environ.get("COMFYFARM_BUILD_PLATFORM", default_platform() or "") or None
     key = os.path.join(os.environ.get("HOME") or "/var/lib/comfyfarm-builder", "signing", "artifacts")
-    b = Builder(a.requests, a.status, a.art, a.share, a.uv if os.path.exists(a.uv) else None, sources, plat, key=key)
+    models = a.models if a.models and os.path.isdir(a.models) and os.access(a.models, os.W_OK) else None
+    if a.models and not models:
+        print(f"comfyfarm builder: {a.models} is not a writable directory — no models from the dashboard", flush=True)
+    b = Builder(a.requests, a.status, a.art, a.share, a.uv if os.path.exists(a.uv) else None, sources, plat, key=key,
+                models=models, hf_endpoint=os.environ.get("COMFYFARM_HF_ENDPOINT") or "https://huggingface.co",
+                hf_token_file=os.environ.get("COMFYFARM_HF_TOKEN_FILE") or None,
+                allow_pickle=os.environ.get("COMFYFARM_MODELS_ALLOW_PICKLE") == "1")
     print(f"comfyfarm builder: store {a.art}, recipes {', '.join(b.recipes()) or 'none'}, dashboard node packs "
-          + (f"from {', '.join(sources)}" if sources else "off"), flush=True)
+          + (f"from {', '.join(sources)}" if sources else "off") + f", models {models or 'off'}", flush=True)
     b.serve()
     return 0
 

@@ -2,11 +2,12 @@
 import { TZ, act, api, button, dailyChart, dur, formDialog, h, hours, namedRow, noteInput, periodPicker, pill, progressOf,
          qs, setPill, setText, statCards, syncNote, syncRows, t, table, toast, when } from "../core.js";
 import { locale } from "../i18n.js";
+import { models } from "./models.js";
 import { rollout } from "./rollout.js";
 import { setupWorker } from "./setup.js";
 
-const TABS = [["workers", "Workers"], ["groups", "Groups"], ["users", "Users"], ["rollout", "Rollout"], ["stats", "Statistics"],
-              ["settings", "Settings"]];       // [route, English label]
+const TABS = [["workers", "Workers"], ["groups", "Groups"], ["users", "Users"], ["rollout", "Rollout"], ["models", "Models"],
+              ["stats", "Statistics"], ["settings", "Settings"]];       // [route, English label]
 const BACKENDS = ["cuda", "rocm", "xpu", "mps", "cpu"];
 const OSES = [["posix", "Linux / macOS"], ["nt", "Windows"]];
 
@@ -17,7 +18,7 @@ export default {
     root.append(h("nav", { class: "tabs" }, ...TABS.map(([k, label]) => h("a", { href: `#/admin/${k}`, class: k === sub ? "on" : "" }, t(label)))));
     const body = h("div");
     root.append(body);
-    return { workers, groups, users, rollout, stats, settings }[sub](body, ctx);
+    return { workers, groups, users, rollout, models, stats, settings }[sub](body, ctx);
   },
 };
 

@@ -311,3 +311,35 @@ def test_copies_without_the_builders_key_are_refused(tmp_path):
     root = fake_root(tmp_path)
     res = ws.setup(payload(store="copy"), ws.Host(root=str(root), run=Recorder()))
     assert not res["ok"] and res["steps"][-1]["step"] == "artifact store" and "no key of its builder" in res["error"]
+
+
+def test_the_farms_models_are_copied_into_a_directory_of_their_own(tmp_path):
+    """docs/design/17: with copies, the model store is the store account's and the fetch service fills it; the launcher
+    is told which directory is this host's (the only one it lets a render name). A mounted store, a share: used as it
+    is, nothing copied. Without one, nothing changes."""
+    paths = {"models": "/srv/models", "input": "/mnt/farm/input", "output": "/mnt/farm/output", "user": "/mnt/farm/user",
+             "temp": "/var/lib/comfyfarm/temp/gpu-1", "model_store": "/srv/model-store"}
+    root, host = fake_root(tmp_path / "a"), None
+    host = ws.Host(root=str(root), run=Recorder())
+    assert ws.setup(payload(store="copy", artifact_signer=SIGNER, paths=paths), host)["ok"]
+    assert (root / "srv/model-store").is_dir() and "model store: copy — /srv/model-store is made for the copies" in host.done
+    assert "COMFYFARM_STORE_MODELS=/srv/model-store\n" in (root / "etc/comfyfarm/store.env").read_text()
+    assert "COMFY_LAUNCH_MODEL_STORE=/srv/model-store\n" in (root / "etc/comfyfarm/gpu-1.env").read_text()
+    assert json.loads((root / "etc/comfyfarm/gpu-1.check.json").read_text())["model_store"] == "copy"
+    # someone else's models there (the control plane's own store on a one-server farm): used as it is
+    root = fake_root(tmp_path / "b")
+    (root / "srv/model-store/checkpoints").mkdir(parents=True)
+    host = ws.Host(root=str(root), run=Recorder())
+    assert ws.setup(payload(store="copy", artifact_signer=SIGNER, paths=paths), host)["ok"]
+    assert any(x.startswith("model store: mount — /srv/model-store belongs to") for x in host.done), host.done
+    assert "COMFYFARM_STORE_MODELS" not in (root / "etc/comfyfarm/store.env").read_text()
+    assert "COMFY_LAUNCH_MODEL_STORE=/srv/model-store\n" in (root / "etc/comfyfarm/gpu-1.env").read_text()
+    # a mounted artifact store: the model store is mounted too
+    root = fake_root(tmp_path / "c")
+    host = ws.Host(root=str(root), run=Recorder())
+    assert ws.setup(payload(store="mount", paths=paths), host)["ok"]
+    assert not (root / "srv/model-store").exists() and any(x.startswith("model store: mount") for x in host.done)
+    # none
+    root = fake_root(tmp_path / "d")
+    assert ws.setup(payload(store="copy", artifact_signer=SIGNER), ws.Host(root=str(root), run=Recorder()))["ok"]
+    assert "MODEL" not in (root / "etc/comfyfarm/store.env").read_text() + (root / "etc/comfyfarm/gpu-1.env").read_text()

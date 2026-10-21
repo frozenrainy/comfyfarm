@@ -366,3 +366,25 @@ def test_a_cpu_only_worker_does_not_fail_on_a_gpu_it_cannot_use(tmp_path, router
     out, _ = check(tmp_path, router, kfd_mode=0o000, cfg_extra={"gpu": "none"})
     if os.getuid() != 0:
         assert levels(out)["GPU (AMD)"] == "WARN" and not [r for r in out if r["name"].startswith("GPU") and r["level"] == "FAIL"]
+
+
+def test_the_farms_model_store(tmp_path, router):
+    """docs/design/17: copies — how many are here and the room left; mounted — there or not; none — no line."""
+    root, paths, art, local = host(tmp_path)
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    ms = str(tmp_path / "model-store")
+    lines = lambda cfg: [r for r in hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()  # noqa: E731
+                         if r["name"] == "model store"]
+    base = {"gpu": "amd", "store": "copy", "instance": "gpu-1"}
+    assert lines({**base, "paths": paths}) == []
+    copy = {**base, "paths": {**paths, "model_store": ms}, "model_store": "copy"}
+    assert [r["level"] for r in lines(copy)] == ["FAIL"]
+    os.makedirs(f"{ms}/signed/model")
+    for k in ("a" * 32, "b" * 32):
+        open(f"{ms}/signed/model/{k}.json", "w").write("{}")
+    (got,) = lines(copy)
+    assert got["level"] == "OK" and " — 2 here, " in got["detail"]
+    mount = {**base, "paths": {**paths, "model_store": ms + "-share"}, "model_store": "mount"}
+    assert [r["level"] for r in lines(mount)] == ["WARN"]
+    os.makedirs(ms + "-share")
+    assert [r["level"] for r in lines(mount)] == ["OK"]

@@ -287,6 +287,7 @@ class Check:
                 self.add(WARN, "models", Msg("{path} is empty — ComfyUI will list no models and every job that loads one "
                          "fails: put them in its subdirectories as in ComfyUI's own models directory (checkpoints/, "
                          "loras/, vae/, …)", path=m))
+        self.model_store(dirs.get("model_store") or self.env.get("COMFY_LAUNCH_MODEL_STORE", ""))
         try:
             try:
                 import launcher                                          # on a worker: installed next to this file
@@ -308,6 +309,26 @@ class Check:
                     f.write(f"{int(time.time())}\n")
             except OSError:
                 pass                                                     # the directory check above says why
+
+    def model_store(self, d: str):
+        """The farm's models (docs/design/17): copies of what this worker's group uses, or a share used as it is."""
+        if not d:
+            return
+        readable = os.path.isdir(d) and os.access(d, os.R_OK | os.X_OK)
+        if self.cfg.get("model_store") == "copy":
+            if not readable:
+                self.add(FAIL, "model store", Msg("{path} is missing or not readable — set the host up again", path=d))
+                return
+            n = len(glob.glob(os.path.join(d, "signed", "model", "*.json")))
+            self.add(OK, "model store", Msg("{path}: copies of the models this worker's group uses — {n} here, {gb} GB "
+                                            "free; new ones are copied in the background", path=d, n=n,
+                                            gb=f"{shutil.disk_usage(d).free / 2**30:.0f}"))
+        elif readable:
+            self.add(OK, "model store", Msg("{path}: the farm's models, used as they are (a share, or the control "
+                                            "plane's own store)", path=d))
+        else:
+            self.add(WARN, "model store", Msg("{path} is missing — mount the control plane's model store there, or the "
+                                              "models added in the dashboard do not reach this worker", path=d))
 
     def copies(self):
         """What copies need on this host: the builder's key they are checked against, and the service that makes them."""

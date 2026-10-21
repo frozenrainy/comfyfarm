@@ -12,6 +12,10 @@ a router that is taken over cannot hand on anything else (D-37):
   agent `fetch-status <kind/name,…>`  →  present / queued / running (bytes) / failed (why) / missing, per artifact
 
 The same file also makes the list the builder signs (`file_list`), so both sides agree on what "the same" means.
+
+Models (docs/design/17) come the same way, one file each, named `model/<key>`: the builder signs an entry (folder,
+file, size, SHA-256); the host fetches the file in ranges — an interrupted copy goes on where it stopped — into the
+farm's model store here, checks it whole, then puts it in place.
 """
 from __future__ import annotations
 
@@ -35,19 +39,79 @@ STORE_HOME = "/var/lib/comfyfarm-store"           # root, 0711
 HOME = f"{STORE_HOME}/home"                       # the store account's own
 REQUESTS = f"{STORE_HOME}/requests"               # root:<service account>, 0730
 STATUS = f"{STORE_HOME}/status"                   # root, 0755
-CONFIG = "/etc/comfyfarm/store.env"               # COMFYFARM_STORE_ROUTER, COMFYFARM_STORE_ART (setup writes it)
+CONFIG = "/etc/comfyfarm/store.env"               # COMFYFARM_STORE_ROUTER, _ART, _MODELS (setup writes it)
 SIGNERS = "/etc/comfyfarm/artifact-signers"       # the builder's public key, pinned at setup (root's)
 PRINCIPAL, NAMESPACE = "comfyfarm-builder", "comfyfarm-artifact"
 KINDS = ("core", "venv", "nodes", "frontend")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
-ARTIFACT = re.compile(r"^(core|venv|nodes|frontend)/([A-Za-z0-9][A-Za-z0-9._-]{0,62})$")
+ARTIFACT = re.compile(r"^(core|venv|nodes|frontend|model)/([A-Za-z0-9][A-Za-z0-9._-]{0,62})$")
+# the model folders the farm fills: launcher.MODEL_FOLDERS (this file stands alone on a host)
+MODEL_FOLDERS = ("checkpoints", "diffusion_models", "text_encoders", "vae", "loras", "clip_vision", "controlnet",
+                 "upscale_models", "embeddings", "style_models", "model_patches", "audio_encoders",
+                 "latent_upscale_models")
+MODEL_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+()-]{0,199}$")
+KEY = re.compile(r"^[0-9a-f]{32}$")
 FORMAT = 1
 CHUNK = 1 << 20
+STALE = 600.0          # a copy writes its state every second while bytes come: one silent this long is not running
 NOFOLLOW = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
 
 
 class Refused(Exception):
     pass
+
+
+def model_key(folder: str, filename: str, sha256: str) -> str:
+    """A model's name for requests and signatures: from where it goes and what it is, never a database id (a farm
+    started anew keeps its store)."""
+    return hashlib.sha256(f"{folder}/{filename}\0{sha256}".encode()).hexdigest()[:32]
+
+
+def model_entry(folder: str, filename: str, size: int, sha256: str) -> bytes:
+    """What the builder signs for a model: one file, where it goes, its size and SHA-256."""
+    if folder not in MODEL_FOLDERS or not MODEL_FILE.match(filename) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise Refused(f"not a model entry: {folder}/{filename}")
+    doc = {"format": FORMAT, "type": "model", "key": model_key(folder, filename, sha256), "folder": folder,
+           "filename": filename, "size": int(size), "sha256": sha256}
+    return (json.dumps(doc, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
+
+
+def model_doc(entry: bytes, key: str | None = None) -> dict:
+    doc = json.loads(entry)
+    if (doc.get("format") != FORMAT or doc.get("type") != "model" or doc.get("folder") not in MODEL_FOLDERS
+            or not MODEL_FILE.match(str(doc.get("filename", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(doc.get("sha256")))
+            or doc.get("key") != model_key(doc["folder"], doc["filename"], doc["sha256"]) or (key and doc["key"] != key)):
+        raise Refused(f"not the signed entry of model {key}")
+    return doc
+
+
+def forget_others(models: str, doc: dict) -> None:
+    """Signed entries of other models at the same place (another revision of the file): their file is being replaced,
+    and a copy of the same size must not count as theirs."""
+    signed = os.path.join(models, "signed", "model")
+    for n in os.listdir(signed) if os.path.isdir(signed) else []:
+        if n.endswith(".json") and n[:-5] != doc["key"]:
+            try:
+                with open(os.path.join(signed, n), "rb") as f:
+                    other = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if isinstance(other, dict) and (other.get("folder"), other.get("filename")) == (doc["folder"], doc["filename"]):
+                for suffix in (".json", ".json.sig"):
+                    try:
+                        os.remove(os.path.join(signed, n[:-5] + suffix))
+                    except OSError:
+                        pass
+
+
+def model_present(models: str, key: str) -> bool:
+    """A copy is here when its signed entry is, and the file of the entry's size."""
+    try:
+        with open(os.path.join(models, "signed", "model", key + ".json"), "rb") as f:
+            doc = model_doc(f.read(), key)
+        return os.path.getsize(os.path.join(models, doc["folder"], doc["filename"])) == doc["size"]
+    except (OSError, ValueError, Refused):
+        return False
 
 
 def read_env(path: str) -> dict:
@@ -69,8 +133,8 @@ def parse(names) -> list[tuple[str, str]]:
     out = []
     for x in items:
         m = ARTIFACT.match(x.strip())
-        if not m:
-            raise Refused(f"not an artifact name: {x!r} (kind/name, kind one of {', '.join(KINDS)})")
+        if not m or (m.group(1) == "model" and not KEY.match(m.group(2))):
+            raise Refused(f"not an artifact name: {x!r} (kind/name, kind one of {', '.join(KINDS)}, or model/<key>)")
         if (m.group(1), m.group(2)) not in out:
             out.append((m.group(1), m.group(2)))
     if not out:
@@ -264,6 +328,102 @@ def get(router: str, art: str, kind: str, name: str, signers: str = SIGNERS, out
     return path
 
 
+def place_model(models: str, doc: dict, part: str, entry: bytes, sig: bytes) -> str:
+    """A whole, checked copy into place: <models>/<folder>/<filename> (read-only), its signed entry beside the others."""
+    dest_dir = os.path.join(models, doc["folder"])
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, doc["filename"])
+    os.chmod(part, 0o444)
+    forget_others(models, doc)
+    os.replace(part, dest)                         # an older copy under the same name (another revision) is replaced
+    signed = os.path.join(models, "signed", "model")
+    os.makedirs(signed, exist_ok=True)
+    for suffix, data in ((".json", entry), (".json.sig", sig)):
+        with os.fdopen(os.open(os.path.join(signed, doc["key"] + suffix), NOFOLLOW, 0o644), "wb") as f:
+            f.write(data)
+    return dest
+
+
+def download(url: str, part: str, size: int, sha256: str | None, headers: dict | None = None, progress=None,
+             timeout: float = 300) -> str:
+    """GET url into `part`, going on from what an interrupted try left there (Range), hashing everything — the bytes
+    already there first. The whole file must have `size` bytes and the SHA-256 `sha256` (when known: a file Hugging
+    Face does not keep in LFS has none published); else it is thrown away. Returns the SHA-256."""
+    h, have = hashlib.sha256(), 0
+    if os.path.exists(part):
+        with open(part, "rb") as f:
+            for chunk in iter(lambda: f.read(CHUNK), b""):
+                h.update(chunk)
+                have += len(chunk)
+        if have > size:
+            os.remove(part)
+            h, have = hashlib.sha256(), 0
+    if have < size:
+        req = urllib.request.Request(url, headers={**(headers or {}), **({"Range": f"bytes={have}-"} if have else {})})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if have and r.status != 206:              # the server sent it all again: start over
+                h, have = hashlib.sha256(), 0
+                mode = "wb"
+            else:
+                mode = "ab"
+            with open(part, mode) as out:
+                for chunk in iter(lambda: r.read(CHUNK), b""):
+                    out.write(chunk)
+                    h.update(chunk)
+                    have += len(chunk)
+                    if progress:
+                        progress(have)
+                    if have > size:
+                        break
+    if have != size or (sha256 and h.hexdigest() != sha256):
+        os.remove(part)
+        raise Refused(f"{os.path.basename(part)}: {have} bytes, SHA-256 {h.hexdigest()[:12]}… — not the {size} bytes "
+                      f"{(sha256 or '?')[:12]}… expected; thrown away")
+    return h.hexdigest()
+
+
+def get_model(router: str, models: str, key: str, signers: str = SIGNERS, out=None) -> str:
+    """The store account's half for a model: the signed entry, its signature, room, then the file in ranges."""
+    out = out or sys.stdout
+    base = f"{router.rstrip('/')}/api/worker_models/{key}"
+    try:
+        with urllib.request.urlopen(base + "/signed", timeout=60) as r:
+            got = json.load(r)
+        entry, sig = got["entry"].encode(), got["sig"].encode()
+    except urllib.error.HTTPError as e:
+        raise Refused(f"the router has no signed model {key} (HTTP {e.code}: {e.read().decode(errors='replace')[:200]})")
+    except (OSError, ValueError, KeyError, AttributeError) as e:
+        raise Refused(f"cannot read the signed entry of model {key} from {router}: {type(e).__name__}: {e}")
+    verify(entry, sig, signers)
+    doc = model_doc(entry, key)
+    if model_present(models, key):
+        return os.path.join(models, doc["folder"], doc["filename"])
+    incoming = os.path.join(models, ".incoming")
+    os.makedirs(incoming, exist_ok=True)
+    part = os.path.join(incoming, key + ".part")
+    have = os.path.getsize(part) if os.path.exists(part) else 0
+    free = shutil.disk_usage(incoming).free
+    if free < doc["size"] - have + (1 << 30):
+        raise Refused(f"{doc['folder']}/{doc['filename']} needs {(doc['size'] - have) / 2**30:.1f} GB more, {models} has "
+                      f"{free / 2**30:.1f} GB free")
+    last = [0.0]
+
+    def progress(n):
+        if time.monotonic() - last[0] >= 1.0:
+            last[0] = time.monotonic()
+            print(json.dumps({"bytes": n, "total": doc["size"]}), file=out, flush=True)
+    try:
+        download(base + "/file", part, doc["size"], doc["sha256"], progress=progress)
+    except urllib.error.HTTPError as e:
+        raise Refused(f"the router did not send model {key} (HTTP {e.code})")
+    except OSError as e:                              # the part stays: the next try goes on from there
+        raise Refused(f"copying {doc['folder']}/{doc['filename']} broke off at {os.path.getsize(part) if os.path.exists(part) else 0} "
+                      f"bytes: {type(e).__name__}: {e} — it goes on from there next time")
+    path = place_model(models, doc, part, entry, sig)
+    print(json.dumps({"bytes": doc["size"], "total": doc["size"]}), file=out, flush=True)
+    return path
+
+
 # ---- requests and their state (the service account's half) ---------------------------------------------------------
 def _key(kind: str, name: str) -> str:
     return f"{kind}.{name}"
@@ -286,21 +446,36 @@ def request(names, requests: str | None = None) -> str:
     return "asked for " + ", ".join(asked) if asked else "already asked for"
 
 
-def status(names, art: str | None = None, requests: str | None = None, status_dir: str | None = None) -> dict:
+def here(kind: str, name: str, art: str, models: str) -> bool:
+    if kind == "model":
+        return bool(models) and model_present(models, name)
+    return bool(art) and os.path.isfile(os.path.join(art, kind, name, "READY"))
+
+
+def status(names, art: str | None = None, requests: str | None = None, status_dir: str | None = None,
+           models: str | None = None) -> dict:
     requests, status_dir = requests or REQUESTS, status_dir or STATUS
-    art = art or read_env(CONFIG).get("COMFYFARM_STORE_ART", "")
+    cfg = read_env(CONFIG) if art is None or models is None else {}
+    art = art if art is not None else cfg.get("COMFYFARM_STORE_ART", "")
+    models = models if models is not None else cfg.get("COMFYFARM_STORE_MODELS", "")
     out = {}
     for kind, name in parse(names):
         key = f"{kind}/{name}"
-        if art and os.path.isfile(os.path.join(art, kind, name, "READY")):
+        if here(kind, name, art, models):
             out[key] = {"state": "present"}
+            continue
+        if kind == "model" and not models:
+            out[key] = {"state": "off", "error": "this host keeps no model copies (its models are its own)"}
             continue
         if os.path.exists(os.path.join(requests, _key(kind, name))):
             out[key] = {"state": "queued"}
             continue
+        path = os.path.join(status_dir, _key(kind, name) + ".json")
         try:
-            with open(os.path.join(status_dir, _key(kind, name) + ".json")) as f:
+            with open(path) as f:
                 st = json.load(f)
+            if st.get("state") == "running" and time.time() - os.path.getmtime(path) > STALE:
+                st = {}                  # its service is gone (the host restarted): asked again, a model goes on
         except (OSError, ValueError):
             st = {}
         out[key] = st if st.get("state") in ("running", "failed") else {"state": "missing"}
@@ -313,12 +488,14 @@ def wait(names, art: str, timeout: float, say=print, requests: str | None = None
     request(names, requests)
     t0, told = time.monotonic(), 0.0
     while True:
-        st = status(names, art, requests, status_dir)
+        st = status(names, art, requests, status_dir, models="")
         if all(v["state"] == "present" for v in st.values()):
             return
         if failed := {k: v for k, v in st.items() if v["state"] == "failed"}:
             k, v = next(iter(failed.items()))
             raise Refused(f"copying {k} failed: {v.get('error') or 'see /var/lib/comfyfarm-store/status'}")
+        if any(v["state"] == "missing" for v in st.values()):
+            request(names, requests)            # a copy that stopped without a word (its service went away): again
         if all(v["state"] in ("present", "queued") for v in st.values()) and time.monotonic() - t0 > 120:
             raise Refused("nothing took the request for 2 minutes — is comfyfarm-fetch.path running "
                           "(systemctl status comfyfarm-fetch.path)?")
@@ -345,7 +522,8 @@ def _asked(requests: str, name: str) -> tuple[str, str] | None:
     account could put there (a directory, a link, another name) is removed without being looked at."""
     path = os.path.join(requests, name)
     kind, _, rest = name.partition(".")
-    if not os.path.islink(path) and os.path.isfile(path) and kind in KINDS and NAME.match(rest):
+    if not os.path.islink(path) and os.path.isfile(path) and ((kind in KINDS and NAME.match(rest))
+                                                              or (kind == "model" and KEY.match(rest))):
         return kind, rest
     try:
         os.unlink(path) if os.path.islink(path) or not os.path.isdir(path) else shutil.rmtree(path, ignore_errors=True)
@@ -366,6 +544,7 @@ def run(requests: str | None = None, status_dir: str | None = None, config: str 
     requests, status_dir, home = requests or REQUESTS, status_dir or STATUS, home or HOME
     cfg = read_env(config or CONFIG)
     router, art = cfg.get("COMFYFARM_STORE_ROUTER", ""), cfg.get("COMFYFARM_STORE_ART", "")
+    models = cfg.get("COMFYFARM_STORE_MODELS", "")
     done, tried = [], set()
     while new := [n for n in sorted(os.listdir(requests)) if n not in tried]:   # requests that came in meanwhile too
         tried.update(new)
@@ -375,14 +554,15 @@ def run(requests: str | None = None, status_dir: str | None = None, config: str 
                 continue
             kind, name = asked
             key = _key(kind, name)
-            if os.path.isfile(os.path.join(art, kind, name, "READY")):
-                _done_with(requests, entry)
+            if here(kind, name, art, models) or (kind == "model" and not (models and KEY.match(name))):
+                _done_with(requests, entry)                  # here already — or a model on a host without a model store
                 continue
             # running before the request goes: a reader in between never sees the last attempt's failure as this one's
             started = dt.datetime.now(dt.timezone.utc).isoformat()
             _write_status(status_dir, key, {"state": "running", "started": started, "bytes": 0, "total": 0})
             _done_with(requests, entry)
-            argv = [sys.executable, os.path.join(HERE, "fetch.py"), "get", router, art, kind, name]
+            argv = ([sys.executable, os.path.join(HERE, "fetch.py"), "get-model", router, models, name] if kind == "model"
+                    else [sys.executable, os.path.join(HERE, "fetch.py"), "get", router, art, kind, name])
             if as_user:
                 argv = ["runuser", "-u", as_user, "--", "env", f"HOME={home}", "PATH=/usr/bin:/bin"] + argv
             p = popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd="/")
@@ -415,10 +595,14 @@ def main(argv=None) -> int:
             (kind, name), = parse(f"{args[3]}/{args[4]}")
             get(args[1], args[2], kind, name)
             return 0
+        if len(args) == 4 and args[0] == "get-model" and KEY.match(args[3]):
+            get_model(args[1], args[2], args[3])
+            return 0
     except Refused as e:
         print(f"fetch: {e}", file=sys.stderr)
         return 2
-    print("usage: fetch.py run (comfyfarm-fetch.service) | fetch.py get <router> <ART> <kind> <name>", file=sys.stderr)
+    print("usage: fetch.py run (comfyfarm-fetch.service) | fetch.py get <router> <ART> <kind> <name> | "
+          "fetch.py get-model <router> <model store> <key>", file=sys.stderr)
     return 2
 
 

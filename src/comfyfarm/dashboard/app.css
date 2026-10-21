@@ -85,10 +85,10 @@ img.thumb { height: 2.5rem; max-width: 5rem; object-fit: cover; border-radius: 3
 .empty { margin: .4rem .2rem; }
 
 .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .8rem; border: 1px solid currentColor; white-space: nowrap; }
-.s-pending, .s-unknown { color: var(--muted); }
+.s-pending, .s-unknown, .s-queued { color: var(--muted); }
 .s-paused { color: var(--info); }
-.s-dispatching, .s-running, .s-online, .s-completed { color: var(--ok); }
-.s-cancelling, .s-busy_unresponsive, .s-suspect, .s-maintenance, .s-blocked { color: var(--amber); }
+.s-dispatching, .s-running, .s-online, .s-completed, .s-ready { color: var(--ok); }
+.s-cancelling, .s-busy_unresponsive, .s-suspect, .s-maintenance, .s-blocked, .s-downloading { color: var(--amber); }
 .s-failed, .s-offline { color: var(--bad); }
 .s-cancelled, .s-disabled { color: var(--muted); }
 

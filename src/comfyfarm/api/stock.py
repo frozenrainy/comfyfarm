@@ -279,18 +279,22 @@ def make_router(ctx) -> APIRouter:
                 return w["name"], got[0], got[1]
         return None
 
-    async def refresh_snapshot(group_id: int) -> bytes | None:
-        """Fetch /object_info from an online worker of the group (idle first, up to 3); with none, from the UI worker,
-        kept as a stand-in until a GPU worker of the group answers. On failure the existing snapshot stays — a 502
-        here would leave the frontend with an empty canvas (D-20)."""
+    async def refresh_snapshot(group_id: int, prefer: list[int] | None = None) -> bytes | None:
+        """Fetch /object_info from an online worker of the group (idle first, up to 3; the `prefer`red ones before the
+        others — those that have a model the others are still copying); with none, from the UI worker, kept as a
+        stand-in until a GPU worker of the group answers. On failure the existing snapshot stays — a 502 here would
+        leave the frontend with an empty canvas (D-20)."""
         async with router.db.conn() as c:
-            ws = await c.fetch("SELECT name, base_url, current_job_id IS NULL AS idle FROM workers WHERE group_id = $1 AND enabled "
-                               "AND deleted_at IS NULL AND NOT maintenance AND state = 'online'", group_id)
+            ws = await c.fetch("SELECT id, name, base_url, current_job_id IS NULL AS idle FROM workers WHERE group_id = $1 "
+                               "AND enabled AND deleted_at IS NULL AND NOT maintenance AND state = 'online'", group_id)
             had = await c.fetchval("SELECT source FROM object_info_snapshots WHERE group_id = $1", group_id)
         idle = [w for w in ws if w["idle"]]; busy = [w for w in ws if not w["idle"]]
         random.shuffle(idle); random.shuffle(busy)
+        order = idle + busy
+        if prefer:
+            order = [w for w in order if w["id"] in prefer] + [w for w in order if w["id"] not in prefer]
         got = None
-        for w in (idle + busy)[:3]:
+        for w in order[:3]:
             if got := await fetch_object_info(w):
                 source = w["name"]
                 break

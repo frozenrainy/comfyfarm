@@ -48,7 +48,7 @@ def settings_from_env(env=None) -> Settings:
                       ("ARTIFACTS_DIR", "artifacts_dir"), ("DEV_IDENTITY", "dev_identity"), ("KEYS_DIR", "keys_dir"),
                       ("BUILDS_DIR", "builds_dir"), ("UI_SERVICE", "ui_service"), ("UI_AGENT", "ui_agent"),
                       ("UI_HOME", "ui_home"), ("UI_SHARED", "ui_shared"), ("FIRST_RECIPE", "first_recipe"),
-                      ("PUBLIC_ROUTER", "public_router")):
+                      ("PUBLIC_ROUTER", "public_router"), ("MODELS_DIR", "models_dir")):
         if env.get(ENV_PREFIX + key):
             kw[attr] = env[ENV_PREFIX + key]
     if env.get("COMFYFARM_DEV_ADMINS"):
@@ -272,7 +272,8 @@ def take_dir(path: str, owner: tuple[int, int]) -> str:
 
 
 def prepare_compose(keys: str, builds: str | None, ui_token: str | None, art: str | None, shared: str | None,
-                    builder_home: str | None, ui_home: str | None, farm_owner: tuple[int, int]) -> list[str]:
+                    builder_home: str | None, ui_home: str | None, farm_owner: tuple[int, int],
+                    models: str | None = None) -> list[str]:
     """The compose deployment's builder and UI worker container (docs/design/15), made ready by `init` (root):
     the request/status directories, the UI worker's agent token, and who owns the store and the shared storage."""
     said = []
@@ -293,7 +294,7 @@ def prepare_compose(keys: str, builds: str | None, ui_token: str | None, art: st
             os.chmod(path, 0o400)
             os.chown(path, *owner)
         os.chmod(ui_token, 0o755)
-    for path, owner in ((art, BUILDER_OWNER), (builder_home, BUILDER_OWNER), (ui_home, farm_owner)):
+    for path, owner in ((art, BUILDER_OWNER), (models, BUILDER_OWNER), (builder_home, BUILDER_OWNER), (ui_home, farm_owner)):
         if path:
             said.append(take_dir(path, owner))
     if shared:
@@ -363,6 +364,7 @@ def main(argv=None):
     pr.add_argument("--builds", help="the builder's request/status directory (docs/design/15)")
     pr.add_argument("--ui-token", help="the UI worker container's token directory")
     pr.add_argument("--art", help="the artifact store: the builder's when it is new")
+    pr.add_argument("--models", help="the model store (docs/design/17): the builder's when it is new")
     pr.add_argument("--shared", help="the shared storage: input/output/user, the farm account's when new")
     pr.add_argument("--builder-home", help="the builder's own directory (uv's cache and interpreters)")
     pr.add_argument("--ui-home", help="the UI worker container's own directory")
@@ -388,10 +390,11 @@ def main(argv=None):
         if args.dir == "-" and not (args.art and args.shared):
             sys.exit("prepare: COMFYFARM_ARTIFACTS_MOUNT and COMFYFARM_SHARED must be set for the builder and the UI worker "
                      "(.env, docs/guide/install.md)")
-        if os.geteuid() == 0 and any((args.builds, args.ui_token, args.art, args.shared, args.builder_home, args.ui_home)):
+        if os.geteuid() == 0 and any((args.builds, args.ui_token, args.art, args.shared, args.builder_home, args.ui_home,
+                                      args.models)):
             keys = args.keys or os.path.join(args.dir, "keys")
             for line in prepare_compose(keys, args.builds, args.ui_token, args.art, args.shared, args.builder_home,
-                                        args.ui_home, (args.farm_uid, args.farm_uid)):
+                                        args.ui_home, (args.farm_uid, args.farm_uid), args.models):
                 print(line)
         return
     if args.cmd == "secrets":

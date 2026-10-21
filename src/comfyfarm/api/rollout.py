@@ -108,16 +108,21 @@ def check_instance(body: InstanceIn, keys_dir: str | None = None) -> dict:
         raise HTTPException(400, "instance: letters, digits and . _ - (max 63)")
     if body.role not in ("gpu", "ui") or body.platform not in ("posix", "windows"):
         raise HTTPException(400, "role must be gpu|ui, platform posix|windows")
+    body.paths = {k: v for k, v in body.paths.items() if v or k not in rd.OPTIONAL_PATH_KEYS}   # left empty: none
     if missing := [k for k in rd.PATH_KEYS if not body.paths.get(k)]:
         raise HTTPException(400, f"paths missing: {missing}")
     win = body.platform == "windows"
-    for k in rd.PATH_KEYS:
+    if bad := sorted(set(body.paths) - set(rd.PATH_KEYS) - set(rd.OPTIONAL_PATH_KEYS)):
+        raise HTTPException(400, f"paths: unknown {bad}")
+    for k in [k for k in rd.PATH_KEYS + rd.OPTIONAL_PATH_KEYS if body.paths.get(k)]:
         v = body.paths[k]
         if not (re.match(r"^[A-Za-z]:\\", v) if win else v.startswith("/")):
             raise HTTPException(400, f"paths.{k} must be absolute")
     if bad := rd.path_problems(body.paths, win):
         raise HTTPException(400, "; ".join(bad) + ": directories users write to must lie outside the artifact store "
                                  "and the local copies (custom nodes are imported from there)")
+    if bad := rd.model_store_problem(body.paths, win):
+        raise HTTPException(400, bad)
     if not 1 <= body.port <= 65535:
         raise HTTPException(400, "port out of range")
     try:

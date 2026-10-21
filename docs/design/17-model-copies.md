@@ -1,6 +1,6 @@
 # 17 — Models from the dashboard: a model store on the control plane, copies on the GPU hosts
 
-Status: **approved** (2026-10-21) — phase 1 in progress, not in a release yet.
+Status: **approved** (2026-10-21) — phase 1 implemented (0.1.0-dev.17; operators: [models.md](../guide/models.md)).
 
 ## Why
 
@@ -22,10 +22,13 @@ model is added as it comes out (tens of GB each with its text encoders).
   publishes for it, and **signs** an entry (folder, file, size, SHA-256) with the same key as the artifacts (16).
   Gated models: a Hugging Face token the operator puts in a file of the builder's (`COMFYFARM_HF_TOKEN_FILE`) — never in
   the database, never through the router.
-- **GPU hosts in copy mode keep local copies** of the models their group uses, in their models directory: the same
-  fetch service and account as the artifacts, the same checks (signature, then the file's SHA-256 while it is written).
-  A model added to a group is copied to its workers in the background — no restart, no drain: ComfyUI lists a new file
-  at its next refresh. A host whose models directory is a share keeps using the share.
+- **GPU hosts in copy mode keep local copies** of the models their group uses, in a model store of their own
+  (`paths.model_store`, not the site's models directory; ComfyUI sees it through the render's `extra_model_paths`,
+  which the launcher accepts only for the host's own directory): the same fetch service and account as the artifacts,
+  the same checks (signature, then the file's SHA-256 while it is written). A model added to a group is copied to its
+  workers in the background — no restart, no drain; when a copy arrives the router reads the group's node definitions
+  again, so the editor's model lists show it. A host whose model store is a mount (the control plane's, shared) uses
+  it as it is.
 - **Downloads resume.** A 30 GB file is fetched in ranges; an interrupted copy (or download from Hugging Face) goes on
   where it stopped.
 
@@ -37,7 +40,8 @@ model is added as it comes out (tens of GB each with its text encoders).
 - **Site models stay.** Files the farm did not copy are never touched; the farm's copies are only the ones it lists.
 - **Removing** a model from a group removes its copies from that group's workers after their running jobs — the
   dashboard asks first (a workflow that names it then fails on that group).
-- **Disk**: the dashboard shows each worker's free space against what its group needs, before copying.
+- **Disk**: the dashboard shows each worker's free space against what its group needs, before copying (phase 2;
+  phase 1: the host check shows the free space, and a copy that does not fit fails saying how much it needs).
 - **Jobs**: a worker reports which of its group's models it has (its inventory, already read for consistency); until a
   copy is complete, the worker counts as "differs from its group" as today.
 

@@ -177,7 +177,10 @@ export default {
   "Hosts allowed to fetch the render (addresses, comma-separated)": "렌더를 받아 갈 수 있는 호스트 (주소, 쉼표로 구분)",
   "Platform": "플랫폼", "GPU worker": "GPU 워커", "UI worker": "UI 워커",
   "pick at least one worker": "워커를 하나 이상 고르세요",
-  "Artifact store <ART>": "아티팩트 저장소 <ART>", "Local root <LOCAL>": "로컬 루트 <LOCAL>", "Models directory": "모델 디렉터리",
+  "Artifact store <ART>": "아티팩트 저장소 <ART>", "Local root <LOCAL>": "로컬 루트 <LOCAL>", "Models directory": "모델 디렉터리", "Model store (models from the dashboard)": "모델 저장소 (대시보드에서 추가한 모델)",
+  "empty: no models from the dashboard on this host": "비워 두면: 이 호스트에는 대시보드 모델을 두지 않음",
+  "The models added in System → Models. Copied: the ones this worker's group uses are copied here, checked against the builder's signature (a directory of its own, not the models directory above). Mounted: mount the control plane's model store here. Empty: none on this host.":
+    "시스템 → 모델에서 추가한 모델. 복사: 이 워커 그룹이 쓰는 모델이 여기로 복사되고 빌더 서명으로 검증됩니다 (위 모델 디렉터리와 다른 별도 디렉터리). 마운트: 제어 영역의 모델 저장소를 여기에 마운트하세요. 비워 두면: 이 호스트에는 두지 않음.",
   "Input directory": "입력 디렉터리", "Output directory": "출력 디렉터리", "User directory": "사용자 디렉터리", "Temp directory": "임시 디렉터리",
   "{name} (advanced)": "{name} (고급)",
   "Restart configuration (JSON)": "재시작 설정 (JSON)",
@@ -642,11 +645,60 @@ export default {
     "{path}: 제어 영역 아티팩트의 복사본 — 지금 {n}개. 프로필에 필요한 것은 시작 전에 복사됩니다",
   "/dev/kfd present but {user} cannot open it — not needed: this worker runs on the CPU":
     "/dev/kfd가 있지만 {user} 계정이 열 수 없습니다 — 필요 없습니다: 이 워커는 CPU로 돕니다",
+  "model store":
+    "모델 저장소",
+  "{path} is missing or not readable — set the host up again":
+    "{path}이(가) 없거나 읽을 수 없습니다 — 호스트를 다시 설치하세요",
+  "{path}: copies of the models this worker's group uses — {n} here, {gb} GB free; new ones are copied in the background":
+    "{path}: 이 워커 그룹이 쓰는 모델의 복사본 — 지금 {n}개, 여유 {gb} GB. 새 모델은 백그라운드로 복사됩니다",
+  "{path}: the farm's models, used as they are (a share, or the control plane's own store)":
+    "{path}: 팜의 모델을 그대로 씁니다 (공유 폴더, 또는 제어 영역 자체의 저장소)",
+  "{path} is missing — mount the control plane's model store there, or the models added in the dashboard do not reach this worker":
+    "{path}이(가) 없습니다 — 제어 영역의 모델 저장소를 거기에 마운트하세요. 아니면 대시보드에서 추가한 모델이 이 워커에 닿지 않습니다",
+  // ---- System → Models (docs/design/17) ----
+  "Models": "모델", "Model": "모델", "Source": "출처", "Size": "크기", "Copies": "복사본", "Copying": "복사 중",
+  "Problems": "문제", "Add models": "모델 추가", "Download": "다운로드", "Asked again": "다시 요청했습니다",
+  "ready": "준비됨", "downloading": "다운로드 중",
+  "Copies on the GPU workers": "GPU 워커의 복사본",
+  "Each worker gets the models its group uses, in the background — no restart. ComfyUI lists a new one when its model list is refreshed.":
+    "각 워커는 자기 그룹이 쓰는 모델을 백그라운드로 받습니다 — 재시작 없음. 새 모델은 ComfyUI의 모델 목록을 새로 고치면 보입니다.",
+  "No models yet. Add Hugging Face links — the builder downloads them, GPU workers get copies.":
+    "아직 모델이 없습니다. Hugging Face 링크를 추가하세요 — 빌더가 내려받고, GPU 워커가 복사본을 받습니다.",
+  "Groups that use them": "사용하는 그룹",
+  "their GPU workers get a copy; none checked: kept in the store only": "그 그룹의 GPU 워커가 복사본을 받습니다. 아무것도 고르지 않으면 저장소에만 둡니다",
+  "Hugging Face file links, one per line": "Hugging Face 파일 링크 (한 줄에 하나)",
+  "as copied from the file's page; a line may start with its folder: loras https://huggingface.co/…":
+    "파일 페이지에서 복사한 그대로. 줄 앞에 폴더를 붙여도 됩니다: loras https://huggingface.co/…",
+  "Folder in ComfyUI": "ComfyUI 폴더",
+  "from the link (…/split_files/vae/… → vae)": "링크에서 (…/split_files/vae/… → vae)",
+  "no links": "링크가 없습니다",
+  "no folder in the link — pick one, or start the line with it: {line}": "링크에 폴더가 없습니다 — 폴더를 고르거나 줄 앞에 붙이세요: {line}",
+  "{n} model(s) asked of the builder — it downloads them one after another": "모델 {n}개를 빌더에 요청했습니다 — 하나씩 차례로 내려받습니다",
+  "Saved — the workers of {groups} keep the copy they have": "저장했습니다 — {groups}의 워커는 이미 받은 복사본을 그대로 둡니다",
+  "Remove {name} from the list? It never arrived: nothing is in the store or on a worker.":
+    "{name}을(를) 목록에서 지울까요? 받아지지 않은 모델이라 저장소에도 워커에도 아무것도 없습니다.",
+  "(none — in the store only)": "(없음 — 저장소에만)",
+  "no model store on this host — Set up again (System → Workers) to have one": "이 호스트에는 모델 저장소가 없습니다 — 쓰려면 다시 설치하세요 (시스템 → 워커)",
+  "uses the store as it is": "저장소를 그대로 사용",
+  "no control-plane builder here (the compose deployment's builder service)": "여기에는 제어 영역 빌더가 없습니다 (compose 배포의 builder 서비스)",
+  "no control-plane builder here: models from the dashboard need the compose deployment's builder":
+    "여기에는 제어 영역 빌더가 없습니다: 대시보드 모델에는 compose 배포의 빌더가 필요합니다",
+  "the builder is not running (docker compose ps builder; its log says why)": "빌더가 실행 중이 아닙니다 (docker compose ps builder — 이유는 빌더 로그에 있습니다)",
+  "the builder has no model store (COMFYFARM_MODELS, docs/guide/models.md)": "빌더에 모델 저장소가 없습니다 (COMFYFARM_MODELS, docs/guide/models.md)",
+  "the builder has no model store: set COMFYFARM_MODELS_MOUNT (docs/guide/models.md)": "빌더에 모델 저장소가 없습니다: COMFYFARM_MODELS_MOUNT를 설정하세요 (docs/guide/models.md)",
+  "the router does not see the model store (COMFYFARM_MODELS_DIR): GPU workers cannot copy from it":
+    "라우터가 모델 저장소를 보지 못합니다 (COMFYFARM_MODELS_DIR): GPU 워커가 복사해 갈 수 없습니다",
+  "Formats: {formats} — others can run code when ComfyUI loads them.": "형식: {formats} — 다른 형식은 ComfyUI가 불러올 때 코드를 실행할 수 있습니다.",
+  "All formats allowed (COMFYFARM_MODELS_ALLOW_PICKLE=1).": "모든 형식 허용 (COMFYFARM_MODELS_ALLOW_PICKLE=1).",
+  "A Hugging Face token is set for gated models.": "게이트 모델용 Hugging Face 토큰이 설정되어 있습니다.",
+  "No Hugging Face token: gated models fail until one is in the builder's hf_token file.":
+    "Hugging Face 토큰이 없습니다: 게이트 모델은 빌더의 hf_token 파일에 토큰을 넣기 전까지 실패합니다.",
   // ---- audit actions (the router's fixed words) ----
   "comfyfarm (first start)": "comfyfarm (첫 시작)", "assign": "할당", "build requested": "빌드 요청",
   "first administrator created": "첫 관리자 생성", "instance configured": "인스턴스 설정", "instance removed": "인스턴스 삭제",
   "instance started": "인스턴스 시작", "maintenance off": "점검 끝", "maintenance on": "점검 시작",
   "node pack added": "노드팩 추가", "node pack changed": "노드팩 변경", "node pack removed": "노드팩 삭제",
+  "model added": "모델 추가", "model changed": "모델 변경", "model retried": "모델 다시 받기", "model removed": "모델 삭제",
   "profile changed": "프로필 변경", "profile created": "프로필 생성", "profile deleted": "프로필 삭제",
   "rollout abort": "롤아웃 중단", "rollout resumed": "롤아웃 재개", "rollout started": "롤아웃 시작",
   "worker setup created": "워커 설치 생성", "worker setup finished": "워커 설치 완료", "worker setup over ssh": "ssh로 워커 설치",

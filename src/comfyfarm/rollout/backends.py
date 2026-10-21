@@ -18,7 +18,7 @@ NAMES = ("manual", "ssh", "http-agent", "systemd-local")
 DEFAULT_KEYS_DIR = "/etc/comfyfarm/keys"
 TOKEN_ENV_PREFIX = "COMFYFARM_AGENT_TOKEN"        # the only environment variables a token may be read from
 SSH_USER = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,31}$")
-ARTIFACT = re.compile(r"^(core|venv|nodes|frontend)/[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")      # fetch.py's names
+ARTIFACT = re.compile(r"^(?:(core|venv|nodes|frontend)/[A-Za-z0-9][A-Za-z0-9._-]{0,62}|model/[0-9a-f]{32})$")  # fetch.py's
 HOST_NAME = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
 UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._:\\-]{0,255}$")
 

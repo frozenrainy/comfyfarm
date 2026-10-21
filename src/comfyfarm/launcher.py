@@ -85,11 +85,19 @@ MANAGED_LOCAL = ("core", "nodes", "frontend", "run")
 WRITABLE = ("--input-directory", "--output-directory", "--temp-directory", "--user-directory", "--previews-directory")
 
 
-def nodes_yaml(node_dirs: list[str]) -> str:
-    """The extra-model-paths file of a render: custom node directories only (models come from --models-directory)."""
-    if not node_dirs:
-        return "comfyfarm: {}\n"
-    return "comfyfarm:\n  custom_nodes: |\n" + "".join(f"    {d}\n" for d in node_dirs)
+# ComfyUI's model folders the farm's model store may fill (docs/design/17); the same list in fetch.py
+MODEL_FOLDERS = ("checkpoints", "diffusion_models", "text_encoders", "vae", "loras", "clip_vision", "controlnet",
+                 "upscale_models", "embeddings", "style_models", "model_patches", "audio_encoders",
+                 "latent_upscale_models")
+
+
+def nodes_yaml(node_dirs: list[str], model_store: str | None = None) -> str:
+    """The extra-model-paths file of a render: the custom node directories and, where the host has one, the farm's
+    model store (docs/design/17) beside the site's own models (--models-directory)."""
+    out = ("comfyfarm:\n  custom_nodes: |\n" + "".join(f"    {d}\n" for d in node_dirs)) if node_dirs else "comfyfarm: {}\n"
+    if model_store:
+        out += f"comfyfarm_models:\n  base_path: {model_store}\n" + "".join(f"  {f}: {f}\n" for f in MODEL_FOLDERS)
+    return out
 
 
 class Refused(Exception):
@@ -141,7 +149,8 @@ def under(path: str, roots) -> bool:
     return any(p == os.path.normpath(r) or p.startswith(os.path.normpath(r).rstrip("/") + "/") for r in roots)
 
 
-def validate(render: dict, *, instance: str, art: str, local: str, prefixes: list[str], check_files: bool = True) -> None:
+def validate(render: dict, *, instance: str, art: str, local: str, prefixes: list[str], check_files: bool = True,
+             model_store: str | None = None) -> None:
     """Every rule of contract §4. Raises Refused with the first violation. `check_files=False` skips what needs the
     worker's disk (READY files) — the router uses that to refuse an assignment the launcher would refuse."""
     if not isinstance(render, dict):
@@ -230,8 +239,11 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
     for path, content in files.items():
         if not re.fullmatch(re.escape(run_dir) + r"/extra_model_paths\.[0-9a-f]{12}\.yaml", _norm(path)):
             raise Refused(f"files may only be {run_dir}/extra_model_paths.<rev>.yaml: {path!r}")
-        if not isinstance(content, str) or content != nodes_yaml([f"{local}/nodes/{n}" for n in synced["nodes"]]):
-            raise Refused("extra model paths content is not the synced node artifacts")
+        # the model store is the host's own setting (COMFY_LAUNCH_MODEL_STORE), never one the render brings
+        if not isinstance(content, str) or content != nodes_yaml([f"{local}/nodes/{n}" for n in synced["nodes"]],
+                                                                  model_store):
+            raise Refused("extra model paths content is not the synced node artifacts and this host's model store "
+                          f"({model_store or 'none set up here'})")
     for opt, vals in opts:
         if opt == "--front-end-root":
             m = re.fullmatch(re.escape(art) + r"/frontend/([^/]+)", _norm(vals[0]))
@@ -474,12 +486,13 @@ def main(argv: list[str] | None = None) -> int:
         if not INSTANCE.match(cfg["instance"]):
             raise Refused("bad instance name")
         prefixes = [p for p in env.get("COMFY_LAUNCH_PREFIXES", "").split(",") if p]
+        model_store = env.get("COMFY_LAUNCH_MODEL_STORE") or None          # the farm's models here (design 17)
         render = fetch(cfg["router"], cfg["instance"], cfg["local"])
         copying = env.get("COMFY_LAUNCH_FETCH") == "1"
         try:
             # copy mode: the artifacts may not be here yet — checked again once they are
             validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes,
-                     check_files=not copying)
+                     check_files=not copying, model_store=model_store)
         except (TypeError, AttributeError, KeyError, ValueError) as e:     # any malformed render is a refusal, not a crash
             raise Refused(f"malformed render ({type(e).__name__}: {e})".replace("\n", " "))
         if "--check" in args:
@@ -487,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if copying:
             copies(render, cfg["artifacts"])
-            validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes)
+            validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes,
+                     model_store=model_store)
         run_dir = os.path.join(cfg["local"], "run", cfg["instance"])
         for d in render.get("mkdirs", []):
             os.makedirs(d, exist_ok=True)

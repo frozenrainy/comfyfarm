@@ -48,6 +48,7 @@ services:
       COMFYFARM_INSTANCE: ${COMFYFARM_INSTANCE:-comfyfarm-1}
       COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}
       COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:-}
+      COMFYFARM_MODELS_DIR: ${COMFYFARM_MODELS_MOUNT:-}
       # the builder and the UI worker container (COMPOSE_PROFILES=farm): empty = neither
       COMFYFARM_BUILDS_DIR: ${COMFYFARM_BUILDS_DIR:-}
       COMFYFARM_UI_SERVICE: ${COMFYFARM_UI_SERVICE:-}
@@ -64,6 +65,7 @@ services:
       - logs:/var/log/comfyfarm
       - ${COMFYFARM_KEYS_DIR:-./keys}:/keys                          # agent key, known_hosts, token files (owned by uid 10001)
       - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}:ro   # the store, at its path
+      - ${COMFYFARM_MODELS_MOUNT:-./no-models}:${COMFYFARM_MODELS_MOUNT:-/no-models}:ro   # the model store: GPU hosts copy from here
       - builds:/builds
       - ${COMFYFARM_BACKUP_DIR:-./backups}:/backups                    # comfyfarm backup /backups (owned by uid 10001)
       - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # the UI worker's user directory (backup --user-dir)
@@ -93,7 +95,7 @@ services:
     user: "0:0"
     network_mode: none
     command: ["comfyfarm", "prepare", "-", "--keys", "/keys", "--builds", "/builds", "--ui-token", "/ui-agent",
-              "--art", "${COMFYFARM_ARTIFACTS_MOUNT:-}", "--shared", "${COMFYFARM_SHARED:-}",
+              "--art", "${COMFYFARM_ARTIFACTS_MOUNT:-}", "--models", "${COMFYFARM_MODELS_MOUNT:-}", "--shared", "${COMFYFARM_SHARED:-}",
               "--builder-home", "/builder-home", "--ui-home", "/ui-home", "--farm-uid", "${COMFYFARM_UID:-47800}"]
     volumes:
       - ${COMFYFARM_KEYS_DIR:-./keys}:/keys
@@ -102,6 +104,7 @@ services:
       - builder-home:/builder-home
       - ui-home:/ui-home
       - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}
+      - ${COMFYFARM_MODELS_MOUNT:-./no-models}:${COMFYFARM_MODELS_MOUNT:-/no-models}
       - ${COMFYFARM_SHARED:-./no-shared}:${COMFYFARM_SHARED:-/no-shared}
     restart: "no"
 
@@ -120,10 +123,16 @@ services:
       UV_PYTHON_INSTALL_DIR: /var/lib/comfyfarm-builder/python
       # node packs picked in the dashboard: off here unless you list the sources (e.g. https://github.com/)
       COMFYFARM_BUILD_NODE_SOURCES: ${COMFYFARM_BUILD_NODE_SOURCES:-}
+      # models from Hugging Face (System → Models): off unless COMFYFARM_MODELS_MOUNT is set (docs/guide/models.md)
+      COMFYFARM_MODELS: ${COMFYFARM_MODELS_MOUNT:-}
+      COMFYFARM_HF_TOKEN_FILE: /var/lib/comfyfarm-builder/hf_token
+      COMFYFARM_HF_ENDPOINT: ${COMFYFARM_HF_ENDPOINT:-}                  # a mirror; empty = huggingface.co
+      COMFYFARM_MODELS_ALLOW_PICKLE: ${COMFYFARM_MODELS_ALLOW_PICKLE:-}  # 1 = .ckpt/.pt/.bin too (they can run code)
     volumes:
       - builds:/builds
       - builder-home:/var/lib/comfyfarm-builder
       - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}
+      - ${COMFYFARM_MODELS_MOUNT:-./no-models}:${COMFYFARM_MODELS_MOUNT:-/no-models}
     networks: [build]
 
   ui:

@@ -42,19 +42,21 @@ def tar_stream(root: str):
     return os.fdopen(r, "rb")
 
 
+async def worker_host(db, request: Request) -> None:
+    """Only the hosts of this farm's instances get its artifacts and models (no user identity: a host's fetch service)."""
+    caller = request.client.host if request.client else ""
+    async with db.conn() as c:
+        hosts = {h for r in await c.fetch("SELECT hosts FROM instances") for h in (r["hosts"] or [])}
+    if caller in hosts:
+        return
+    from .builds import resolve_hosts
+    if caller not in await resolve_hosts(sorted(hosts)):
+        raise HTTPException(403, "not a host of this farm's instances")
+
+
 def make_router(ctx: Ctx) -> APIRouter:
     api = APIRouter()
     db, s = ctx.router.db, ctx.settings
-
-    async def worker_host(request: Request) -> None:
-        caller = request.client.host if request.client else ""
-        async with db.conn() as c:
-            hosts = {h for r in await c.fetch("SELECT hosts FROM instances") for h in (r["hosts"] or [])}
-        if caller in hosts:
-            return
-        from .builds import resolve_hosts
-        if caller not in await resolve_hosts(sorted(hosts)):
-            raise HTTPException(403, "not a host of this farm's instances")
 
     def published(kind: str, name: str) -> str:
         if not s.artifacts_dir:
@@ -68,7 +70,7 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.get("/api/worker_artifacts/{kind}/{name}/signed")
     async def signed(kind: str, name: str, request: Request):
-        await worker_host(request)
+        await worker_host(db, request)
         published(kind, name)
         lst = os.path.join(s.artifacts_dir, "signed", kind, name + ".json")
         try:
@@ -80,7 +82,7 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.get("/api/worker_artifacts/{kind}/{name}/tar")
     async def tar(kind: str, name: str, request: Request):
-        await worker_host(request)
+        await worker_host(db, request)
         src = tar_stream(published(kind, name))
         loop = asyncio.get_running_loop()
 

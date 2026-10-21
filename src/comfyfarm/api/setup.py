@@ -93,14 +93,17 @@ def check_spec(body: SetupIn) -> None:
             raise HTTPException(400, "port out of range")
     if not re.match(r"^https?://[^\s/]+/?$", body.router_url):
         raise HTTPException(400, "router_url: http(s)://host:port as the worker reaches the router")
+    body.paths = {k: v for k, v in body.paths.items() if v or k not in rd.OPTIONAL_PATH_KEYS}   # left empty: none
     if missing := [k for k in rd.PATH_KEYS if not body.paths.get(k)]:
         raise HTTPException(400, f"paths missing: {missing}")
     for k, v in body.paths.items():
-        if k not in rd.PATH_KEYS or not v.startswith("/") or "\n" in v:
+        if k not in rd.PATH_KEYS + rd.OPTIONAL_PATH_KEYS or not v.startswith("/") or "\n" in v:
             raise HTTPException(400, f"paths.{k} must be an absolute path")
     if bad := rd.path_problems(body.paths, False):
         raise HTTPException(400, "; ".join(bad) + " — directories users write to must not overlap the store or the code "
                                  "under the local root (contract §4)")
+    if bad := rd.model_store_problem(body.paths, False):
+        raise HTTPException(400, bad)
     if body.mounts:
         raise HTTPException(400, "setup no longer mounts storage: mount it on the host yourself, then set the paths")
 

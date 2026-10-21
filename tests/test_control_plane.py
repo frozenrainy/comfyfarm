@@ -308,11 +308,12 @@ async def test_the_setup_form_gets_the_deployments_own_defaults(dsn, tmp_path):
     /srv/comfyfarm/shared, and left the router address empty — on one machine the UI worker and the GPU worker then
     used different storage. The router says what the deployment knows."""
     app = create_app(fast_settings(dsn, artifacts_dir="/srv/comfyfarm/art", ui_shared="/srv/comfyfarm/shared",
-                                   public_router="192.0.2.10:18188"))
+                                   public_router="192.0.2.10:18188", models_dir="/srv/comfyfarm/model-store"))
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
             d = (await c.get("/api/admin/defaults", headers=H)).json()
-            assert d == {"art": "/srv/comfyfarm/art", "shared": "/srv/comfyfarm/shared", "router": "192.0.2.10:18188"}
+            assert d == {"art": "/srv/comfyfarm/art", "models": "/srv/comfyfarm/model-store", "shared": "/srv/comfyfarm/shared",
+                         "router": "192.0.2.10:18188"}
             assert (await c.get("/api/admin/defaults", headers={"X-ComfyFarm-User": "mallory"})).status_code == 403
 
 
@@ -450,3 +451,139 @@ def test_a_new_builder_key_signs_the_store_again(tmp_path):
     signers.write_text(f'{fetch.PRINCIPAL} namespaces="{fetch.NAMESPACE}" {new.public_key()}\n')
     fetch.verify(lst.read_bytes(), (tmp_path / "art" / "signed" / "venv" / "v-1.json.sig").read_bytes(), str(signers))
     assert lst.read_bytes() == before                    # the list itself was not made again
+
+
+class FakeHF:
+    """Hugging Face's revision API and resolve URLs for one repository, with ranges; `gated` answers 403."""
+
+    def __init__(self, files: dict, commit="c" * 40, gated=False, lie=None, gated_files=False):
+        import hashlib
+        import http.server
+        self.asked = []
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(h):
+                outer.asked.append((h.path, h.headers.get("Range"), h.headers.get("Authorization")))
+                if gated:
+                    h.send_response(403); h.end_headers(); return
+                if h.path.startswith("/api/models/org/repo/revision/"):
+                    body = json.dumps({"sha": commit, "siblings": [
+                        {"rfilename": p, "size": len(d), "lfs": {"sha256": hashlib.sha256(d).hexdigest(), "size": len(d)}}
+                        for p, d in files.items()]}).encode()
+                    h.send_response(200); h.send_header("Content-Length", str(len(body))); h.end_headers()
+                    h.wfile.write(body); return
+                prefix = f"/org/repo/resolve/{commit}/"
+                d = files.get(h.path[len(prefix):]) if h.path.startswith(prefix) else None
+                if gated_files and d is not None and not h.headers.get("Authorization"):
+                    h.send_response(401); h.end_headers(); return    # its files listed to anyone, served to members
+                if d is None:
+                    h.send_response(404); h.end_headers(); return
+                d = lie if lie is not None else d
+                start = int(h.headers["Range"].split("=")[1].split("-")[0]) if h.headers.get("Range") else 0
+                h.send_response(206 if start else 200); h.send_header("Content-Length", str(len(d) - start)); h.end_headers()
+                h.wfile.write(d[start:])
+
+            def log_message(h, *a):
+                pass
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_port}"
+
+    def stop(self):
+        self.srv.shutdown()
+
+
+def model_builder(tmp_path, hf, token=None, allow_pickle=False):
+    for d in ("requests", "status", "art", "models"):
+        (tmp_path / d).mkdir(parents=True, exist_ok=True)
+    tok = None
+    if token:
+        tok = tmp_path / "hf_token"
+        tok.write_text(token + "\n")
+    b = builder.Builder(str(tmp_path / "requests"), str(tmp_path / "status"), str(tmp_path / "art"), str(tmp_path), None, [],
+                        key=str(tmp_path / "home" / "signing" / "artifacts"), models=str(tmp_path / "models"),
+                        hf_endpoint=hf.url, hf_token_file=str(tok) if tok else None, allow_pickle=allow_pickle)
+    b.ensure_key()
+    return b
+
+
+def test_the_builder_downloads_a_model_pinned_checked_and_signed(tmp_path):
+    """docs/design/17: a Hugging Face file into the model store — pinned to the commit its ref names, checked against
+    the SHA-256 Hugging Face publishes, read-only, its entry signed with the builder's key; a token goes to Hugging Face
+    only; an interrupted download goes on."""
+    from comfyfarm import fetch
+    data = os.urandom(300_000)
+    hf = FakeHF({"split_files/model.safetensors": data})
+    try:
+        b = model_builder(tmp_path, hf, token="hf_secret")
+        (tmp_path / "models" / ".incoming").mkdir()
+        part = tmp_path / "models" / ".incoming" / f"{'c' * 12}-{__import__('hashlib').sha256(b'split_files/model.safetensors').hexdigest()[:12]}.part"
+        part.write_bytes(data[:100_000])                                          # an earlier try broke off
+        st = b.handle(ask(tmp_path, {"kind": "model", "repo": "org/repo", "path": "split_files/model.safetensors",
+                                     "ref": "main", "folder": "diffusion_models", "filename": "model.safetensors"}))
+        assert st["state"] == "done" and st["revision"] == "c" * 40 and st["size"] == 300_000, st
+        dest = tmp_path / "models" / "diffusion_models" / "model.safetensors"
+        assert dest.read_bytes() == data and (not os.access(dest, os.W_OK) or os.getuid() == 0)
+        assert any(r == "bytes=100000-" for _, r, _ in hf.asked)                    # only the rest was downloaded
+        assert all(a == "Bearer hf_secret" for _, _, a in hf.asked)                 # the token, to Hugging Face only
+        assert "hf_secret" not in json.dumps(st)
+        signers = tmp_path / "pinned"
+        signers.write_text(f'{fetch.PRINCIPAL} namespaces="{fetch.NAMESPACE}" {b.public_key()}\n')
+        lst = tmp_path / "models" / "signed" / "model" / f"{st['key']}.json"
+        fetch.verify(lst.read_bytes(), (tmp_path / "models" / "signed" / "model" / f"{st['key']}.json.sig").read_bytes(),
+                     str(signers))
+        assert fetch.model_present(str(tmp_path / "models"), st["key"])
+    finally:
+        hf.stop()
+
+
+@pytest.mark.parametrize("case", ["pickle", "gated", "gated files", "not what was published", "no such file", "escape"])
+def test_a_model_the_builder_will_not_have(tmp_path, case):
+    data = os.urandom(5000)
+    hf = FakeHF({"m.safetensors": data, "m.ckpt": data}, gated=case == "gated", gated_files=case == "gated files",
+                lie=os.urandom(5000) if case == "not what was published" else None)
+    try:
+        b = model_builder(tmp_path, hf)
+        req = {"kind": "model", "repo": "org/repo", "path": "m.safetensors", "folder": "checkpoints", "filename": "m.safetensors"}
+        if case == "pickle":
+            req.update(path="m.ckpt", filename="m.ckpt")
+        if case == "no such file":
+            req.update(path="other.safetensors")
+        if case == "escape":
+            req.update(filename="../../../etc/x.safetensors")
+        st = b.handle(ask(tmp_path, req))
+        want = {"pickle": "can run code", "gated": "gated or private", "gated files": "gated or private",
+                "not what was published": "thrown away",
+                "no such file": "no file", "escape": "bad place"}[case]
+        assert st["state"] == "failed" and want in st["error"], st
+        assert not list((tmp_path / "models").glob("*/*.safetensors")) and not list((tmp_path / "models").glob("*/*.ckpt"))
+    finally:
+        hf.stop()
+
+
+def test_a_model_in_the_store_already_is_not_downloaded_again(tmp_path):
+    """Added again (a database started anew keeps the store): checked against Hugging Face, signed, nothing fetched.
+    Another revision of the file at the same place replaces it, and the old entry goes with it."""
+    from comfyfarm import fetch
+    data = os.urandom(20_000)
+    hf = FakeHF({"m.safetensors": data})
+    req = {"kind": "model", "repo": "org/repo", "path": "m.safetensors", "folder": "loras", "filename": "m.safetensors"}
+    try:
+        b = model_builder(tmp_path, hf)
+        first = b.handle(ask(tmp_path, req))
+        n = len(hf.asked)
+        again = b.handle(ask(tmp_path, req))
+        assert again["state"] == "done" and again["key"] == first["key"]
+        assert [p for p, _, _ in hf.asked[n:]] == [p for p, _, _ in hf.asked[:1]]    # the revision API only
+    finally:
+        hf.stop()
+    hf = FakeHF({"m.safetensors": os.urandom(20_000)}, commit="d" * 40)
+    try:
+        b.hf_endpoint = hf.url
+        newer = b.handle(ask(tmp_path, req))
+        assert newer["state"] == "done" and newer["key"] != first["key"]
+        assert fetch.model_present(str(tmp_path / "models"), newer["key"])
+        assert not os.path.exists(tmp_path / "models" / "signed" / "model" / f"{first['key']}.json")
+    finally:
+        hf.stop()

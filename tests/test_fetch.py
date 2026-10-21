@@ -6,6 +6,7 @@ import os
 import subprocess
 import tarfile
 import threading
+import time
 
 import pytest
 
@@ -215,6 +216,12 @@ def test_the_launcher_waits_for_a_copy_then_goes_on(tmp_path):
     assert os.path.isfile(art / "core" / "c-1" / "READY")
     with pytest.raises(fetch.Refused, match="not set up on this host"):
         fetch.request("core/c-1", str(tmp_path / "nowhere"))
+    # a copy whose service went away mid-way (the host restarted) says "running" for ever: after STALE it is missing
+    st = store / "status" / "venv.v-9.json"
+    st.write_text(json.dumps({"state": "running", "bytes": 5, "total": 9}))
+    assert fetch.status("venv/v-9", str(art), str(store / "requests"), str(store / "status"))["venv/v-9"]["state"] == "running"
+    os.utime(st, (time.time() - fetch.STALE - 5,) * 2)
+    assert fetch.status("venv/v-9", str(art), str(store / "requests"), str(store / "status")) == {"venv/v-9": {"state": "missing"}}
     with pytest.raises(fetch.Refused, match="not an artifact name"):
         fetch.parse("venv/../../etc")
 
@@ -259,3 +266,159 @@ async def test_the_ssh_backend_reads_an_agent_without_copies_as_nothing_to_do(mo
         await b.fetch(["venv/v-1"], state=True)
     with pytest.raises(be.BackendError, match="bad artifact names"):
         await b.fetch(["../x"])
+
+
+# ---- models (docs/design/17) -----------------------------------------------------------------------------------------
+class RangeServer:
+    """A router's /api/worker_models/<key>/{signed,file}, honouring Range — or not (`ranges=False`)."""
+
+    def __init__(self, files: dict, ranges=True):
+        import http.server
+        files_, ranges_ = files, ranges
+        self.asked = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(h):
+                self.asked.append((h.path, h.headers.get("Range")))
+                body = files_.get(h.path)
+                if body is None:
+                    h.send_response(404); h.end_headers(); return
+                start = 0
+                if ranges_ and (rng := h.headers.get("Range")):
+                    start = int(rng.split("=")[1].split("-")[0])
+                    h.send_response(206)
+                else:
+                    h.send_response(200)
+                h.send_header("Content-Length", str(len(body) - start)); h.end_headers()
+                h.wfile.write(body[start:])
+
+            def log_message(h, *a):
+                pass
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.srv.server_port}"
+
+    def stop(self):
+        self.srv.shutdown()
+
+
+def model_router(tmp_path, key_file, data, folder="checkpoints", filename="tiny.safetensors", ranges=True, serve=None):
+    """Signs an entry for `data` and serves it — and `serve` instead of `data` as the file, when given."""
+    import hashlib
+    sha = hashlib.sha256(data).hexdigest()
+    entry = fetch.model_entry(folder, filename, len(data), sha)
+    p = tmp_path / "entry.json"
+    p.write_bytes(entry)
+    fetch.sign(str(p), str(key_file))
+    key = json.loads(entry)["key"]
+    srv = RangeServer({f"/api/worker_models/{key}/signed": json.dumps({"entry": entry.decode(), "sig": (tmp_path / "entry.json.sig").read_text()}).encode(),
+                       f"/api/worker_models/{key}/file": data if serve is None else serve}, ranges=ranges)
+    return srv, key, sha
+
+
+def test_a_model_copy_goes_on_where_it_stopped(tmp_path, keys):
+    key_file, signers = keys
+    data = os.urandom(3 * 1024 * 1024 + 17)
+    srv, key, sha = model_router(tmp_path, key_file, data)
+    models = tmp_path / "host-models"
+    try:
+        (models / ".incoming").mkdir(parents=True)
+        (models / ".incoming" / f"{key}.part").write_bytes(data[:1024 * 1024])          # an interrupted try
+        path = fetch.get_model(srv.url, str(models), key, str(signers), out=io.StringIO())
+        assert open(path, "rb").read() == data and path.endswith("/checkpoints/tiny.safetensors")
+        assert srv.asked[-1] == (f"/api/worker_models/{key}/file", "bytes=1048576-")      # only the rest was asked for
+        assert fetch.model_present(str(models), key) and not os.access(path, os.W_OK) or os.getuid() == 0
+        assert not os.path.exists(models / ".incoming" / f"{key}.part")
+        n = len(srv.asked)
+        fetch.get_model(srv.url, str(models), key, str(signers), out=io.StringIO())        # here: nothing fetched again
+        assert len(srv.asked) == n + 1 and srv.asked[-1][0].endswith("/signed")
+    finally:
+        srv.stop()
+
+
+def test_a_model_copy_that_does_not_match_is_thrown_away(tmp_path, keys):
+    key_file, signers = keys
+    data = os.urandom(200_000)
+    srv, key, _ = model_router(tmp_path, key_file, data, ranges=False)             # a server without ranges
+    try:
+        models = tmp_path / "host-models"
+        (models / ".incoming").mkdir(parents=True)
+        (models / ".incoming" / f"{key}.part").write_bytes(b"x" * 1000)             # junk from before: started over
+        fetch.get_model(srv.url, str(models), key, str(signers), out=io.StringIO())
+        assert fetch.model_present(str(models), key)
+    finally:
+        srv.stop()
+    srv = model_router(tmp_path, key_file, data, serve=os.urandom(200_000))[0]      # not the file that was signed
+    try:
+        models = tmp_path / "other-host"
+        with pytest.raises(fetch.Refused, match="not the 200000 bytes"):
+            fetch.get_model(srv.url, str(models), key, str(signers), out=io.StringIO())
+        assert not fetch.model_present(str(models), key) and not os.listdir(models / ".incoming")
+        assert not (models / "checkpoints").exists()
+    finally:
+        srv.stop()
+
+
+def test_a_model_entry_needs_the_builders_signature_and_a_safe_name(tmp_path, keys):
+    key_file, signers = keys
+    with pytest.raises(fetch.Refused):
+        fetch.model_entry("checkpoints", "../../etc/passwd", 1, "a" * 64)
+    with pytest.raises(fetch.Refused):
+        fetch.model_entry("custom_nodes", "x.safetensors", 1, "a" * 64)             # not a model folder
+    data = os.urandom(1000)
+    other = tmp_path / "other"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(other)], check=True)
+    srv, key, _ = model_router(tmp_path, other, data)                                # signed by someone else
+    try:
+        with pytest.raises(fetch.Refused, match="not signed by this farm's builder"):
+            fetch.get_model(srv.url, str(tmp_path / "m"), key, str(signers), out=io.StringIO())
+    finally:
+        srv.stop()
+    assert fetch.parse("model/" + key) == [("model", key)]
+
+
+def test_the_fetch_service_copies_a_model_the_host_asked_for(tmp_path, keys):
+    """The drop box takes model/<key> as it takes artifacts (field: the first version dropped them unread)."""
+    import hashlib
+    key_file, signers = keys
+    data = os.urandom(50_000)
+    srv, key, _ = model_router(tmp_path, key_file, data)
+    store, models = tmp_path / "store", tmp_path / "host-models"
+    requests, status_dir = store / "requests", store / "status"
+    for x in (requests, status_dir, models):
+        x.mkdir(parents=True, exist_ok=True)
+    cfg = store / "store.env"
+    cfg.write_text(f"COMFYFARM_STORE_ROUTER={srv.url}\nCOMFYFARM_STORE_ART={tmp_path / 'art'}\nCOMFYFARM_STORE_MODELS={models}\n")
+
+    class Child:                                       # `fetch.py get-model` as the store account, here in-process
+        def __init__(self, argv, **kw):
+            assert argv[-5:-3] == [os.path.join(fetch.HERE, "fetch.py"), "get-model"] and argv[-3:] == [srv.url, str(models), key]
+            out = io.StringIO()
+            fetch.get_model(srv.url, str(models), key, str(signers), out=out)
+            self.stdout, self.stderr = io.StringIO(out.getvalue()), io.StringIO("")
+
+        def wait(self):
+            return 0
+    try:
+        assert fetch.request(f"model/{key}", str(requests)) == f"asked for model/{key}"
+        assert fetch.run(str(requests), str(status_dir), str(cfg), popen=Child) == [f"model/{key}"]
+        assert fetch.status(f"model/{key}", requests=str(requests), status_dir=str(status_dir), art="",
+                            models=str(models)) == {f"model/{key}": {"state": "present"}}
+    finally:
+        srv.stop()
+    # another revision at the same place: the first one's entry goes with its file (same size: it must not count)
+    newer = os.urandom(50_000)
+    srv, key2, _ = model_router(tmp_path, key_file, newer)
+    try:
+        fetch.get_model(srv.url, str(models), key2, str(signers), out=io.StringIO())
+    finally:
+        srv.stop()
+    assert fetch.model_present(str(models), key2) and not fetch.model_present(str(models), key)
+    assert hashlib.sha256((models / "checkpoints" / "tiny.safetensors").read_bytes()).hexdigest() == hashlib.sha256(newer).hexdigest()
+    # a host without a model store: nothing to copy, and it says so instead of "missing" for ever
+    assert fetch.status(f"model/{key}", requests=str(requests), status_dir=str(status_dir), art="",
+                        models="")[f"model/{key}"]["state"] == "off"
+    with pytest.raises(fetch.Refused, match="not an artifact name"):
+        fetch.parse("model/../../etc/passwd")
+    with pytest.raises(fetch.Refused, match="not an artifact name"):
+        fetch.parse("model/tiny.safetensors")                                       # a key, never a file name

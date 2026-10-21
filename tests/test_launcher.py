@@ -408,3 +408,26 @@ def test_copy_mode_waits_for_the_artifacts_then_starts(tmp_path, monkeypatch, ca
     threading.Thread(target=fails).start()
     with pytest.raises(launcher.Refused, match="copying nodes/n-1 failed: not signed"):
         launcher.copies(render, str(art), timeout=10)
+
+
+def test_the_farm_model_store_is_the_hosts_own_setting(tmp_path):
+    """docs/design/17: an instance with a model store gets it in its extra-model-paths file beside the custom nodes; the
+    launcher accepts only the store its host was set up with — a render cannot point the models anywhere else."""
+    profile, inst = make_world(tmp_path)
+    store = str(tmp_path / "model-store")
+    plain = rd.build(profile, inst)
+    with_store = rd.build(profile, dict(inst, paths=dict(inst["paths"], model_store=store)))
+    content = next(iter(with_store["files"].values()))
+    assert f"comfyfarm_models:\n  base_path: {store}\n  checkpoints: checkpoints\n" in content
+    assert "custom_nodes" in content and with_store["rev"] != plain["rev"]
+    p = inst["paths"]
+    prefixes = [p[k] for k in ("models", "input", "output", "user", "temp")]
+    launcher.validate(with_store, instance="gpu-1", art=p["art"], local=p["local"], prefixes=prefixes, model_store=store)
+    for host_store in (None, str(tmp_path / "elsewhere")):                    # the host set up otherwise
+        with pytest.raises(launcher.Refused, match="not the synced node artifacts and this host's model store"):
+            launcher.validate(with_store, instance="gpu-1", art=p["art"], local=p["local"], prefixes=prefixes,
+                              model_store=host_store)
+    validate(plain, inst)                                                     # an instance without one: as before
+    # a store users can write into would let an upload be loaded as a model
+    assert rd.path_problems(dict(p, model_store=p["input"]), False) == ["paths.input overlaps paths.model_store"]
+    assert rd.path_problems(dict(p, model_store=store), False) == []

@@ -26,6 +26,7 @@ class Settings:
     keys_dir: str = "/etc/comfyfarm/keys"   # restart backends: ssh keys, known_hosts and agent token files must lie here
     # the compose deployment's builder and UI worker container (docs/design/15); unset = neither
     builds_dir: str | None = None          # requests/ (the router writes) and status/ (the builder writes)
+    models_dir: str | None = None          # the farm's model store as the router sees it, read-only (docs/design/17)
     ui_service: str | None = None          # the UI worker container's ComfyUI, e.g. http://ui:8189
     ui_agent: str | None = None            # its agent, e.g. http://ui:8399
     ui_token: str = "ui_agent_token"       # the agent's token, a file in keys_dir

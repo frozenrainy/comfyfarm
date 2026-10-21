@@ -16,10 +16,14 @@
 # .env file next to this one:
 #   COMFYFARM_DATA             this control plane's own data, default /srv/comfyfarm/data
 #   COMFYFARM_ARTIFACTS_MOUNT  the artifact store, default /srv/comfyfarm/art — GPU workers mount it at the SAME path
+#   COMFYFARM_MODELS_MOUNT     the model store (System → Models), default /srv/comfyfarm/model-store — hard disks are
+#                              fine; GPU workers keep copies (docs/guide/models.md)
 #   COMFYFARM_SHARED           input/output/user, default /srv/comfyfarm/shared — the storage GPU workers use too
 #   COMFYFARM_UID              the workers' service account uid (default 47800): shared storage belongs to it
 #   COMFYFARM_BUILD_NODE_SOURCES  where node packs picked in the dashboard may come from (default https://github.com/;
 #                              empty = none) — the builder's setting: the router cannot change it
+#   COMFYFARM_HF_ENDPOINT, COMFYFARM_MODELS_ALLOW_PICKLE  models: a Hugging Face mirror; formats that can run code
+#                              (docs/guide/models.md) — the builder's settings, as the node pack sources
 #   COMFYFARM_FIRST_RECIPE     the recipe whose UI half the first start builds (default rocm-gfx1201; the UI half is the
 #                              same in every recipe)
 #   ROUTER_PORT, GATEWAY_PORT  <host-ip>:<port> to publish on one address only
@@ -42,6 +46,7 @@ services:
     network_mode: none
     command: ["comfyfarm", "prepare", "/state", "--chown", "/var/log/comfyfarm", "--builds", "/builds",
               "--ui-token", "/ui-agent", "--art", "${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}",
+              "--models", "${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}",
               "--shared", "${COMFYFARM_SHARED:-/srv/comfyfarm/shared}", "--builder-home", "/builder-home",
               "--ui-home", "/ui-home", "--farm-uid", "${COMFYFARM_UID:-47800}"]
     volumes:
@@ -52,6 +57,7 @@ services:
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builder-home:/builder-home
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/ui-home:/ui-home
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
+      - ${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}:${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}
       - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}:${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
     restart: "no"
 
@@ -87,6 +93,7 @@ services:
       COMFYFARM_KEYS_DIR: /state/keys
       COMFYFARM_DEFAULT_GROUP: ${COMFYFARM_DEFAULT_GROUP:-}
       COMFYFARM_ARTIFACTS_DIR: ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
+      COMFYFARM_MODELS_DIR: ${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}
       COMFYFARM_BUILDS_DIR: /builds
       COMFYFARM_UI_SERVICE: http://ui:8189
       COMFYFARM_UI_AGENT: http://ui:8399
@@ -100,6 +107,7 @@ services:
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/logs:/var/log/comfyfarm
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builds:/builds
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:ro
+      - ${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}:${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}:ro   # GPU hosts copy models from here
       - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}/user:/userdata:ro   # the users' workflows: comfyfarm backup --user-dir /userdata
     networks: [db, front]
 
@@ -133,10 +141,16 @@ services:
       UV_CACHE_DIR: /var/lib/comfyfarm-builder/uv-cache
       UV_PYTHON_INSTALL_DIR: /var/lib/comfyfarm-builder/python
       COMFYFARM_BUILD_NODE_SOURCES: ${COMFYFARM_BUILD_NODE_SOURCES-https://github.com/}
+      # models from Hugging Face (System → Models): a token for gated ones goes in this file (docs/guide/models.md)
+      COMFYFARM_MODELS: ${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}
+      COMFYFARM_HF_TOKEN_FILE: /var/lib/comfyfarm-builder/hf_token
+      COMFYFARM_HF_ENDPOINT: ${COMFYFARM_HF_ENDPOINT:-}                  # a mirror; empty = huggingface.co
+      COMFYFARM_MODELS_ALLOW_PICKLE: ${COMFYFARM_MODELS_ALLOW_PICKLE:-}  # 1 = .ckpt/.pt/.bin too (they can run code)
     volumes:
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builds:/builds
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builder-home:/var/lib/comfyfarm-builder
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
+      - ${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}:${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}
     networks: [build]                       # internet (PyPI, PyTorch, GitHub); not the router's or the database's
 
   ui:                                       # the UI worker: ComfyUI on the CPU for the screen and the users' files

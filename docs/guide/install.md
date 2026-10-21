@@ -103,6 +103,7 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
 | `GATEWAY_PORT`, `ROUTER_PORT` | `8080`, `8188` | `<host-ip>:<port>` publishes on one address only |
 | `COMFYFARM_DATA` | `/srv/comfyfarm/data` | everything this control plane keeps: secrets, keys, database, logs, caches — on an SSD (*Later*, *Disks*) |
 | `COMFYFARM_ARTIFACTS_MOUNT` | `/srv/comfyfarm/art` | the artifact store — GPU workers see it at this **same path** |
+| `COMFYFARM_MODELS_MOUNT` | `/srv/comfyfarm/model-store` | the model store: models added in *System → Models* ([models.md](models.md)) — hard disks are fine |
 | `COMFYFARM_SHARED` | `/srv/comfyfarm/shared` | `input`, `output`, `user` below it — the storage GPU workers use too, at the same path |
 | `COMFYFARM_UID` | `47800` | the workers' service account uid (*Set up a worker*): the shared storage belongs to it |
 | `COMFYFARM_BUILD_NODE_SOURCES` | `https://github.com/` | where node packs picked in the dashboard may come from; empty = none |
@@ -113,7 +114,8 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
 
 - **Data**: `COMFYFARM_DATA` holds the secrets, the router's agent key (every worker trusts it), the database and
   the logs. Back it up (below); delete it only to start over — then every worker must be set up again.
-- **Disks**: put `COMFYFARM_DATA` on an SSD; the artifact store (`COMFYFARM_ARTIFACTS_MOUNT`) may sit on hard disks.
+- **Disks**: put `COMFYFARM_DATA` on an SSD; the artifact store (`COMFYFARM_ARTIFACTS_MOUNT`) and the model store
+  (`COMFYFARM_MODELS_MOUNT`) may sit on hard disks.
   A build writes tens of thousands of files into the store, and on the same hard disk the database's commits wait
   behind them — on one HDD a single statement waited over 30 s during a first start, and the router skipped work and
   said `… took over 30 s — its disk is busy`. The database is small (tens of MB); the builder's caches in the same
@@ -255,7 +257,9 @@ host check verifies the paths. Everything else comes from the router.
 worker of a group needs the same files under the same names — a workflow names its models — so give them a share
 (read-only is fine) or copy them. The UI worker needs none: the editor lists the GPU workers' models. Setup makes the
 directory when it is missing (root's, mode 755: you put the files there, the service account reads them); the host check
-fails while it is missing and warns while it holds no model.
+fails while it is missing and warns while it holds no model. Models from Hugging Face can come from the dashboard
+instead (*System → Models*): the farm copies them to the workers of the groups that use them, into a *Model store* of
+their own next to this directory ([models.md](models.md)).
 
 The service account is its own: keep the default `comfyfarm` and setup creates it. It runs ComfyUI, and its
 `authorized_keys` holds only the router's restart key — setup refuses a person's login account (home under `/home`,
@@ -385,7 +389,7 @@ sudo systemctl disable --now comfyfarm-build.path comfyfarm-fetch.path 2>/dev/nu
 sudo rm -rf /etc/comfyfarm /opt/comfyfarm /etc/systemd/user/comfyfarm@.service /etc/systemd/system/comfyfarm-build.* \
             /etc/systemd/system/comfyfarm-fetch.* /var/lib/comfyfarm-store
 sudo userdel -r comfyfarm             # its home: the router's key, the local copies, temp; -r comfyfarm-build likewise
-sudo userdel comfyfarm-store          # copy mode: then remove its copies, the artifact store path on this host
+sudo userdel comfyfarm-store          # copy mode: then remove its copies, the artifact and model store paths on this host
 ```
 
 Storage is the site's and stays: the models, the shared storage, a mounted artifact store. A host that keeps other instances
