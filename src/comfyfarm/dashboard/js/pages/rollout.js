@@ -386,8 +386,11 @@ export function rollout(root, { refresh }) {
       { name: "roles", label: t("For"), type: "select", value: "both", options: [
         { value: "both", label: t("GPU workers and the UI worker") }, { value: "gpu", label: t("GPU workers only") },
         { value: "ui", label: t("the UI worker only") }] },
+      // the packs by name, here in the dialog ("below" read as below the checkbox, where nothing was)
       { name: "packs", type: "checkbox", value: packs.length > 0, label: t("Node packs"),
-        text: t("with the node packs below ({n})", { n: packs.length }) },
+        text: t("with this farm's node packs ({n})", { n: packs.length }),
+        hint: packs.length ? packs.map((p) => p.name + (p.ui ? "" : ` (${t("GPU only")})`)).join(", ")
+                           : t("none added yet — Add node pack first (System → Rollout → Node packs)") },
     ], t("Build"));
     if (!v) return;
     const r = await act(() => api("POST", "/api/admin/builds", { recipe: v.recipe, roles: v.roles === "both" ? ["gpu", "ui"] : [v.roles], packs: !!v.packs }));
