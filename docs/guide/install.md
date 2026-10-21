@@ -256,7 +256,9 @@ Later: *Check host* on the instance (System → Rollout) and `comfyfarm doctor` 
 
 **Set up again** (System → Workers, on the worker's row) runs setup once more for a host that is already a worker:
 after a router upgrade (new worker tools), to change its address, group, profile or service account, or to turn
-*builds from the dashboard* on or off. Its name and instance stay; the last step is *Update the worker*.
+*builds from the dashboard* on or off. Its name and instance stay; the last step is *Update the worker*, which also
+restarts a running worker so that the new tools and environment take effect — through a rollout of its own profile,
+so it finishes its job first. *Restart* on its row in System → Rollout does the same at any time.
 
 With compose, the artifact store is the builder's (`COMFYFARM_ARTIFACTS_MOUNT`): give the GPU host that path, and
 *Set up a worker* the same path as its artifact store. The rest of this paragraph is for farms without the builder.
@@ -268,7 +270,9 @@ store that is empty or already that account's ([design 14](../design/14-worker-s
 
 Worker access control: setup allows the router's address as the host reaches it (and, with the router on that very
 host, Docker's bridge networks) — `COMFYFARM_ALLOW_NETWORK` in `/etc/comfyfarm/<instance>.env`. A profile's
-`COMFYFARM_ALLOW` adds to it. A worker that allows nobody shows as **unsecured** in the dashboard. On AMD with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every
+`COMFYFARM_ALLOW` adds to it. A worker that allows nobody shows as **unsecured** in the dashboard; one that turns
+requests away says from where (*refused … the last from <address>*) — if that is the gateway or the router (a worker
+that reaches them over a network setup did not guess), add the address there. On AMD with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every
 worker burns one CPU core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)). The host
 check shows each venv's PyTorch version (also in `<ART>/venv/<name>/freeze.txt`).
 

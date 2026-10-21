@@ -98,6 +98,18 @@ CPU without an error — every ONNX node runs slowly, silently (cuDNN's director
 puts those directories, the published venv's own, on `LD_LIBRARY_PATH` for ComfyUI; a render still cannot set any
 `LD_*` itself. It also starts ComfyUI with `PIP_NO_INDEX=1`: a pack that installs at import time fails at once.
 
+## Found on the NVIDIA host again (0.1.0-dev.11)
+
+- *Set up again* wrote a new environment file, but a rollout of the same profile skipped a worker that already ran
+  it, and *Start* refuses a running worker: nothing applied the change. Rollouts take `restart: true` (drained,
+  restarted, verified even when nothing in the profile changed); *Update the worker* uses it, and so does *Restart*.
+- Right after a GPU worker restarted, a job was validated on the UI worker, which lacks the GPU workers' models, and
+  refused. Only GPU workers validate; with none online the job waits and its worker validates it.
+- Setup on a host without `ip` died mid-step with a traceback and no report. A missing tool is now a result
+  (exit 127), and any unexpected error ends setup as a failed step that is reported like the others.
+- A worker reached over a network setup did not guess (its gateway not in the allow-list) refused previews with 403
+  and nothing said why. The worker extension (0.7) counts whom it refuses; the dashboard shows the last address.
+
 ## Also in this round
 
 - Setup records the address its report came from; when it is not the host's own (NAT, or Docker's bridge on the

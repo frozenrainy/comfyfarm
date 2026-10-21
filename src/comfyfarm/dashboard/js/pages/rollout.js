@@ -108,6 +108,13 @@ export function rollout(root, { refresh }) {
     if (res?.warnings?.length) alert(res.warnings.join("\n"));
     if (res && v.start) await start(i);
   }
+  // Restart a running worker the safe way: a rollout of the profile it runs, restarting even though nothing changed in
+  // the profile — it finishes its job first, then comes back with what changed on its host (Set up again: tools, env).
+  async function restartWorker(i) {
+    if (!confirm(t("Restart {worker}? It finishes its running job first (a rollout of its own profile).", i))) return;
+    await act(() => api("POST", "/api/admin/rollouts", { profile_id: i.instance.profile_id, worker_ids: [i.worker_id], window: 1,
+                                                         options: { restart: true } }), t("Restarting {worker} — see Rollout", i), refresh);
+  }
   async function start(i) {
     await act(() => api("POST", `/api/admin/instances/${i.worker_id}/start`),
               t("Starting {worker} — its badge turns to match when it is up", i), refresh);
@@ -124,10 +131,12 @@ export function rollout(root, { refresh }) {
     tr.asg = button(t("Assign"), () => assign(tr._item));
     tr.go = button(t("Start"), () => start(tr._item), { cls: "primary",
                    title: t("The worker is not running: start it with its assigned profile") });
+    tr.re = button(t("Restart"), () => restartWorker(tr._item),
+                   { title: t("Drain, restart and verify it on its own profile — after Set up again, to use the new tools") });
     tr.ren = button(t("Render"), () => showRender(tr._item));
     tr.chk = button(t("Check host"), () => checkHost(tr._item.worker_id, tr._item.worker),
                     { title: t("Read-only check of the host through its agent: driver, groups, directories, venvs, clock, router") });
-    tr.c.actions.append(tr.go, tr.cfg, tr.asg, tr.ren, tr.chk);
+    tr.c.actions.append(tr.go, tr.re, tr.cfg, tr.asg, tr.ren, tr.chk);
     return tr;
   }
   function updateInst(tr, i) {
@@ -141,6 +150,7 @@ export function rollout(root, { refresh }) {
     setText(tr.c.via, i.instance ? i.instance.restart_backend : "");
     tr.asg.hidden = tr.ren.hidden = !i.instance;
     tr.go.hidden = !(startable(i) && i.instance.profile_id);
+    tr.re.hidden = !(i.instance && i.instance.profile_id && i.state === "online" && i.instance.restart_backend !== "manual");
     tr.chk.hidden = !i.instance || !["ssh", "http-agent"].includes(i.instance.restart_backend);
   }
 

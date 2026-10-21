@@ -240,3 +240,18 @@ def test_the_router_is_allowed_by_default(tmp_path):
     root = fake_root(tmp_path / "b")
     ws.setup(payload(), ws.Host(root=str(root), run=SameHost()))
     assert "COMFYFARM_ALLOW_NETWORK=10.0.0.5,172.17.0.0/16,10.200.1.0/24" in (root / "etc/comfyfarm/gpu-1.env").read_text()
+
+
+
+def test_a_missing_tool_or_a_bug_is_a_report_not_a_half_done_stop(tmp_path, monkeypatch):
+    """Field (dev.10, a minimal container): `ip` was not installed; the setup script died in the middle of the
+    configuration step with a traceback — new tools, the old environment file, and nothing reported."""
+    h = ws.Host()
+    assert h.run(["comfyfarm-no-such-command"], check=False) == (127, "comfyfarm-no-such-command: command not found")
+    with pytest.raises(ws.Failed, match="command not found"):
+        h.run(["comfyfarm-no-such-command"])
+    monkeypatch.setattr(ws, "router_allow", lambda h, url: (_ for _ in ()).throw(ValueError("odd host")))
+    res = ws.setup(payload(), ws.Host(root=str(fake_root(tmp_path)), run=Recorder()))
+    assert not res["ok"] and res["steps"][-1] == {"step": "configuration", "ok": False,
+                                                  "error": "configuration: ValueError: odd host"}
+    assert "host_keys" in res                                                    # reported like any failure

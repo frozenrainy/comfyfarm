@@ -162,7 +162,7 @@ def create_app(settings: Settings) -> FastAPI:
             if allowed is not None and gid not in allowed:
                 gid = allowed[0] if allowed else None
             ws = await c.fetch("SELECT base_url FROM workers WHERE enabled AND deleted_at IS NULL AND NOT maintenance "
-                               "AND state = 'online' AND ($1::bigint IS NULL OR group_id = $1) "
+                               "AND state = 'online' AND kind = 'gpu' AND ($1::bigint IS NULL OR group_id = $1) "
                                "ORDER BY current_job_id IS NOT NULL, random() LIMIT 3", gid)
         for w in ws:
             verdict, body = await router.adapter.validate(w["base_url"], prompt)

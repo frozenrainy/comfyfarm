@@ -289,7 +289,8 @@ class Engine:
                                             "a job arrived right before the restart; waiting again")
                         continue
                     target = rd.build(to, inst)
-                    if await self.argv(w["base_url"]) == target["argv"][1:] and inst["profile_id"] == to["id"]:
+                    if (await self.argv(w["base_url"]) == target["argv"][1:] and inst["profile_id"] == to["id"]
+                            and not opts.get("restart")):
                         await self.set_step(sid, "starting", "already running the target")
                     else:
                         await self.set_step(sid, "restarting", f"via {inst['restart_backend']}")

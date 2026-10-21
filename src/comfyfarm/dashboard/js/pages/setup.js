@@ -211,8 +211,22 @@ function runSetup(made, refresh) {
         const pid = setup.extra.profile_id;
         if (pid) await api("POST", `/api/admin/instances/${made.again}/assign`, { profile_id: pid });
         await api("POST", `/api/admin/setups/${made.id}/finished?worker_id=${made.again}`);
-        toast(pid ? t("Worker updated and the profile assigned — restart it (Rollout → Render) or roll it out to use the new tools")
-                  : t("Worker updated — the new worker tools are used from its next start (Rollout → Render, or a rollout)"));
+        // the new tools and environment take effect when it starts again: a running worker restarts through a rollout
+        // of its own profile (it finishes its job first); one that is not running is started
+        const inst = (await api("GET", "/api/admin/instances")).find((x) => x.worker_id === made.again);
+        const prof = pid || inst?.instance?.profile_id;
+        if (!prof) { toast(t("Worker updated — assign a profile and start it in System → Rollout")); return close(); }
+        try {
+          if (inst?.state === "online") {
+            await api("POST", "/api/admin/rollouts", { profile_id: prof, worker_ids: [made.again], window: 1, options: { restart: true } });
+            toast(t("Worker updated — restarting it to use the new tools (it finishes its job first; see Rollout)"));
+          } else {
+            await api("POST", `/api/admin/instances/${made.again}/start`);
+            toast(t("Worker updated and starting"));
+          }
+        } catch (e) {
+          toast(t("Worker updated, not restarted yet: {why} — Restart it in System → Rollout", { why: e.message }), true);
+        }
         return close();
       }
       const w = await api("POST", "/api/admin/workers", setup.worker);

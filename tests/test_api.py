@@ -83,3 +83,19 @@ async def test_validation_skipped_without_endpoint(dsn, fakes):
         assert r.status_code == 200                                     # accepted: nobody could validate
         job = await wait_status(router, r.json()["prompt_id"], "failed")
         assert job["error"]["kind"] == "rejected"                        # the worker's own validation at dispatch
+
+
+async def test_the_ui_worker_never_validates_a_job(dsn, fakes):
+    """Field (dev.10, NVIDIA): right after a GPU worker restarted, a job was validated on the UI worker — which lacks
+    the GPU workers' models — and refused as invalid. With no GPU worker to ask, the job waits; its worker validates it."""
+    app = create_app(fast_settings(dsn))
+    async with app.router.lifespan_context(app):
+        router = app.state.router
+        ui = await fakes()
+        async with router.db.conn() as conn:
+            await conn.execute("INSERT INTO workers(name, base_url, kind) VALUES ('ui', $1, 'ui')", ui.url)
+        await router.health.tick()
+        bad = tiny(9); bad["2"]["inputs"]["blur_radius"] = "x"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            r = await c.post("/api/prompt", json={"prompt": bad})
+        assert r.status_code == 200 and ui.fake.validate_calls == 0

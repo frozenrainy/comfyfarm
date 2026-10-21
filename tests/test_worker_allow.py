@@ -120,3 +120,17 @@ def test_the_container_network_is_added_to_the_profiles_allow_list():
     assert p.secured and p.allows("10.0.0.5") and p.allows("172.30.4.2") and not p.allows("192.168.1.9")
     assert allow.from_env({"COMFYFARM_ALLOW_NETWORK": "172.30.0.0/16"}).secured
     assert not allow.from_env({}).secured
+
+
+
+def test_a_refused_peer_is_counted_and_shown():
+    """Field (dev.10): the gateway was not in a worker's allow-list and its previews failed with 403 — the worker now
+    says whom it turned away, and the dashboard shows it."""
+    from comfyfarm.api.admin import security_warnings
+    p = allow.Policy("10.0.0.5")
+    assert "refused" not in p.describe()
+    p.refuse("172.20.0.4"); p.refuse("172.20.0.4")
+    d = p.describe()
+    assert d["refused"]["count"] == 2 and d["refused"]["last_peer"] == "172.20.0.4"
+    w = security_warnings({"extension": {"installed": True, "ws_fix": True, **d}})
+    assert any("refused 2 request(s), the last from 172.20.0.4" in x and "COMFYFARM_ALLOW_NETWORK" in x for x in w)

@@ -577,3 +577,19 @@ async def test_a_missing_command_is_a_failed_delivery_not_a_crash():
     from comfyfarm.rollout import backends as be
     rc, out = await be._run(["/nonexistent/systemctl", "restart", "x"])
     assert rc == 127 and "cannot run /nonexistent/systemctl" in out
+
+
+
+async def test_restart_option_restarts_a_worker_that_runs_the_target(farm):
+    """Field (dev.10): after Set up again (new tools, a new environment file) a rollout of the same profile said
+    "already running the target" and left the old process running. restart: true restarts it anyway — drained and
+    verified like any step."""
+    api, h = farm["api"], farm["hosts"]["w1"]
+    before = h.status["NRestarts"]
+    ro = await wait_rollout(api, await start(api, farm["p1"], [h.wid]))
+    assert ro["status"] == "succeeded" and h.status["NRestarts"] == before                  # left as it was
+    ro = await wait_rollout(api, await start(api, farm["p1"], [h.wid], options={"restart": True}))
+    assert ro["status"] == "succeeded" and h.status["NRestarts"] == before + 1, ro["steps"][0]
+    bad = await api.post("/api/admin/rollouts", headers=H, json={"profile_id": farm["p1"], "worker_ids": [h.wid],
+                                                                 "options": {"restart": "yes"}})
+    assert bad.status_code == 400

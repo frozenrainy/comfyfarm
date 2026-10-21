@@ -148,8 +148,11 @@ class Host:
             code, out = self._run(argv)
         else:
             # as the account: from /, not root's working directory (ROCm aborts when it cannot read its cwd)
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=300, cwd="/" if as_user else None)
-            code, out = p.returncode, (p.stdout + p.stderr).strip()
+            try:
+                p = subprocess.run(argv, capture_output=True, text=True, timeout=300, cwd="/" if as_user else None)
+                code, out = p.returncode, (p.stdout + p.stderr).strip()
+            except FileNotFoundError:                    # a minimal host without that tool: a result, not a crash
+                code, out = 127, f"{argv[0]}: command not found"
         if check and code != 0:
             raise Failed(f"{' '.join(argv)} → exit {code}: {out[-400:]}")
         return code, out
@@ -590,6 +593,11 @@ def setup(payload: dict, h: Host) -> dict:
         steps.append({"step": name, "ok": False, "error": str(e)})
         result["ok"], result["error"] = False, str(e)
         print(f"  FAILED: {e}", file=sys.stderr, flush=True)
+    except Exception as e:                       # noqa: BLE001 — a bug or an odd host: still a report, never a half-silent stop
+        err = f"{name}: {type(e).__name__}: {e}"
+        steps.append({"step": name, "ok": False, "error": err})
+        result["ok"], result["error"] = False, err
+        print(f"  FAILED: {err}", file=sys.stderr, flush=True)
     result["host_keys"] = host_keys(h)
     return result
 

@@ -26,6 +26,7 @@ class Policy:
     def __init__(self, spec: str | None):
         self.networks: list = []
         self.bad: list[str] = []
+        self.refused = {"count": 0, "last_peer": None, "last_at": None}   # who was turned away: the dashboard shows it
         for item in (spec or "").replace(";", ",").split(","):
             item = item.strip()
             if not item:
@@ -59,7 +60,14 @@ class Policy:
         return any(ip in n for n in LOOPBACK) or any(ip in n for n in self.networks)
 
     def describe(self) -> dict:
-        return {"secured": self.secured, "allow": [str(n) for n in self.networks], "invalid": self.bad}
+        out = {"secured": self.secured, "allow": [str(n) for n in self.networks], "invalid": self.bad}
+        if self.refused["count"]:
+            out["refused"] = dict(self.refused)
+        return out
+
+    def refuse(self, peer: str | None) -> None:
+        import time
+        self.refused.update(count=self.refused["count"] + 1, last_peer=peer, last_at=int(time.time()))
 
 
 def peer_address(request: web.Request) -> str | None:
@@ -70,7 +78,9 @@ def peer_address(request: web.Request) -> str | None:
 def make_middleware(policy: Policy):
     @web.middleware
     async def allow_middleware(request: web.Request, handler):
-        if not policy.allows(peer_address(request)):
+        peer = peer_address(request)
+        if not policy.allows(peer):
+            policy.refuse(peer)
             return web.json_response({"error": "comfyfarm: this worker accepts requests only from the farm router "
                                                "and gateway"}, status=403)
         return await handler(request)

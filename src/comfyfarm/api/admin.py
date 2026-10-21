@@ -89,6 +89,11 @@ def security_warnings(caps: dict) -> list[str]:
     if not ext.get("secured"):
         out.append("unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway"
                    + (f" (invalid entries: {ext['invalid']})" if ext.get("invalid") else ""))
+    elif (ref := ext.get("refused") or {}).get("count"):
+        # the allow-list turns someone away: a scan — or this farm's own gateway or router from an address it lacks
+        out.append(f"refused {ref['count']} request(s), the last from {ref.get('last_peer')} — if that is this farm's "
+                   "gateway or router, add it to COMFYFARM_ALLOW_NETWORK in the host's /etc/comfyfarm/<instance>.env "
+                   "or to the profile's COMFYFARM_ALLOW")
     if not ext.get("ws_fix"):
         out.append("reconnect fix not active on this ComfyUI version: events may stop after a reconnect")
     if failed := (ext.get("custom_nodes") or {}).get("failed"):

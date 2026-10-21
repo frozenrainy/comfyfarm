@@ -74,7 +74,8 @@ class RolloutIn(BaseModel):
 
 
 OPTION_KEYS = {"drain_timeout": (int, float), "start_timeout": (int, float), "observe_timeout": (int, float),
-               "verify_timeout": (int, float), "smoke": bool}
+               "verify_timeout": (int, float), "smoke": bool,
+               "restart": bool}          # restart even a worker that runs the target (after Set up again: new tools, env)
 
 
 def iso(t):

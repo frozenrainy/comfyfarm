@@ -248,8 +248,6 @@ export default {
     "이 워커의 도구가 레시피보다 오래됐습니다 — 다시 설치하세요 (시스템 → 워커)",
   "Set up again": "다시 설치", "Set up {name} again": "{name} 다시 설치",
   "kept: setting a worker up again changes its host settings, not its identity": "유지됨: 다시 설치는 호스트 설정만 바꾸고 워커 정체성은 그대로입니다",
-  "Worker updated and the profile assigned — restart it (Rollout → Render) or roll it out to use the new tools":
-    "워커를 갱신하고 프로필을 배정했습니다 — 새 도구를 쓰려면 재시작(롤아웃 → 렌더)하거나 롤아웃하세요",
   "Profiles from a recipe (read through {name})": "레시피로 프로필 만들기 ({name}을(를) 통해 읽음)",
   "(artifacts missing)": "(아티팩트 없음)", "queued": "대기열에 있음",
   "the artifact store on {name} is not usable: {detail}": "{name}의 아티팩트 저장소를 쓸 수 없습니다: {detail}",
@@ -259,6 +257,14 @@ export default {
   "Build {recipe} on {name} first (a new template after a recipe update)": "먼저 {name}에서 {recipe}를 빌드 (레시피 갱신 뒤 새 견본)",
   "Allow builds from the dashboard on this host": "이 호스트에서 대시보드 빌드 허용", "Builds": "빌드",
   "Update the worker": "워커 갱신",
+  "Restart {worker}? It finishes its running job first (a rollout of its own profile).": "{worker}를 재시작할까요? 실행 중인 작업을 먼저 끝냅니다 (자기 프로필 롤아웃).",
+  "Restarting {worker} — see Rollout": "{worker} 재시작 중 — 롤아웃에서 확인하세요",
+  "Restart": "재시작",
+  "Drain, restart and verify it on its own profile — after Set up again, to use the new tools": "자기 프로필로 비우고, 재시작하고, 검증합니다 — 다시 설치 후 새 도구를 쓰려면",
+  "Worker updated — assign a profile and start it in System → Rollout": "워커를 갱신했습니다 — 시스템 → 롤아웃에서 프로필을 할당하고 시작하세요",
+  "Worker updated — restarting it to use the new tools (it finishes its job first; see Rollout)": "워커를 갱신했습니다 — 새 도구를 쓰도록 재시작합니다 (작업을 먼저 끝냄, 롤아웃에서 확인)",
+  "Worker updated and starting": "워커를 갱신하고 시작합니다",
+  "Worker updated, not restarted yet: {why} — Restart it in System → Rollout": "워커를 갱신했지만 아직 재시작하지 않았습니다: {why} — 시스템 → 롤아웃에서 재시작하세요",
   // ---- node packs, control-plane builds (docs/design/15) ----
   "Add a node pack": "노드팩 추가",
   "Add node pack": "노드팩 추가",
@@ -352,8 +358,6 @@ export default {
     "이 인스턴스의 미리보기 등 임시 파일(이 호스트). {instance}는 인스턴스 이름으로 바뀝니다.",
   "Lets System → Rollout → Profiles → From a recipe ask this host to build a recipe installed here. A separate build account owns the artifact store; ComfyUI's account only reads it. Needs internet and git; setup brings a pinned uv.":
     "시스템 → 롤아웃 → 프로필 → 레시피로에서 이 호스트에 설치된 레시피를 빌드하게 합니다. 별도 빌드 계정이 아티팩트 저장소를 소유하고, ComfyUI 계정은 읽기만 합니다. 인터넷과 git이 필요하고, uv는 설치가 고정 버전을 가져옵니다.",
-  "Worker updated — the new worker tools are used from its next start (Rollout → Render, or a rollout)":
-    "워커를 갱신했습니다 — 새 워커 도구는 다음 시작부터 쓰입니다 (롤아웃 → 렌더, 또는 롤아웃)",
   "this worker was not set up from the dashboard — Set up a worker, with another name":
     "이 워커는 대시보드로 설치되지 않았습니다 — 다른 이름으로 워커 설치를 하세요", "Profiles from a recipe": "레시피로 프로필 만들기", "Template": "견본",
   "Create the profiles": "프로필 만들기", "GPU workers": "GPU 워커",
