@@ -38,7 +38,9 @@ export default {
         const detail = s.key === "ui" && !s.done && g.first_start?.detail ? g.first_start.detail : how;
         return h("li", { class: s.done ? "done" : s === next ? "next" : "" },
           h("span", { class: "mark" }, s.done ? "✓" : String(i + 1)), h("div", {},
-            h("strong", {}, title), " ", s === next ? h("a", { href, class: "go" }, s.key === "job" ? t("Open ComfyUI →") : t("Go →")) : "",
+            h("strong", {}, title), " ", s === next ? (s.key === "job"     // ComfyUI in a new tab, as the header's link: the steps stay here
+              ? h("a", { href, class: "go", target: "_blank", rel: "noopener" }, t("Open ComfyUI ↗"))
+              : h("a", { href, class: "go" }, t("Go →"))) : "",
             h("div", { class: "muted small" }, detail)));
       });
       start.replaceChildren(h("div", { class: "section-head" }, h("h2", {}, t("Getting started")),

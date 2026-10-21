@@ -299,7 +299,7 @@ export default {
   "System → Users: an account with the group; artists sign in at this address.": "시스템 → 사용자: 그룹이 있는 계정. 아티스트는 이 주소로 로그인합니다.",
   "A first job": "첫 작업",
   "Open ComfyUI, pick the group, queue a workflow.": "ComfyUI를 열고 그룹을 고른 뒤 워크플로를 실행합니다.",
-  "Open ComfyUI →": "ComfyUI 열기 →",
+  "Open ComfyUI ↗": "ComfyUI 열기 ↗",
   "Go →": "이동 →",
   "Getting started": "시작하기",
   "{n} of {m}": "{m}단계 중 {n}",
