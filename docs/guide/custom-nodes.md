@@ -95,17 +95,22 @@ its previews of unsaved videos stay empty.
 
 A profile may set only the environment keys the launcher allows (contract §4: accelerator and framework settings,
 never paths) — the router must not be able to switch a worker's code by setting variables. A custom node's own
-setting is decided on the worker host by root, for every instance there, with a systemd drop-in (worker setup never
-touches it):
+setting is decided where the worker runs, outside the router's reach:
 
-```ini
-# /etc/systemd/user/comfyfarm@.service.d/site.conf   (root, 0644)
-[Service]
-Environment=VHS_STRICT_PATHS=1
-```
+- **GPU worker hosts**: a line in `/etc/comfyfarm/<instance>.env` (root's; setup writes `VHS_STRICT_PATHS=1` there by
+  default) or, to survive *Set up again*, a systemd drop-in for every instance on the host:
 
-then, as the service account, `systemctl --user daemon-reload` and restart the instances (or let the next rollout do
-it). The launcher passes its own environment through to ComfyUI.
+  ```ini
+  # /etc/systemd/user/comfyfarm@.service.d/site.conf   (root, 0644)
+  [Service]
+  Environment=SOME_NODE_SETTING=1
+  ```
+
+  then `sudo systemctl --user -M comfyfarm@ daemon-reload` and *Restart* the worker in System → Rollout.
+- **The UI worker container**: an `environment:` entry of the `ui` service in `compose.override.yaml`, then
+  `docker compose up -d ui` (the compose file sets `VHS_STRICT_PATHS: "1"` already).
+
+The launcher passes its own environment through to ComfyUI.
 
 ## 7. Server paths
 
@@ -115,9 +120,15 @@ path. Turn that off where the node allows it (§6), and know which nodes cannot.
 
 ## Example: ComfyUI-VideoHelperSuite
 
-Requirements `opencv-python`, `imageio-ffmpeg` (it brings its own ffmpeg; no system ffmpeg needed); a `web/`
-directory; routes `/vhs/viewvideo`, `/vhs/queryvideo`, `/vhs/viewaudio`, `/vhs/getpath`. Node sets for both kinds
-of worker (§2); venvs with `opencv-python-headless` and `imageio-ffmpeg` (§3); rollout UI worker → group (§4).
-`/vhs/getpath` lists any server directory and the `…Path` nodes load any server file, so set `VHS_STRICT_PATHS=1` on
-every worker host (§6): `getpath` then returns nothing outside ComfyUI's own directory, and users load videos by
-uploading them (`Load Video (Upload)` — the input directory, shared storage).
+With the compose deployment: *System → Rollout → Node packs → Add node pack*, repository
+`https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite`, branch empty, *Also on the UI worker* ticked (it has web
+code and routes) → *Build* → *From a recipe* → roll the UI profile out, then the group's. Search "VHS" in ComfyUI's
+node list to see it.
+
+What the build takes care of: its requirements `opencv-python` (becomes the one headless OpenCV of the venv) and
+`imageio-ffmpeg` (it brings its own ffmpeg; no system ffmpeg needed). What it has: a `web/` directory and routes
+`/vhs/viewvideo`, `/vhs/queryvideo`, `/vhs/viewaudio`, `/vhs/getpath`. `/vhs/getpath` lists any server directory and
+the `…Path` nodes load any server file; `VHS_STRICT_PATHS=1` — set by default on the UI worker container and by setup
+on GPU hosts (§6) — makes `getpath` return nothing outside ComfyUI's own directory, and users load videos by uploading
+them (`Load Video (Upload)` — the input directory, shared storage). By hand, without the builder: node sets for both
+kinds of worker (§2), venvs with `opencv-python-headless` and `imageio-ffmpeg` (§3), rollout UI worker → group (§4).

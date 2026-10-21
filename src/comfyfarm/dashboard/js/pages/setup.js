@@ -76,6 +76,11 @@ export async function setupWorker(refresh, again = null, fix = null) {
     const host = m && m[1] && !["0.0.0.0", "::", "[::]"].includes(m[1]) ? m[1] : location.hostname;
     return `http://${host}:${m ? m[2] : r}`;
   })();
+  // one GPU server is control plane and worker at once: its ComfyUI must not take the port the router publishes, and
+  // its address is most likely the one this page was opened at
+  const routerPort = Number((/(\d+)$/.exec(String(dflt.router || "")) || [])[1] || 0);
+  const firstGpu = !src && pickRole?.role !== "ui" && !(await api("GET", "/api/admin/workers")).some((w) => w.kind !== "ui");
+  const hereHost = /^(localhost|127\.|::1|\[)/.test(location.hostname) ? "" : location.hostname;
   const roleProfiles = profiles.filter((p) => ((p.flags || []).includes("--cpu")) === (pickRole?.role === "ui"));
   const last = src ? src.spec : recent[0]?.spec;
   const lastX = src ? src.extra : {};
@@ -97,7 +102,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
   while (!made) {
     const fields = [
       { name: "name", label: t("Worker name (shown in the dashboard)"), value: src ? lastX.name : ui ? "ui" : "", hint: keep },
-      { name: "host", required: true, label: t("Host address"), value: lastX.host ?? "", placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
+      { name: "host", required: true, label: t("Host address"), value: lastX.host ?? (firstGpu ? hereHost : ""), placeholder: "10.0.0.21", hint: t("the address the router and the gateway reach this host at") },
       { name: "instance", required: true, label: t("Instance name"), value: src ? last.instance : ui ? "ui-1" : "gpu-1", hint: keep || t("one ComfyUI on this host; letters, digits, . _ -") },
       ...(ui ? [] : [
         { name: "gpu", label: t("GPU"), type: "select", value: last?.gpu && last.gpu !== "none" ? last.gpu : "amd",
@@ -110,7 +115,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
         value: fix && lastX.profile_id ? String(lastX.profile_id) : again ? "" : String(roleProfiles[roleProfiles.length - 1]?.id ?? ""),
         options: [{ value: "", label: t("(assign later)") }, ...profiles.map((p) => ({ value: String(p.id), label: p.name }))],
         hint: ui ? t("UI profile: the core of the GPU workers, a CPU venv, nodes: comfyfarm_ui and comfyfarm_worker, flag --cpu, env COMFYFARM_ALLOW=<gateway and router addresses>") : "" },
-      { name: "port", label: t("ComfyUI port"), type: "number", value: src ? last.port : ui ? 8189 : 8188,
+      { name: "port", label: t("ComfyUI port"), type: "number", value: src ? last.port : ui ? 8189 : routerPort === 8188 ? 8288 : 8188,
         hint: ui ? t("not 8188 when it shares the host with the router") : "" },
       { name: "ssh_port", label: t("ssh port"), type: "number", value: lastX.ssh_port ?? 22 },
       { name: "account", label: t("Service account (its own, made by setup)"), value: last?.account ?? "comfyfarm",

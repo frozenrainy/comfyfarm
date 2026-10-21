@@ -30,8 +30,9 @@ python3 src/comfyfarm/publish.py recipe <ART> rocm-gfx1201
 commits); the command publishes the release, the GPU and UI node sets (with `comfyfarm_worker`, `comfyfarm_ui`), a
 GPU venv and a CPU venv for the UI worker, and writes a profile template to `<ART>/profiles/`. Run again, it reuses
 what has the same contents (a venv: the same inputs) and builds only what changed; `--rebuild` builds new venvs.
-Then *System → Rollout → Profiles → From a recipe* creates the GPU and UI profiles from that template (it reads the
-store through a GPU worker's host check — so set up at least one worker first, with *assign later* as its profile).
+Then *System → Rollout → Profiles → From a recipe* creates the GPU and UI profiles from that template. With the
+compose deployment the router reads the store itself; without it, it reads the store through a GPU worker's host
+check — so there, set up one worker first, with *assign later* as its profile.
 A host whose setup allowed *builds from the dashboard* (install.md §3, design 14) offers the build there as a button:
 while the store has no template, and after a recipe update. A template whose artifacts were retired is shown as such
 and not offered. A recipe of your own: copy one in `recipes/` — the ComfyUI `ref` is a release

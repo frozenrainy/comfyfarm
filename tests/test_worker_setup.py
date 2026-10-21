@@ -62,6 +62,7 @@ def test_setup_builds_a_worker_and_reports(tmp_path):
     env = (root / "etc/comfyfarm/gpu-1.env").read_text()
     assert "COMFY_LAUNCH_ROUTER=http://10.0.0.5:8188" in env and "COMFY_LAUNCH_ARTIFACTS=/srv/art" in env
     assert "COMFY_LAUNCH_PREFIXES=/mnt/farm/input,/mnt/farm/output,/mnt/farm/user,/srv/models,/var/lib/comfyfarm/temp/gpu-1" in env
+    assert "VHS_STRICT_PATHS=1" in env                       # VideoHelperSuite's server-path browsing off by default
     assert json.loads((root / "etc/comfyfarm/gpu-1.check.json").read_text())["gpu"] == "amd"
     assert "ExecStart=/usr/bin/python3 /opt/comfyfarm/worker/launcher.py" in (root / "etc/systemd/user/comfyfarm@.service").read_text()
     # the forced command, every forwarding off, in a file the account cannot edit

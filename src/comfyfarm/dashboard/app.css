@@ -164,6 +164,15 @@ pre.code { font: .78rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; back
 #toast[popover] { inset: auto auto 1rem 50%; margin: 0; border: 0; overflow: visible; color: #fff; }   /* the UA's popover box off */
 .field.invalid input, .field.invalid select, .field.invalid textarea { border-color: var(--bad); }
 .hint.err { color: var(--bad); }
+ol.steps { list-style: none; padding: 0; margin: .4rem 0 0; display: grid; gap: .55rem; }
+ol.steps li { display: flex; gap: .7rem; align-items: flex-start; padding: .55rem .75rem; border: 1px solid var(--line);
+              border-radius: 8px; background: var(--panel); }
+ol.steps li.done { opacity: .6; }
+ol.steps li.next { border-color: var(--accent); }
+ol.steps .mark { flex: 0 0 1.5rem; height: 1.5rem; border-radius: 50%; display: inline-flex; align-items: center;
+                 justify-content: center; font-size: .8rem; border: 1px solid var(--line); }
+ol.steps li.done .mark { background: var(--accent); color: #fff; border-color: var(--accent); }
+ol.steps .go { margin-left: .4rem; font-size: .9rem; }
 
 /* Workflow tab: ComfyUI below the header, in an iframe that lives as long as the page (state survives tab switches) */
 body.workflow { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }

@@ -308,3 +308,33 @@ async def test_the_setup_form_gets_the_deployments_own_defaults(dsn, tmp_path):
             d = (await c.get("/api/admin/defaults", headers=H)).json()
             assert d == {"art": "/srv/comfyfarm/art", "shared": "/srv/comfyfarm/shared", "router": "192.0.2.10:18188"}
             assert (await c.get("/api/admin/defaults", headers={"X-ComfyFarm-User": "mallory"})).status_code == 403
+
+
+async def test_getting_started_follows_the_first_day(dsn, fakes):
+    """QA (newcomer path): the dashboard says where a new farm stands — UI worker, a build for the GPU, a GPU worker
+    running, an artist account, a first job — and what is next."""
+    app = create_app(fast_settings(dsn))
+    async with app.router.lifespan_context(app):
+        r = app.state.router
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            steps = lambda g: {s["key"]: s["done"] for s in g["steps"]}                     # noqa: E731
+            g = (await c.get("/api/admin/getting-started", headers=H)).json()
+            assert [s["key"] for s in g["steps"]] == ["ui", "build", "gpu", "user", "job"] and not any(steps(g).values())
+            await c.post("/api/admin/profiles", json={"name": "ui-1", "core": "c", "venv": "v", "flags": ["--cpu"]}, headers=H)
+            assert not steps((await c.get("/api/admin/getting-started", headers=H)).json())["build"]   # a CPU profile only
+            await c.post("/api/admin/profiles", json={"name": "gpu-1", "core": "c", "venv": "v"}, headers=H)
+            await c.post("/api/admin/groups", json={"name": "default"}, headers=H)
+            async with r.db.conn() as conn:
+                gid = await conn.fetchval("SELECT id FROM worker_groups")
+                await conn.execute("INSERT INTO users(username, password_hash) VALUES ('artist', 'x')")
+                await conn.execute("INSERT INTO user_groups(username, group_id) VALUES ('artist', $1)", gid)
+            g = steps((await c.get("/api/admin/getting-started", headers=H)).json())
+            assert g["build"] and g["user"] and not g["gpu"] and not g["job"]
+            assert (await c.get("/api/admin/getting-started", headers={"X-ComfyFarm-User": "artist"})).status_code == 403
+
+
+def test_the_builder_says_what_each_recipe_is_for(box):
+    b, tmp, _ = box
+    (tmp / "share/recipes/rocm-x.json").write_text(json.dumps({"recipe": "rocm-x", "about": "AMD RDNA4"}))
+    p = b.policy()
+    assert p["recipes"] == ["rocm-x"] and p["about"] == {"rocm-x": "AMD RDNA4"}

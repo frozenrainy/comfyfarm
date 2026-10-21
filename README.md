@@ -62,11 +62,15 @@ is the dashboard.
    docker compose up -d
    docker compose logs router | grep "setup code"      # open http://<this host>:8080 and create the administrator
    ```
-   The first start builds ComfyUI for the UI worker and starts it: workflows open before any GPU worker exists.
+   The first start builds ComfyUI for the UI worker and starts it: workflows open before any GPU worker exists. This
+   host needs internet for that and for later builds. Ports 8080 (users) and 8188 (workers) are open on every address:
+   put `GATEWAY_PORT=<host-ip>:8080` and `ROUTER_PORT=<host-ip>:8188` into a `.env` next to the compose file to bind
+   them to one address, and let only GPU worker hosts reach 8188.
    Hardened instead (secrets on the host, ports on one address, pinned versions): `deploy/compose/`; without
    containers: `deploy/systemd/` (no builder or UI worker container there) — [install](docs/guide/install.md) §1.
-2. **Node packs and GPU workers** — *System → Rollout*: add node packs, *Build* for your kind of GPU, make the profiles;
-   then *System → Workers → Set up a worker* turns each empty Linux host into a checked worker.
+2. **The rest of the first day** — the dashboard's *Getting started* list walks it: a *Build* for your GPU (with node
+   packs if you want them) and its profiles, *Set up a worker* for each GPU machine (the same server, too), artist
+   accounts — [install](docs/guide/install.md#first-day), *First day*.
 3. **Check** — `docker compose exec router comfyfarm doctor` tells you, line by line, what is not right yet.
 
 Guides: [install](docs/guide/install.md) · [running](docs/guide/running.md) · [rolling upgrades](docs/guide/rollouts.md) ·

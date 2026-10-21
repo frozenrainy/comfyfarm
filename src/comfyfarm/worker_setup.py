@@ -404,7 +404,10 @@ def configure(h: Host, spec: dict, home: str):
         f"COMFY_LAUNCH_INSTANCE={inst}",
         f"COMFY_LAUNCH_ARTIFACTS={spec['art']}",
         f"COMFY_LAUNCH_LOCAL={spec['local']}",
-        f"COMFY_LAUNCH_PREFIXES={','.join(prefixes)}"]
+        f"COMFY_LAUNCH_PREFIXES={','.join(prefixes)}",
+        # VideoHelperSuite lets any user list and load server paths unless told not to (custom-nodes.md §7): off by
+        # default here; a site that wants it changes this line (setup keeps an edit only until it runs again)
+        "VHS_STRICT_PATHS=1"]
         + ([f"COMFYFARM_ALLOW_NETWORK={','.join(allow)}"] if (allow := router_allow(h, spec["router_url"])) else []) + [""]))
     h.write(f"{ETC}/{inst}.check.json", json.dumps({
         "gpu": spec.get("gpu", "any"), "paths": paths, "port": spec.get("port", 8188),

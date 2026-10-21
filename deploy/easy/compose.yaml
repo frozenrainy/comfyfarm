@@ -5,14 +5,16 @@
 #   open http://<this host>:8080 — create the administrator with that code
 #
 # Nothing to edit first. On the first start the builder builds ComfyUI for the UI worker (this host needs internet for
-# that: a few minutes, ~2.5 GB) and the router starts it — workflows open before any GPU worker exists. Then set up
-# GPU workers in the dashboard, add node packs (System → Rollout → Node packs) and build for your GPUs there.
+# that: a minute or two, ~2.5 GB) and the router starts it — workflows open before any GPU worker exists. Then the
+# dashboard's "Getting started" list takes you through the rest (docs/guide/install.md, "First day").
 #
-# Secrets are made on the first start into the `state` volume (files, not environment variables). Postgres is not
-# published, and the UI worker is not either (only the router and the gateway reach it).
+# Everything the farm keeps — secrets (files, not environment variables), the database, logs, the builder's and the UI
+# worker's caches — is in one directory, COMFYFARM_DATA (default /srv/comfyfarm/data): back it up, move it, or delete it
+# to start over. Postgres is not published, and the UI worker is not either (only the router and the gateway reach it).
 # What "easy" leaves to you: ports 8080 (users) and 8188 (workers, monitoring) open on every address of this host —
 # restrict them with your firewall (Docker publishes past ufw), or use ../compose (install.md). Optional settings: a
 # .env file next to this one:
+#   COMFYFARM_DATA             this control plane's own data, default /srv/comfyfarm/data
 #   COMFYFARM_ARTIFACTS_MOUNT  the artifact store, default /srv/comfyfarm/art — GPU workers mount it at the SAME path
 #   COMFYFARM_SHARED           input/output/user, default /srv/comfyfarm/shared — the storage GPU workers use too
 #   COMFYFARM_UID              the workers' service account uid (default 47800): shared storage belongs to it
@@ -43,12 +45,12 @@ services:
               "--shared", "${COMFYFARM_SHARED:-/srv/comfyfarm/shared}", "--builder-home", "/builder-home",
               "--ui-home", "/ui-home", "--farm-uid", "${COMFYFARM_UID:-47800}"]
     volumes:
-      - state:/state
-      - logs:/var/log/comfyfarm
-      - builds:/builds
-      - ui-agent:/ui-agent
-      - builder-home:/builder-home
-      - ui-home:/ui-home
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/state:/state
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/logs:/var/log/comfyfarm
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builds:/builds
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/ui-agent:/ui-agent
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builder-home:/builder-home
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/ui-home:/ui-home
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
       - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}:${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
     restart: "no"
@@ -64,8 +66,8 @@ services:
       POSTGRES_DB: comfyfarm
       POSTGRES_PASSWORD_FILE: /state/secrets/db_password
     volumes:
-      - db:/var/lib/postgresql/data
-      - state:/state:ro
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/db:/var/lib/postgresql/data
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/state:/state:ro
     networks: [db]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U comfyfarm -d comfyfarm"]
@@ -94,9 +96,9 @@ services:
     ports:
       - "${ROUTER_PORT:-8188}:8188"         # workers' launchers, /metrics — not for users' browsers
     volumes:
-      - state:/state
-      - logs:/var/log/comfyfarm
-      - builds:/builds
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/state:/state
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/logs:/var/log/comfyfarm
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builds:/builds
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:ro
       - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}/user:/userdata:ro   # the users' workflows: comfyfarm backup --user-dir /userdata
     networks: [db, front]
@@ -114,8 +116,8 @@ services:
     ports:
       - "${GATEWAY_PORT:-8080}:8080"        # the address users open
     volumes:
-      - state:/state:ro
-      - logs:/var/log/comfyfarm
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/state:/state:ro
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/logs:/var/log/comfyfarm
     networks: [front]
 
   builder:                                  # builds what the dashboard asks for (docs/design/15); owns the artifact store
@@ -132,8 +134,8 @@ services:
       UV_PYTHON_INSTALL_DIR: /var/lib/comfyfarm-builder/python
       COMFYFARM_BUILD_NODE_SOURCES: ${COMFYFARM_BUILD_NODE_SOURCES-https://github.com/}
     volumes:
-      - builds:/builds
-      - builder-home:/var/lib/comfyfarm-builder
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builds:/builds
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builder-home:/var/lib/comfyfarm-builder
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}
     networks: [build]                       # internet (PyPI, PyTorch, GitHub); not the router's or the database's
 
@@ -150,9 +152,10 @@ services:
       COMFYFARM_SHARED: ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
       COMFYFARM_UI_HOME: /var/lib/comfyfarm-ui
       COMFYFARM_UI_TOKEN_FILE: /run/comfyfarm-ui-agent/token
+      VHS_STRICT_PATHS: "1"                 # VideoHelperSuite: no browsing of server paths for users (custom-nodes.md §7)
     volumes:
-      - ui-home:/var/lib/comfyfarm-ui
-      - ui-agent:/run/comfyfarm-ui-agent:ro
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/ui-home:/var/lib/comfyfarm-ui
+      - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/ui-agent:/run/comfyfarm-ui-agent:ro
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:ro
       - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}:${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
     networks: [front]                       # only the router and the gateway reach it; never the database
@@ -163,11 +166,3 @@ networks:
   front: {}
   build: {}
 
-volumes:
-  state:
-  db:
-  logs:
-  builds:
-  ui-agent:
-  builder-home:
-  ui-home:

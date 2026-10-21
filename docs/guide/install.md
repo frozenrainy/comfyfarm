@@ -1,6 +1,7 @@
 # Installing a farm
 
-A ComfyFarm site has four kinds of machines. They can share hosts on a small farm.
+The short way: one Linux server with a GPU and Docker, with internet on it for the builds. [First day](#first-day)
+takes it from nothing to an artist running a workflow; the rest of this page is the detail and the choices.
 
 ```
  users' browsers ──▶ gateway ──▶ router ──▶ GPU workers (ComfyUI + comfyfarm_worker)
@@ -8,16 +9,52 @@ A ComfyFarm site has four kinds of machines. They can share hosts on a small far
                         ▼          ▼
                    UI worker    Postgres
               (ComfyUI, CPU, comfyfarm_ui)
-        all ComfyUI instances share one input/output/user storage (NAS)
+        all ComfyUI instances share one input/output/user storage
 ```
 
 | Part | What it is | Where |
 |---|---|---|
-| **control plane** | router + gateway + Postgres, and with compose the builder and the UI worker container | one Linux host (containers) |
-| **UI worker** | a stock ComfyUI, CPU is enough, with the `comfyfarm_ui` extension; serves the screen and user files | with compose: the `ui` container on the control plane; else any host that is not busy (no GPU jobs) |
-| **GPU workers** | stock ComfyUI with the `comfyfarm_worker` extension, started by the launcher | each GPU machine (≤ ~20 is the design target) |
-| **shared storage** | one filesystem for `input`, `output`, `user` on every ComfyUI | a NAS (NFS/SMB) — required; models may be local NVMe |
-| **artifact store** | ComfyUI, venvs and node sets the builder publishes; read by every worker | at the **same absolute path** everywhere (a share or a copy) |
+| **control plane** | router + gateway + Postgres, the builder and the UI worker (containers) | one Linux host with Docker |
+| **UI worker** | ComfyUI on the CPU with the `comfyfarm_ui` extension: the screen and the users' files | the `ui` container (or a host of its own, §2) |
+| **GPU workers** | ComfyUI with the `comfyfarm_worker` extension, started by the launcher — a systemd service on the host, not a container | each GPU machine (the control-plane host, too) |
+| **shared storage** | `input`, `output`, `user` for every ComfyUI | one machine: a local directory (the default); more: a NAS or an NFS/SMB share |
+| **artifact store** | ComfyUI, venvs and node sets the builder publishes | at the **same absolute path** on every host (a share, or a copy) |
+| **models** | checkpoints, LoRAs, VAEs … in ComfyUI's folder layout | on each GPU worker (local disk is fine); the same files on every worker of a group |
+
+**Words used here.** A *recipe* says which ComfyUI and which PyTorch to build for a kind of GPU — `rocm-gfx1201` for AMD
+RDNA4 (Radeon AI PRO R9700, RX 9070), `cuda-cu130` for NVIDIA (RTX 20xx–50xx, driver 580 or newer). A *build* turns a
+recipe and your node packs into published *artifacts* and leaves a *template*; *From a recipe* turns a template into
+*profiles* — what a worker runs. A *group* is workers with the same GPU, nodes and models; users are allowed groups. An
+*instance* is one ComfyUI on a host.
+
+## First day
+
+One GPU server that is both control plane and worker, all defaults. The dashboard's *Getting started* list (on the
+Dashboard page, for administrators) shows where you are.
+
+1. **Control plane** (§1): in `deploy/easy`, `docker compose up -d`, then
+   `docker compose logs -f router | grep -m1 "setup code"`. Open `http://<this server>:8080` and create the
+   administrator with that code.
+2. **UI worker**: nothing to do — the first start builds it and starts it (a minute or two; *Getting started* says when).
+   ComfyUI opens in the browser from then on.
+3. **A build for your GPU**: *System → Rollout*. Optionally *Add node pack* for each custom node pack you want
+   ([custom-nodes.md](custom-nodes.md)). Then *Build* — the recipe of your GPU — and *From a recipe* → *Create the
+   profiles*. If you added node packs, roll the UI profile out to the UI worker (*Start rollout*).
+4. **The GPU worker**: put your models under `/srv/comfyfarm/models` (`checkpoints/`, `loras/`, `vae/` …, readable by
+   everyone). *System → Workers → Set up a worker*: the form is filled for this server — its address, the router, the
+   paths, port 8288 (the router has 8188), the newest GPU profile, and a group `default` made with the worker. Run the
+   command it shows (as a user with sudo), *Add the worker*. It starts.
+5. **Artists**: *System → Users → New user* — every group is ticked. They open `http://<this server>:8080`.
+6. **Check**: `docker compose exec router comfyfarm doctor`, and one workflow as an artist.
+
+More GPU machines: §3, *Adding a GPU machine*. A different kind of GPU: a second group, and a build with its recipe.
+
+Two Docker habits, before the first `up`. Ports Docker publishes bypass host firewalls such as ufw: by default 8080
+(users) and 8188 (workers, monitoring) are open on every address — set `GATEWAY_PORT` / `ROUTER_PORT` to
+`<host-ip>:<port>` in `.env` and let only the worker hosts reach 8188 (§1). And Docker takes its networks from
+`172.17–31.0.0/16`, then `192.168.0.0/20`: if those ranges are routed on your site (VPNs, other subnets), set
+`"default-address-pools"` in `/etc/docker/daemon.json` to a free range first. 8080 is plain HTTP: put a TLS proxy in
+front of it if users come from outside a trusted network.
 
 ## 1. Control plane (containers)
 
@@ -25,76 +62,59 @@ Two compose files, the same images:
 
 | | `deploy/easy/` | `deploy/compose/` (strict) |
 |---|---|---|
-| first start | `docker compose up -d`, nothing to edit | secrets, `.env`, state directories by hand (below) |
-| secrets | made on first start, files in the `state` volume | files on the host (`/srv/comfyfarm/secrets`, 0700) |
+| first start | `docker compose up -d`, nothing to edit | secrets, `.env`, directories by hand (below) |
+| data | one directory, `/srv/comfyfarm/data` (`COMFYFARM_DATA`) | `/srv/comfyfarm/{secrets,keys,backups}` and volumes |
 | ports | 8080 and 8188 on every address of the host | `<host-ip>:<port>` you choose |
 | image tag | the release's default | required (`COMFYFARM_VERSION`) |
-| first administrator | in the browser, with the setup code from `docker compose logs router` | the same, or `comfyfarm add-user` |
-| keys, backups | in the `state` volume | `/srv/comfyfarm/{keys,backups}` |
+| builder, UI worker | yes; node packs from `https://github.com/` | with `COMPOSE_PROFILES=farm`; node packs only from sources you name |
+| first administrator | in the browser, with the setup code from the router's log | the same, or `comfyfarm add-user` |
 
-Neither puts a secret into the environment (`docker inspect` shows none) or publishes Postgres. Easy is for a farm
-behind a firewall you control; restrict 8188 to the worker hosts there — Docker publishes past ufw.
+Neither puts a secret into the environment (`docker inspect` shows none) or publishes Postgres.
 
 ### Easy
 
 ```sh
 git clone https://github.com/frozenrainy/comfyfarm && cd comfyfarm/deploy/easy    # or the release tarball
 docker compose up -d                                   # pulls the release image from ghcr.io
-docker compose logs router | grep "setup code"
+docker compose logs -f router | grep -m1 "setup code"  # waits for the router; Ctrl-C after it printed
 ```
 
-What the first start does by itself (docs/design/15), in about a minute or two:
+Open `http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
+start until one exists). What the first start does by itself (docs/design/15):
 
 1. `init` makes the secrets and gives each directory to its account: the artifact store to the builder (uid 10002),
    the shared storage to the workers' account (uid 47800) — only directories that are new or already theirs; one that
    holds someone else's files is left alone and named in `docker compose logs init`.
-2. The **builder** builds ComfyUI on the CPU for the UI worker (this host needs internet for it: ~2.5 GB).
-3. The router registers the **UI worker container**, gives it that profile and starts it. Workflows open in the
-   browser now — before any GPU worker exists, with the node definitions of the UI worker.
+2. The **builder** builds ComfyUI on the CPU for the UI worker — this host needs internet for it (~2.5 GB).
+3. The router registers the **UI worker container**, gives it that profile and starts it. *Getting started* (Dashboard)
+   and *System → Rollout* show the state; workflows open in the browser once it is ready.
 
-Where things live, all changeable in a `.env` next to `compose.yaml`:
+Settings, all optional, in a `.env` next to `compose.yaml`:
 
 | Setting | Default | What |
 |---|---|---|
-| `COMFYFARM_ARTIFACTS_MOUNT` | `/srv/comfyfarm/art` | the artifact store — GPU workers must see it at this **same path** |
+| `GATEWAY_PORT`, `ROUTER_PORT` | `8080`, `8188` | `<host-ip>:<port>` publishes on one address only |
+| `COMFYFARM_DATA` | `/srv/comfyfarm/data` | everything this control plane keeps: secrets, keys, database, logs, caches |
+| `COMFYFARM_ARTIFACTS_MOUNT` | `/srv/comfyfarm/art` | the artifact store — GPU workers see it at this **same path** |
 | `COMFYFARM_SHARED` | `/srv/comfyfarm/shared` | `input`, `output`, `user` below it — the storage GPU workers use too, at the same path |
 | `COMFYFARM_UID` | `47800` | the workers' service account uid (*Set up a worker*): the shared storage belongs to it |
 | `COMFYFARM_BUILD_NODE_SOURCES` | `https://github.com/` | where node packs picked in the dashboard may come from; empty = none |
-| `COMFYFARM_FIRST_RECIPE` | `rocm-gfx1201` | whose UI half the first start builds (the UI half is the same in every recipe) |
-| `ROUTER_PORT`, `GATEWAY_PORT` | `8188`, `8080` | `<host-ip>:<port>` publishes on one address only |
+| `COMFYFARM_FIRST_RECIPE` | `rocm-gfx1201` | whose UI part the first start builds — the same in every recipe, so this is not a GPU choice |
+| `COMFYFARM_DEFAULT_GROUP` | (none) | the group whose nodes a user sees before picking one |
 
-On one machine with a GPU, that machine is also the GPU worker (§3) and nothing needs sharing. With more machines,
-mount the artifact store and the shared storage on every GPU worker at the same paths (NFS, SMB — the site's), or put
-them on a NAS and point both settings there.
+#### Later
 
-Bind mounts instead of the volumes work as they are: `init` gives `./state` and `./logs` to the image's account
-(uid 10001) on every start. Put them into `compose.override.yaml` next to `compose.yaml` rather than editing it —
-compose merges the two (by mount target), and an upgrade is then just the new `compose.yaml`:
-
-```yaml
-services:
-  init:    { volumes: ["./state:/state", "./logs:/var/log/comfyfarm"] }
-  db:      { volumes: ["./db:/var/lib/postgresql/data", "./state:/state:ro"] }
-  router:  { volumes: ["./state:/state", "./logs:/var/log/comfyfarm"] }
-  gateway: { volumes: ["./state:/state:ro", "./logs:/var/log/comfyfarm"] }
-```
-
-(The builder's and the UI worker's own volumes — `builder-home`, `ui-home` — hold caches and local copies only; the
-artifact store and the shared storage are host paths already.)
-
-Open `http://<this host>:8080`: the login page offers to create the administrator with that code (a new code on every
-start until one exists). Optional settings go into a `.env` next to `compose.yaml`: `GATEWAY_PORT`, `ROUTER_PORT`,
-`COMFYFARM_DEFAULT_GROUP`, `UI_WORKER_URL` and those above.
-Closed network: pull (or `docker compose build`) outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version>
-postgres:17`, and `docker load` it inside next to the repository.
-
-The `state` volume holds the secrets, the router's agent key (every worker trusts it) and the backups; `db` the
-ledger. `docker compose down` keeps them, **`docker compose down -v` deletes them** — then every worker must be set up
-again. Upgrade: check out the new release (`git fetch --tags && git checkout v<version>`) and `docker compose up -d`;
-`init` runs again and changes nothing. Backups: `docker compose exec router comfyfarm backup /state/backups --user-dir /userdata` (the users'
-workflows: `COMFYFARM_SHARED/user`, mounted read-only into the router); copy them off the host
-(`docker compose cp router:/state/backups .`).
-With bind mounts the state directory is the service account's alone (0700): read it as root.
+- **Data**: `COMFYFARM_DATA` holds the secrets, the router's agent key (every worker trusts it), the database and
+  the logs. Back it up (below); delete it only to start over — then every worker must be set up again.
+- **Upgrade**: check out the new release (`git fetch --tags && git checkout v<version>`) and `docker compose up -d`;
+  `init` runs again and changes nothing; the database migrates when the router starts.
+- **Backups**: `docker compose exec router comfyfarm backup /state/backups --user-dir /userdata` (the users' workflows:
+  `COMFYFARM_SHARED/user`, mounted read-only into the router); the result is in `COMFYFARM_DATA/state/backups` —
+  copy it off the host ([backup.md](backup.md)).
+- **Closed network**: the first start, every *Build* and every node pack lookup need internet on this host. Without
+  it: pull the images outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version> postgres:17`, `docker load` them
+  inside, and publish the artifacts on a machine that has internet with `publish.py recipe`, then carry the artifact
+  store in ([rollouts.md](rollouts.md) §1).
 
 ### Strict
 
@@ -153,11 +173,7 @@ a server of the same major version (`comfyfarm doctor` checks this).
 Users open `http://<control-plane>:8080`. Port 8188 (router) is for the workers' launchers and for monitoring
 (`/metrics`); do not publish it to users.
 
-Two Docker habits to know on a site network. Ports Docker publishes bypass host firewalls such as ufw — restrict
-8188 at the network or with `ROUTER_PORT=<host-ip>:8188`; Postgres is deliberately not published at all. And Docker
-takes its networks from `172.17–31.0.0/16`, then `192.168.0.0/20`: if those ranges are routed on your site (VPNs,
-other subnets), traffic to them silently stops on this host — set `"default-address-pools"` in
-`/etc/docker/daemon.json` to a free range before the first `docker compose up`.
+The two Docker habits in [First day](#first-day) apply here too.
 
 Without containers: `pip install` the package into `/opt/comfyfarm/venv`, put the settings into
 `/etc/comfyfarm/{router,gateway}.env` and use `deploy/systemd/comfyfarm-{router,gateway}.service` — see
@@ -194,11 +210,18 @@ host-checked and rolled out with the others, so its ComfyUI and frontend follow 
 
 ## 3. GPU workers
 
-What a worker host needs before setup: Linux with systemd, Python ≥ 3.10, an ssh server, the GPU driver (ComfyFarm checks
-it, never installs it), the system libraries the GPU wheels load (ROCm PyTorch: `libatomic1`; the host check names any
-that is missing), and its storage **already mounted**: the shared directories and the artifact store. Setup never
-mounts anything or edits `/etc/fstab` — storage is infrastructure, the site's (NFS, SMB, a local disk for a single
-host); the host check verifies the paths. Everything else comes from the router.
+A GPU worker is ComfyUI as a systemd user service on the host — not a container; the host needs no Docker. What it
+needs before setup: Linux with systemd, Python ≥ 3.10, an ssh server, the GPU driver (AMD: the amdgpu kernel driver —
+ROCm itself comes inside the venv; NVIDIA: the driver, 580 or newer for `cuda-cu130`; ComfyFarm checks it, never
+installs it), the system libraries the GPU wheels load (ROCm PyTorch: `libatomic1`; the host check names any that is
+missing), and its storage **already mounted**: the shared directories and the artifact store. Setup never mounts
+anything or edits `/etc/fstab` — storage is the site's (a local directory on one machine, NFS or SMB for more); the
+host check verifies the paths. Everything else comes from the router.
+
+**Models**: ComfyUI's folder layout (`checkpoints/`, `loras/`, `vae/`, `upscale_models/` …) under the worker's
+*Models directory* (default `/srv/comfyfarm/models`), readable by the service account (it never writes there). Every
+worker of a group needs the same files under the same names — a workflow names its models — so give them a share
+(read-only is fine) or copy them. The UI worker needs none: the editor lists the GPU workers' models.
 
 The service account is its own: keep the default `comfyfarm` and setup creates it. It runs ComfyUI, and its
 `authorized_keys` holds only the router's restart key — setup refuses a person's login account (home under `/home`,
@@ -210,9 +233,11 @@ uid on every host (setup's *Service account uid*, default 47800): `chown 47800` 
 says so.
 
 **In the dashboard: System → Workers → Set up a worker** (docs/design/14). Describe the host — address, instance name,
-GPU, group, the profile to run, the router's address as the worker reaches it (`http://<router>:8188`), the paths (the
-artifact store at the **same path on every host**). Hover the **?** next to a field for what it is for. Then choose
-how setup gets root on the host:
+GPU, group, the profile to run, the router's address as the worker reaches it, the paths. Hover the **?** next to a
+field for what it is for. The form starts from what the deployment knows: the compose paths of the artifact store and
+the shared storage, the router at the address this page was opened at with the published router port, the newest
+profile, and — on the first GPU worker — this page's host as its address and port 8288 (the router publishes 8188 on
+the same host). Change only what differs on that host. Then choose how setup gets root on the host:
 
 - **Run a command yourself** (recommended): copy the one line the dashboard shows and run it on the host as a user who
   may use `sudo`. It downloads the setup script, checks it against the checksum shown, and runs it. The router never
@@ -260,9 +285,8 @@ after a router upgrade (new worker tools), to change its address, group, profile
 restarts a running worker so that the new tools and environment take effect — through a rollout of its own profile,
 so it finishes its job first. *Restart* on its row in System → Rollout does the same at any time.
 
-With compose, the artifact store is the builder's (`COMFYFARM_ARTIFACTS_MOUNT`): give the GPU host that path, and
-*Set up a worker* the same path as its artifact store. The rest of this paragraph is for farms without the builder.
-**Allow builds from the dashboard on this host** (in *Set up a worker*): the host then builds recipes on request from
+With compose the builder builds everything: *Set up a worker* does not offer the next option. Only for farms without
+the builder: **Allow builds from the dashboard on this host** — the host then builds recipes on request from
 *System → Rollout → Profiles → From a recipe* ([rollouts.md](rollouts.md) §1) — as a separate build account that
 owns the artifact store, never as the service account. It needs internet and git on that host (setup brings a pinned uv, checked against its release
 checksum, into `/opt/comfyfarm/worker/bin`), and an artifact
@@ -272,8 +296,9 @@ Worker access control: setup allows the router's address as the host reaches it 
 host, Docker's bridge networks) — `COMFYFARM_ALLOW_NETWORK` in `/etc/comfyfarm/<instance>.env`. A profile's
 `COMFYFARM_ALLOW` adds to it. A worker that allows nobody shows as **unsecured** in the dashboard; one that turns
 requests away says from where (*refused … the last from <address>*) — if that is the gateway or the router (a worker
-that reaches them over a network setup did not guess), add the address there. On AMD with PyTorch ≥ 2.13 ROCm wheels also put `HSA_TOOLS_DISABLE_REGISTER=1` there — without it every
-worker burns one CPU core while idle ([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)). The host
+that reaches them over a network setup did not guess), add the address there. On AMD, the `rocm-gfx1201` recipe's
+profiles carry `HSA_TOOLS_DISABLE_REGISTER=1` — without it every worker burns one CPU core while idle
+([rollouts.md](rollouts.md#5-after-a-new-venv-watch-the-idle-worker)); keep it in profiles you make by hand. The host
 check shows each venv's PyTorch version (also in `<ART>/venv/<name>/freeze.txt`).
 
 One ComfyUI instance per GPU: ComfyUI keeps models in VRAM between jobs, so two instances sharing a GPU run each other
@@ -281,20 +306,40 @@ out of memory.
 
 Without the dashboard (or to see what setup does): [rollouts.md](rollouts.md) §2 lists the same pieces by hand.
 
-The router's keys directory (`COMFYFARM_KEYS_DIR`; with containers `/srv/comfyfarm/keys` on the host, owned by uid
-10001 — inside the router container it is `/keys`) holds its agent key (made on first use) and `known_hosts`.
+The router's keys directory holds its agent key (made on first use) and `known_hosts` — easy:
+`COMFYFARM_DATA/state/keys`; strict: `/srv/comfyfarm/keys` on the host (`/keys` in the container).
+
+### Adding a GPU machine
+
+What it must share with the farm, at the **same absolute paths** as on the control-plane host:
+
+- the artifact store (`COMFYFARM_ARTIFACTS_MOUNT`, read-only is enough) and the shared storage (`COMFYFARM_SHARED`:
+  `input`, `output`, `user`, writable by uid 47800);
+- for its group, the same models (above).
+
+On one control-plane host that holds them locally, export them, e.g. NFS (`/etc/exports` there, then the same
+`/etc/fstab` line on the GPU machine, mounted before you run setup):
+
+```
+/srv/comfyfarm/art     <gpu-host>(ro,no_subtree_check)
+/srv/comfyfarm/shared  <gpu-host>(rw,no_subtree_check,all_squash,anonuid=47800,anongid=47800)
+# on the GPU machine:  <control-plane>:/srv/comfyfarm/art  /srv/comfyfarm/art  nfs  ro,_netdev,nofail  0 0
+```
+
+On SMB the owner comes from the mount (`uid=47800,gid=47800`), not from `chown`. Mount before Docker and setup start: a
+directory used before its share is mounted fills the local disk under the mount point. Then *Set up a worker* for that
+machine (its address, port 8188 is fine there). The same kind of GPU: the same group and profile. Another kind: a new
+group, a *Build* with its recipe, its own profiles. Network: the GPU machine reaches the router's 8188; the
+control-plane host reaches the GPU machine's ssh (22) and its ComfyUI port.
 
 ## 4. In the dashboard
 
-In this order: System → Groups (one per set of identical workers; requirements are optional — leave them empty unless
-a group must only take workers with a backend or enough VRAM) → Rollout → **Node packs** (the custom nodes, optional;
-[custom-nodes.md](custom-nodes.md)) → **Build** for your kind of GPU → *From a recipe* (the GPU and UI profiles) →
-roll the UI profile out to the UI worker → *Set up a worker*: each GPU host, with the GPU profile → Users (accounts,
-which groups each may use). Without the builder: Profiles (one for the UI worker, one per kind of GPU worker) → *Set up
-a worker*: the UI worker, then each GPU host.
-A group's node list is read from its workers the first time someone needs it; *Refresh nodes* is for later, after
-custom nodes change. `COMFYFARM_DEFAULT_GROUP` (optional) is the group whose nodes a user sees before picking one;
-without it, the first group the user may use.
+The order is [First day](#first-day). Groups: one per set of identical workers (the first is made with the first GPU
+worker); requirements are optional — leave them empty unless a group must only take workers with a backend or enough
+VRAM. Users: a new account may use every group unless you untick some; artists choose among theirs in ComfyUI.
+A group's node list is read from its workers the first time someone needs it and again after every rollout to them;
+*Refresh nodes* is only for changes made outside a rollout. Without the builder: Profiles (one for the UI worker, one
+per kind of GPU worker) → *Set up a worker*: the UI worker, then each GPU host.
 
 ## 5. Check
 

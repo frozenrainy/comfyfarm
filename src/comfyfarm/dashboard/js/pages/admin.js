@@ -205,7 +205,8 @@ function users(root, { refresh }) {
     const v = await formDialog(t("New user"), [
       { name: "username", label: t("User name") },
       { name: "password", label: t("Initial password"), type: "password", autocomplete: "new-password", hint: t("at least 8 characters") },
-      { name: "admin", label: t("Role"), type: "checkbox", text: t("administrator") }, groupField()], t("Create"));
+      { name: "admin", label: t("Role"), type: "checkbox", text: t("administrator") },
+      groupField(groupList.map((g) => g.id))], t("Create"));          // every group by default: a user with none can run nothing
     if (v) act(() => api("POST", "/api/admin/users", { ...v, groups: v.groups.map(Number) }), t("User created"), refresh);
   }, { cls: "primary" });
   root.append(h("section", {}, head(t("Users"), add), tb.el,

@@ -22,7 +22,7 @@ comfyfarm backup /backups --user-dir /srv/comfy/user     # --pg-bin <dir> if pg_
 
 With containers: `docker compose exec router comfyfarm backup /backups --user-dir /userdata` — `/userdata` is the
 users' directory mounted read-only into the router. The easy deployment mounts `COMFYFARM_SHARED/user` there by
-itself (its `/backups` is `/state/backups`); the strict one takes `COMFYFARM_USER_DIR=<its path on this host>` from
+itself (its `/backups` is `/state/backups`, on the host `COMFYFARM_DATA/state/backups`); the strict one takes `COMFYFARM_USER_DIR=<its path on this host>` from
 `.env`, and `/backups` is `COMFYFARM_BACKUP_DIR` (default `/srv/comfyfarm/backups`). Without `--user-dir` the backup
 says that the users' workflows are not in it.
 

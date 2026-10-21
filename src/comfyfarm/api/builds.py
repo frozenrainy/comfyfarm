@@ -165,8 +165,27 @@ def make_router(ctx: Ctx) -> APIRouter:
         ctx.admin(x_comfyfarm_user)
         p = policy()
         return {"configured": bool(s.builds_dir), "up": bool(p and p["up"]), "recipes": (p or {}).get("recipes", []),
+                "about": (p or {}).get("about", {}),
                 "node_sources": (p or {}).get("node_sources", []), "artifacts": bool(s.artifacts_dir),
                 "first_start": dict(first)}
+
+    @api.get("/api/admin/getting-started")
+    async def getting_started(x_comfyfarm_user: str | None = Header(default=None)):
+        """Where a new farm stands on its first day, step by step (the dashboard's list): what is done, what is next."""
+        ctx.admin(x_comfyfarm_user)
+        async with db.conn() as c:
+            ui = await c.fetchval("SELECT EXISTS (SELECT 1 FROM workers w JOIN instances i ON i.worker_id = w.id WHERE "
+                                  "w.kind = 'ui' AND w.deleted_at IS NULL AND i.profile_id IS NOT NULL AND w.state = 'online')")
+            gpu_profile = await c.fetchval("SELECT EXISTS (SELECT 1 FROM profiles WHERE NOT (flags @> '[\"--cpu\"]'::jsonb))")
+            gpu_worker = await c.fetchval("SELECT EXISTS (SELECT 1 FROM workers w JOIN instances i ON i.worker_id = w.id WHERE "
+                                          "w.kind = 'gpu' AND w.deleted_at IS NULL AND w.group_id IS NOT NULL AND "
+                                          "i.profile_id IS NOT NULL AND w.state = 'online')")
+            user = await c.fetchval("SELECT EXISTS (SELECT 1 FROM users u JOIN user_groups g ON g.username = u.username "
+                                    "WHERE NOT ('admin' = ANY(u.roles)) AND u.disabled_at IS NULL)")
+            job = await c.fetchval("SELECT EXISTS (SELECT 1 FROM jobs WHERE status = 'completed')")
+        return {"first_start": dict(first), "steps": [
+            {"key": "ui", "done": ui}, {"key": "build", "done": gpu_profile},
+            {"key": "gpu", "done": gpu_worker}, {"key": "user", "done": user}, {"key": "job", "done": job}]}
 
     @api.get("/api/admin/defaults")
     async def deployment_defaults(x_comfyfarm_user: str | None = Header(default=None)):

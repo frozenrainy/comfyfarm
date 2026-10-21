@@ -85,9 +85,19 @@ class Builder:
             out.append(n)                     # names, commits, files and constraints: publish.check_recipe
         return out
 
+    def about(self) -> dict:
+        out = {}
+        for r in self.recipes():
+            try:
+                with open(os.path.join(self.share, "recipes", r + ".json")) as f:
+                    out[r] = str(json.load(f).get("about", ""))[:200]
+            except (OSError, ValueError):
+                out[r] = ""
+        return out
+
     def policy(self) -> dict:
-        return {"recipes": self.recipes(), "node_sources": self.node_sources, "platform": self.platform,
-                "alive": now(), "pid": os.getpid()}
+        return {"recipes": self.recipes(), "about": self.about(), "node_sources": self.node_sources,
+                "platform": self.platform, "alive": now(), "pid": os.getpid()}
 
     # ---- the work ----------------------------------------------------------------------------------------------
     def pending(self, kind: str) -> list[str]:

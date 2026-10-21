@@ -352,9 +352,13 @@ export function rollout(root, { refresh }) {
   async function buildOnPlane() {
     if (!builder?.configured) return toast(t("no control-plane builder here — build on a worker host (From a recipe) or with publish.py"), true);
     if (!builder.up) return toast(t("the builder is not running (docker compose ps builder)"), true);
+    // the recipe for the GPU the farm's workers have, when they say (their ComfyUI reports cuda or rocm)
+    const backends = new Set(insts.filter((i) => i.instance && i.instance.role !== "ui").map((i) => i.backend).filter(Boolean));
+    const guess = builder.recipes.find((r) => [...backends].some((b) => r.startsWith(b))) || builder.recipes[0];
     const v = await formDialog(t("Build on the control plane"), [
-      { name: "recipe", label: t("Recipe (the kind of GPU)"), type: "select", value: builder.recipes[0],
-        options: builder.recipes.map((x) => ({ value: x, label: x })) },
+      { name: "recipe", label: t("Recipe (the kind of GPU)"), type: "select", value: guess,
+        options: builder.recipes.map((x) => ({ value: x, label: builder.about?.[x] ? `${x} — ${builder.about[x]}` : x })),
+        tip: t("Which PyTorch the GPU workers get: rocm-… for AMD, cuda-… for NVIDIA (see the description). The UI worker's part is the same in every recipe.") },
       { name: "roles", label: t("For"), type: "select", value: "both", options: [
         { value: "both", label: t("GPU workers and the UI worker") }, { value: "gpu", label: t("GPU workers only") },
         { value: "ui", label: t("the UI worker only") }] },

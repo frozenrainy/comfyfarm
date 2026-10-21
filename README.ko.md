@@ -59,11 +59,13 @@ ComfyFarm은 콘텐츠를 조직 네트워크 밖으로 내보낼 수 없는 곳
    docker compose up -d
    docker compose logs router | grep "setup code"      # http://<이 호스트>:8080 을 열고 이 코드로 관리자를 만듭니다
    ```
-   첫 기동이 UI 워커용 ComfyUI를 빌드하고 띄웁니다. GPU 워커가 없어도 워크플로가 열립니다.
+   첫 기동이 UI 워커용 ComfyUI를 빌드하고 띄웁니다. GPU 워커가 없어도 워크플로가 열립니다. 이 호스트는 이때와 이후
+   빌드에 인터넷이 필요합니다. 8080(사용자)과 8188(워커) 포트는 모든 주소에 열립니다. compose 파일 옆 `.env`에
+   `GATEWAY_PORT=<호스트IP>:8080`, `ROUTER_PORT=<호스트IP>:8188`을 넣어 주소 하나로 묶고, 8188은 GPU 워커 호스트만 닿게 하세요.
    보안을 엄격하게(비밀값은 호스트에, 포트는 주소 하나에, 버전 고정): `deploy/compose/`, 컨테이너 없이: `deploy/systemd/`
    (빌더·UI 워커 컨테이너 없음) — [설치](docs/guide/install.md) §1.
-2. **노드팩과 GPU 워커** — *시스템 → 롤아웃*에서 노드팩을 추가하고, GPU 종류에 맞게 *빌드*하고, 프로필을 만듭니다. 그다음
-   *시스템 → 워커 → 워커 설치*로 빈 리눅스 호스트를 점검된 워커로 만듭니다.
+2. **첫날의 나머지** — 대시보드의 *시작하기* 목록이 안내합니다. GPU에 맞는 *빌드*(원하면 노드팩 포함)와 프로필, GPU 머신마다
+   *워커 설치*(같은 서버도 됩니다), 아티스트 계정 — [설치](docs/guide/install.md#first-day)의 *First day*.
 3. **점검** — `docker compose exec router comfyfarm doctor`가 아직 맞지 않은 것을 한 줄씩 알려 줍니다.
 
 안내서(영문): [설치](docs/guide/install.md) · [운영](docs/guide/running.md) · [롤링 업그레이드](docs/guide/rollouts.md) ·
