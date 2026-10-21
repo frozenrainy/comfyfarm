@@ -113,17 +113,18 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
   the logs. Back it up (below); delete it only to start over — then every worker must be set up again.
 - **Upgrade**: check out the new release (`git fetch --tags && git checkout v<version>`) and `docker compose up -d`;
   `init` runs again and changes nothing; the database migrates when the router starts.
-- **From 0.1.0-dev.10 or earlier** (easy only): those kept the data in Docker volumes; 0.1.0-dev.11 reads
-  `COMFYFARM_DATA`. Copy the volumes before its first start — otherwise it starts as a new, empty farm (the volumes
-  stay untouched; stop it, `sudo rm -rf /srv/comfyfarm/data`, and copy then):
+- **From 0.1.0-dev.10 or earlier** (easy only): those kept the data in Docker volumes; 0.1.0-dev.11 and later read
+  `COMFYFARM_DATA`. Copy the volumes before the new release's first start — otherwise it starts as a new, empty farm
+  (the volumes stay untouched; stop it, `sudo rm -rf /srv/comfyfarm/data`, and copy then):
 
   ```sh
   docker compose down                     # still the old release; not -v
-  git fetch --tags && git checkout v0.1.0-dev.11
+  git fetch --tags && git checkout v<version>                     # the new release
+  img=$(docker compose config --images | grep comfyfarm | head -1)  # its image
   sudo mkdir -p /srv/comfyfarm/data       # or your COMFYFARM_DATA
   for v in state db logs builds ui-agent builder-home ui-home; do
     docker run --rm --user 0:0 --network none -v comfyfarm_$v:/from:ro -v /srv/comfyfarm/data:/to \
-      --entrypoint sh ghcr.io/frozenrainy/comfyfarm:0.1.0-dev.11 -c "mkdir -p /to/$v && cp -a /from/. /to/$v/"
+      --entrypoint sh "$img" -c "mkdir -p /to/$v && cp -a /from/. /to/$v/"
   done
   docker compose up -d
   ```
@@ -144,7 +145,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.11                                                 # a release tag without the v
+V=0.1.0-dev.12                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
