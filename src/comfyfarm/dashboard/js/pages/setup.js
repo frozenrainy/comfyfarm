@@ -12,9 +12,13 @@ const PATHS = [["art", "Artifact store <ART> (same path on every host)", "/srv/c
                ["user", "User directory (shared)", "/mnt/farm/user"],
                ["temp", "Temp directory (this host)", "/var/lib/comfyfarm/temp/{instance}"]];   // [key, English label, default]
 
+// A host check line in the page's language: the host sends its English template and values with each line (an older
+// host sends the English line only — shown as it is).
+export const checkDetail = (r) => (r.t && r.a ? t(r.t, r.a) : r.detail);
+
 function checkTable(rows) {
   return h("table", {}, h("tbody", {}, ...rows.map((r) => h("tr", {}, h("td", {}, pill(r.level, t(r.level))),
-    h("td", { class: "nowrap" }, r.name), h("td", { class: "muted small" }, r.detail)))));
+    h("td", { class: "nowrap" }, t(r.name)), h("td", { class: "muted small" }, checkDetail(r))))));
 }
 
 // Step 1: what the host should become. Defaults: the last setup's answers (a farm's hosts look alike).

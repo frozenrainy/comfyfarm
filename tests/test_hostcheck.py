@@ -308,3 +308,36 @@ def test_in_the_ui_worker_container_the_clock_is_the_hosts(tmp_path, router):
     assert clock["level"] == "OK" and "timedatectl" not in asked
     out, _ = check(tmp_path / "b", router, cmd=cmd)                    # on a host it is still checked
     assert next(r for r in out if r["name"] == "clock")["level"] == "WARN"
+
+
+def test_every_line_says_how_it_was_made(tmp_path, router):
+    """Each line carries its English template and values, so the dashboard shows it in the reader's language; the
+    template filled in must be the line itself (a template that drifted from the text would translate something else)."""
+    out, _ = check(tmp_path / "a", router, kfd_mode=0o000, linger=False,
+                   cmd=fake_cmd({"timedatectl": (0, "no"), "systemctl --user is-system-running": (1, "offline")}))
+    out += check(tmp_path / "b", router)[0]
+    templated = [r for r in out if "t" in r]
+    assert len(templated) >= 10
+    for r in templated:
+        assert r["t"].format(**r["a"]) == r["detail"], r
+        assert all(isinstance(v, str) for v in r["a"].values())
+    plain = [r for r in out if "t" not in r]
+    assert all(r["name"] in ("input directory", "output directory", "user directory", "temp directory", "models",
+                             "GPU (NVIDIA)") for r in plain), plain        # only a path or a device list as it is
+
+
+def test_the_port_is_where_the_instance_runs_now(tmp_path, router):
+    """QA (dev.11): after Configure moved ComfyUI to one address and it restarted, the check still named the address
+    setup was asked for (0.0.0.0). The launcher's saved render says where it runs."""
+    root, paths, art, local = host(tmp_path)
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    cfg = {"gpu": "amd", "paths": paths, "port": 8188, "listen": "0.0.0.0", "instance": "gpu-1"}
+    port = free_port()
+    os.makedirs(f"{local}/run/gpu-1")
+    with open(f"{local}/run/gpu-1/render.json", "w") as f:
+        json.dump({"argv": ["python", "main.py", "--listen", "127.0.0.1", "--port", str(port), "--multi-user"]}, f)
+    out = hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()
+    assert next(r for r in out if r["name"] == "port")["detail"] == f"127.0.0.1:{port} is free"
+    os.remove(f"{local}/run/gpu-1/render.json")                    # never started: what setup was asked for
+    out = hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()
+    assert next(r for r in out if r["name"] == "port")["detail"].startswith("0.0.0.0:8188 ")

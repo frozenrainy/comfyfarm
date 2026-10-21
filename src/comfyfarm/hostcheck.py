@@ -90,6 +90,17 @@ def has_models(path: str, depth: int = 3, budget: int = 5000) -> bool:
     return False
 
 
+class Msg(str):
+    """A line of the check in English that also keeps how it was made — the template and its values — so the dashboard
+    can show it in the reader's language (the template is the key, as in the dashboard's own texts). Templates are whole
+    sentences: no pieces glued together, which no translation could follow."""
+
+    def __new__(cls, template: str, **args):
+        m = super().__new__(cls, template.format(**args))
+        m.template, m.args = template, {k: str(v) for k, v in args.items()}
+        return m
+
+
 class Check:
     """`root` prefixes the device and system paths (/dev, /sys, /var/lib/systemd) so tests can build a fake host."""
 
@@ -104,7 +115,10 @@ class Check:
         self.out: list[dict] = []
 
     def add(self, level: str, name: str, detail: str, **data):
-        self.out.append({"level": level, "name": name, "detail": detail, **data})
+        row = {"level": level, "name": name, "detail": str(detail), **data}
+        if isinstance(detail, Msg):
+            row.update(t=detail.template, a=detail.args)
+        self.out.append(row)
 
     def p(self, path: str) -> str:
         return self.root + path
@@ -112,17 +126,23 @@ class Check:
     # ---- system ---------------------------------------------------------------------------------------------------
     def system(self):
         v = sys.version_info
-        self.add(OK if v[:2] >= MIN_PYTHON else FAIL, "python", f"{v[0]}.{v[1]}.{v[2]} for the launcher"
-                 + ("" if v[:2] >= MIN_PYTHON else f" — needs {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer"))
+        version, need = f"{v[0]}.{v[1]}.{v[2]}", f"{MIN_PYTHON[0]}.{MIN_PYTHON[1]}"
+        if v[:2] >= MIN_PYTHON:
+            self.add(OK, "python", Msg("{version} for the launcher", version=version))
+        else:
+            self.add(FAIL, "python", Msg("{version} for the launcher — needs {need} or newer", version=version, need=need))
         if self.cfg.get("container"):        # the UI worker container: its supervisor is the service manager
             return
         linger = os.path.exists(self.p(f"/var/lib/systemd/linger/{self.user}"))
-        self.add(OK if linger else FAIL, "lingering", f"{self.user}: " + ("on — the instance starts at boot" if linger else
-                 "off — the user manager stops at logout (setup runs `loginctl enable-linger`)"))
+        if linger:
+            self.add(OK, "lingering", Msg("{user}: on — the instance starts at boot", user=self.user))
+        else:
+            self.add(FAIL, "lingering", Msg("{user}: off — the user manager stops at logout (setup runs `loginctl "
+                                            "enable-linger`)", user=self.user))
         code, out = self.cmd(["systemctl", "--user", "is-system-running"])
         state = out.splitlines()[-1] if out else ""
         self.add(OK if state in ("running", "degraded") else FAIL, "user manager",
-                 f"systemd --user: {state or 'not reachable'}")
+                 Msg("systemd --user: {state}", state=state) if state else Msg("systemd --user: not reachable"))
 
     # ---- GPU ------------------------------------------------------------------------------------------------------
     def gpu(self):
@@ -142,28 +162,31 @@ class Check:
             ver = ""
             if os.path.exists(self.p("/sys/module/amdgpu/version")):
                 with open(self.p("/sys/module/amdgpu/version")) as f:
-                    ver = f" · amdgpu {f.read().strip()}"
+                    ver = f.read().strip()
             if usable:
                 found.append("amd")
-                self.add(OK, "GPU (AMD)", f"{len(targets)} GPU(s): {', '.join(targets) or 'unknown target'}{ver}")
+                gpus = dict(n=len(targets), targets=", ".join(targets) or "?")
+                self.add(OK, "GPU (AMD)", Msg("{n} GPU(s): {targets} · amdgpu {version}", **gpus, version=ver) if ver
+                         else Msg("{n} GPU(s): {targets}", **gpus))
             else:
-                self.add(FAIL, "GPU (AMD)", f"/dev/kfd present but {self.user} cannot open it or a render node — "
-                         "add the account to the render and video groups (setup does), then log in again")
+                self.add(FAIL, "GPU (AMD)", Msg("/dev/kfd present but {user} cannot open it or a render node — add the "
+                         "account to the render and video groups (setup does), then log in again", user=self.user))
         if os.path.exists(self.p("/dev/nvidiactl")):
             if not os.access(self.p("/dev/nvidiactl"), os.R_OK | os.W_OK):
-                self.add(FAIL, "GPU (NVIDIA)", f"/dev/nvidiactl present but {self.user} cannot open it")
+                self.add(FAIL, "GPU (NVIDIA)", Msg("/dev/nvidiactl present but {user} cannot open it", user=self.user))
             else:
                 code, out = self.cmd(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"])
                 if code == 0 and out:
                     found.append("nvidia")
                     self.add(OK, "GPU (NVIDIA)", "; ".join(out.splitlines()))
                 else:
-                    self.add(FAIL, "GPU (NVIDIA)", f"nvidia-smi failed: {out[:200] or code} — driver not loaded?")
+                    self.add(FAIL, "GPU (NVIDIA)", Msg("nvidia-smi failed: {error} — driver not loaded?", error=out[:200] or code))
         self.found = found
         if want in ("amd", "nvidia") and want not in found:
-            self.add(FAIL, "GPU", f"setup expects an {want.upper()} GPU and none is usable here (driver installed and loaded?)")
+            self.add(FAIL, "GPU", Msg("setup expects an {kind} GPU and none is usable here (driver installed and loaded?)",
+                                      kind=want.upper()))
         elif not found and want == "any":
-            self.add(WARN, "GPU", "no GPU found — this host can only run ComfyUI on the CPU")
+            self.add(WARN, "GPU", Msg("no GPU found — this host can only run ComfyUI on the CPU"))
 
     def builds(self):
         """Builds from the dashboard, if setup allowed them here: the recipes root installed (the only ones the router
@@ -176,8 +199,9 @@ class Check:
             return
         d = self.p("/opt/comfyfarm/worker/recipes")
         names = sorted(n[:-5] for n in os.listdir(d) if n.endswith(".json")) if os.path.isdir(d) else []
-        self.add(OK if names else WARN, "builds", "from the dashboard: " + (", ".join(names) if names else
-                 "allowed, but no recipe is installed — run setup again") + " (built as comfyfarm-build)", recipes=names)
+        self.add(OK if names else WARN, "builds",
+                 Msg("from the dashboard: {recipes} (built as comfyfarm-build)", recipes=", ".join(names)) if names else
+                 Msg("from the dashboard: allowed, but no recipe is installed — run setup again"), recipes=names)
 
     def recipes(self, art: str):
         """Profile templates that `publish.py recipe` left in the store: the dashboard makes profiles from them."""
@@ -197,30 +221,40 @@ class Check:
                 templates.append({**t, "missing": missing})
         if templates:
             usable = [t["template"] for t in templates if not t["missing"]]
-            self.add(OK if usable else WARN, "recipes", ", ".join(usable or [t["template"] + " (artifacts missing)" for t in templates])
-                     + " (templates: System → Rollout → From a recipe makes profiles of them)", templates=templates)
+            if usable:
+                self.add(OK, "recipes", Msg("{templates} (templates: System → Rollout → From a recipe makes profiles of "
+                                            "them)", templates=", ".join(usable)), templates=templates)
+            else:
+                self.add(WARN, "recipes", Msg("{templates}: their artifacts are missing — build again (System → Rollout → "
+                         "Build)", templates=", ".join(t["template"] for t in templates)), templates=templates)
         else:
-            self.add(WARN, "recipes", f"no profile template in {art} — on a host with internet that mounts it here: "
-                     f"python3 publish.py recipe {art} rocm-gfx1201 (docs/guide/rollouts.md §1)")
+            self.add(WARN, "recipes", Msg("no profile template in {art} — on a host with internet that mounts it here: "
+                     "python3 publish.py recipe {art} rocm-gfx1201 (docs/guide/rollouts.md §1)", art=art))
 
     # ---- paths ----------------------------------------------------------------------------------------------------
     def paths(self):
         art, local = self.env.get("COMFY_LAUNCH_ARTIFACTS", ""), self.env.get("COMFY_LAUNCH_LOCAL", "")
         published = len(glob.glob(os.path.join(art, "*", "*", "READY"))) if art else 0
         if not art or not os.path.isdir(art) or not os.access(art, os.R_OK | os.X_OK):
-            self.add(FAIL, "artifact store", f"{art or '(not set)'} is not readable — is the store mounted here, at the "
-                     "same path as on the other hosts?")
+            self.add(FAIL, "artifact store", Msg("{path} is not readable — is the store mounted here, at the same path as "
+                     "on the other hosts?", path=art or "(not set)"))
         else:
-            self.add(OK if published else WARN, "artifact store", f"{art}: {published} published artifact(s)"
-                     + ("" if published else " — publish ComfyUI, a venv and the node set before assigning a profile"))
+            if published:
+                self.add(OK, "artifact store", Msg("{path}: {n} published artifact(s)", path=art, n=published))
+            else:
+                self.add(WARN, "artifact store", Msg("{path}: nothing published — publish ComfyUI, a venv and the node set "
+                         "before assigning a profile", path=art))
             self.recipes(art)
         if not local or not os.path.isdir(local) or not os.access(local, os.W_OK):
-            self.add(FAIL, "local root", f"{local or '(not set)'} is not writable by {self.user}")
+            self.add(FAIL, "local root", Msg("{path} is not writable by {user}", path=local or "(not set)", user=self.user))
         else:
             free = shutil.disk_usage(local).free
-            self.add(OK if free >= LOCAL_FREE_WARN else WARN, "local root",
-                     f"{local}: {free / 2**30:.0f} GB free" + ("" if free >= LOCAL_FREE_WARN else
-                     f" — less than {LOCAL_FREE_WARN // 2**30} GB: copies of ComfyUI and the node sets go here"))
+            disk = dict(path=local, gb=f"{free / 2**30:.0f}")
+            if free >= LOCAL_FREE_WARN:
+                self.add(OK, "local root", Msg("{path}: {gb} GB free", **disk))
+            else:
+                self.add(WARN, "local root", Msg("{path}: {gb} GB free — less than {min} GB: copies of ComfyUI and the "
+                                                 "node sets go here", **disk, min=LOCAL_FREE_WARN // 2**30))
         dirs = self.cfg.get("paths", {})
         for key in ("input", "output", "user", "temp"):
             d = dirs.get(key)
@@ -228,19 +262,22 @@ class Check:
                 continue
             ok = os.path.isdir(d) and os.access(d, os.W_OK | os.X_OK)
             who = f"{self.user} (uid {os.getuid()})" if not self.root else self.user
-            self.add(OK if ok else FAIL, f"{key} directory", f"{d}" + ("" if ok else f" — missing or not writable by {who}; on "
-                     "shared storage give that uid write access there (every host uses the same uid)"))
+            if ok:
+                self.add(OK, f"{key} directory", d)
+            else:
+                self.add(FAIL, f"{key} directory", Msg("{path} — missing or not writable by {who}; on shared storage give "
+                         "that uid write access there (every host uses the same uid)", path=d, who=who))
         if dirs.get("models"):
             m = dirs["models"]
             if not (os.path.isdir(m) and os.access(m, os.R_OK | os.X_OK)):
-                self.add(FAIL, "models", f"{m} — missing or not readable: mount the models there (the same on every "
-                         "GPU worker) or make the directory and copy them in")
+                self.add(FAIL, "models", Msg("{path} — missing or not readable: mount the models there (the same on every "
+                         "GPU worker) or make the directory and copy them in", path=m))
             elif self.cfg.get("role") == "ui" or self.cfg.get("gpu") == "none" or has_models(m):
                 self.add(OK, "models", m)          # the UI worker needs none: the GPU workers' snapshot names them
             else:
-                self.add(WARN, "models", f"{m} is empty — ComfyUI will list no models and every job that loads one "
+                self.add(WARN, "models", Msg("{path} is empty — ComfyUI will list no models and every job that loads one "
                          "fails: put them in its subdirectories as in ComfyUI's own models directory (checkpoints/, "
-                         "loras/, vae/, …)")
+                         "loras/, vae/, …)", path=m))
         try:
             try:
                 import launcher                                          # on a worker: installed next to this file
@@ -250,8 +287,8 @@ class Check:
             for key in ("input", "output", "user", "temp"):
                 d = dirs.get(key)
                 if d and art and local and (launcher.under(d, code) or any(launcher.under(c, [d]) for c in code)):
-                    self.add(FAIL, f"{key} directory", f"{d} overlaps <ART> or the code under <LOCAL> — the launcher "
-                             "will refuse every render (contract §4)")
+                    self.add(FAIL, f"{key} directory", Msg("{path} overlaps <ART> or the code under <LOCAL> — the "
+                             "launcher will refuse every render (contract §4)", path=d))
         except ImportError:
             pass
         if dirs.get("output") and os.access(dirs["output"], os.W_OK):
@@ -297,67 +334,96 @@ class Check:
             code, out = self.cmd([py, "-c", probe] + (["gpu"] if gpu else []), timeout=300)
             mark = re.search(r"comfyfarm-venv: (.+)", out)
             if code == 0 and (bad := re.search(r"comfyfarm-gpu-error: (.+)", out)):
-                self.add(FAIL, f"venv {name}", f"torch cannot use this host's GPU: {bad.group(1).strip()[:300]}"
-                         + (" — the NVIDIA driver must be new enough for that CUDA (nvidia-smi shows the highest it "
-                            "supports): update the driver, or use a recipe built for an older CUDA" if accel == "cuda" else ""))
+                err = bad.group(1).strip()[:300]
+                self.add(FAIL, f"venv {name}", Msg("torch cannot use this host's GPU: {error} — the NVIDIA driver must be "
+                         "new enough for that CUDA (nvidia-smi shows the highest it supports): update the driver, or use a "
+                         "recipe built for an older CUDA", error=err) if accel == "cuda" else
+                         Msg("torch cannot use this host's GPU: {error}", error=err))
                 continue
             if code == 0 and mark:
-                self.add(OK, f"venv {name}", f"Python {mark.group(1).strip()} runs here")
+                self.add(OK, f"venv {name}", Msg("Python {version} runs here", version=mark.group(1).strip()))
                 continue
             lib = MISSING_LIB.search(out)
             if lib:
                 pkg = SYSTEM_LIBS.get(lib.group(1))
-                self.add(FAIL, f"venv {name}", f"a system library is missing on this host: {lib.group(1)}"
-                         + (f" — install {pkg} from your local mirror" if pkg else " — install the package that provides it"))
+                self.add(FAIL, f"venv {name}", Msg("a system library is missing on this host: {lib} — install {pkg} from "
+                         "your local mirror", lib=lib.group(1), pkg=pkg) if pkg else
+                         Msg("a system library is missing on this host: {lib} — install the package that provides it",
+                             lib=lib.group(1)))
             elif not os.path.exists(os.path.realpath(py)):
-                self.add(FAIL, f"venv {name}", f"its interpreter is not on this host ({os.path.realpath(py)}) — a venv "
-                         "built before D-42 points into the build host; publish it again")
+                self.add(FAIL, f"venv {name}", Msg("its interpreter is not on this host ({path}) — a venv built before "
+                         "D-42 points into the build host; publish it again", path=os.path.realpath(py)))
             else:
-                self.add(FAIL, f"venv {name}", f"does not run here: {out.strip()[-200:] or code}")
+                self.add(FAIL, f"venv {name}", Msg("does not run here: {error}", error=out.strip()[-200:] or code))
 
     # ---- time and network -----------------------------------------------------------------------------------------
     def time_and_network(self):
         if self.cfg.get("container"):          # a container has the host's clock and no timedatectl of its own
-            self.add(OK, "clock", "the host's (a container keeps it); compared with the router's below")
+            self.add(OK, "clock", Msg("the host's (a container keeps it); compared with the router's below"))
         else:
             code, out = self.cmd(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
             sync = out.strip() == "yes"
-            self.add(OK if sync else WARN, "clock", "NTP synchronised" if sync else
-                     "not synchronised — job times and session expiry compare clocks across hosts")
+            if sync:
+                self.add(OK, "clock", Msg("NTP synchronised"))
+            else:
+                self.add(WARN, "clock", Msg("not synchronised — job times and session expiry compare clocks across hosts"))
         router = self.env.get("COMFY_LAUNCH_ROUTER", "").rstrip("/")
         try:
             t0 = time.time()
             with urllib.request.urlopen(f"{router}/api/health/dispatch", timeout=5) as r:
                 r.read(1)
                 date = r.headers.get("Date")
-            skew = ""
+            d = 0.0
             if date:
                 from email.utils import parsedate_to_datetime
                 d = abs(parsedate_to_datetime(date).timestamp() - t0)
-                skew = f", clocks {d:.0f} s apart" if d >= 5 else ""
                 if d >= 30:
-                    self.add(WARN, "clock", f"{d:.0f} s off the router's clock")
-            self.add(OK, "router", f"{router} answers{skew}")
+                    self.add(WARN, "clock", Msg("{seconds} s off the router's clock", seconds=f"{d:.0f}"))
+            if d >= 5:
+                self.add(OK, "router", Msg("{router} answers, clocks {seconds} s apart", router=router, seconds=f"{d:.0f}"))
+            else:
+                self.add(OK, "router", Msg("{router} answers", router=router))
         except Exception as e:                                           # noqa: BLE001 — any failure is the finding
-            self.add(FAIL, "router", f"{router or '(not set)'} does not answer: {type(e).__name__} — firewall, address, "
-                     "or the router is down")
-        port, listen = self.cfg.get("port"), self.cfg.get("listen", "0.0.0.0")
+            self.add(FAIL, "router", Msg("{router} does not answer: {error} — firewall, address, or the router is down",
+                                         router=router or "(not set)", error=type(e).__name__))
+        listen, port = self.running_address()
         if port:
             s = socket.socket()
+            addr = f"{listen}:{port}"
             try:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind((listen, int(port)))
-                self.add(OK, "port", f"{listen}:{port} is free")
+                self.add(OK, "port", Msg("{addr} is free", addr=addr))
             except OSError:
                 if self.cfg.get("container"):    # in its own network namespace only this instance listens there
                     mine = True
                 else:
                     code, out = self.cmd(["systemctl", "--user", "is-active", f"comfyfarm@{self.cfg.get('instance', '')}"])
                     mine = out.strip() == "active"
-                self.add(OK if mine else FAIL, "port", f"{listen}:{port} is in use" + (" by this instance" if mine else
-                         " by something else — pick another port for the instance"))
+                if mine:
+                    self.add(OK, "port", Msg("{addr} is in use by this instance", addr=addr))
+                else:
+                    self.add(FAIL, "port", Msg("{addr} is in use by something else — pick another port for the instance",
+                                               addr=addr))
             finally:
                 s.close()
+
+    def running_address(self) -> tuple[str, int | None]:
+        """Where the instance listens: the render it last started with (the launcher saves it under <LOCAL>), which
+        follows a later change of the instance (System → Rollout → Configure); else what setup was asked for."""
+        listen, port = self.cfg.get("listen", "0.0.0.0"), self.cfg.get("port")
+        saved = os.path.join(self.env.get("COMFY_LAUNCH_LOCAL", ""), "run", self.cfg.get("instance", ""), "render.json")
+        try:
+            with open(saved) as f:
+                argv = json.load(f).get("argv") or []
+            for i, a in enumerate(argv[:-1]):
+                if a == "--listen":
+                    listen = str(argv[i + 1])
+                elif a == "--port":
+                    port = int(argv[i + 1])
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        return listen, port
 
     def groups(self):
         if self.cfg.get("container"):
@@ -370,15 +436,19 @@ class Check:
         want = [g for g in ("render", "video") if _group_exists(g)]
         missing = [g for g in want if g not in names]
         if want:
-            self.add(OK if not missing else WARN, "groups", f"{self.user}: {', '.join(sorted(names & set(want))) or 'none'}"
-                     + (f" — missing {', '.join(missing)}" if missing else ""))
+            has = ", ".join(sorted(names & set(want))) or "-"
+            if missing:
+                self.add(WARN, "groups", Msg("{user}: {groups} — missing {missing}", user=self.user, groups=has,
+                                             missing=", ".join(missing)))
+            else:
+                self.add(OK, "groups", Msg("{user}: {groups}", user=self.user, groups=has))
 
     def run(self) -> list[dict]:
         for step in (self.system, self.groups, self.gpu, self.paths, self.venvs, self.builds, self.time_and_network):
             try:
                 step()
             except Exception as e:                                       # noqa: BLE001 — one broken check is a finding
-                self.add(FAIL, step.__name__, f"check failed: {type(e).__name__}: {e}")
+                self.add(FAIL, step.__name__, Msg("check failed: {error}", error=f"{type(e).__name__}: {e}"))
         return self.out
 
 

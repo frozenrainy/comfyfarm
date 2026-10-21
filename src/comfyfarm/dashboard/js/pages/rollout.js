@@ -1,7 +1,7 @@
 // Rollout tab (docs/design/07): how each worker is launched (instance), what it should run (profile), and rolling a
 // profile out one worker at a time — drain, restart, wait for the badge, verify, revert that worker on failure.
 import { act, api, button, formDialog, h, namedRow, pill, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
-import { checkHost } from "./setup.js";
+import { checkDetail, checkHost } from "./setup.js";
 
 const ACTIVE = ["running", "aborting", "interrupted"];
 const PATHS = [["art", "Artifact store <ART>"], ["local", "Local root <LOCAL>"], ["models", "Models directory"],
@@ -202,10 +202,10 @@ export function rollout(root, { refresh }) {
     const check = (await api("POST", `/api/admin/instances/${via.worker_id}/check`)).check || [];
     const line = check.find((x) => x.name === "recipes"), store = check.find((x) => x.name === "artifact store");
     if (!line) {
-      if (store?.level === "FAIL") throw new Error(t("the artifact store on {name} is not usable: {detail}", { name: via.worker, detail: store.detail }));
+      if (store?.level === "FAIL") throw new Error(t("the artifact store on {name} is not usable: {detail}", { name: via.worker, detail: checkDetail(store) }));
       throw new Error(t("this worker's tools are older than recipes — Set up again (System → Workers)"));
     }
-    return { all: line.templates || [], buildable: check.find((x) => x.name === "builds")?.recipes || [], via, detail: line.detail };
+    return { all: line.templates || [], buildable: check.find((x) => x.name === "builds")?.recipes || [], via, detail: checkDetail(line) };
   }
   async function fromRecipe(pick = null) {
     let got;

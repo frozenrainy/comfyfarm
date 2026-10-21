@@ -476,6 +476,139 @@ export default {
     "프로필을 만들었습니다: {names} — 다음은 워커 설치에서 GPU 프로필을 고르세요 (UI 워커는 이미 필요한 것을 실행 중)",
   "Profiles created: {names} — roll the UI profile out to the UI worker (Start rollout) for the node packs; the GPU profile goes to GPU workers (Set up a worker, or a rollout)":
     "프로필을 만들었습니다: {names} — 노드팩을 쓰려면 UI 프로필을 UI 워커에 롤아웃하세요(롤아웃 시작). GPU 프로필은 GPU 워커용입니다(워커 설치 또는 롤아웃)",
+  // ---- host check (hostcheck.py sends each line's English template and values) ----
+  "GPU (AMD)":
+    "GPU (AMD)",
+  "GPU (NVIDIA)":
+    "GPU (NVIDIA)",
+  "artifact store":
+    "아티팩트 저장소",
+  "builds":
+    "빌드",
+  "clock":
+    "시계",
+  "groups":
+    "그룹",
+  "lingering":
+    "상주(linger)",
+  "local root":
+    "로컬 루트",
+  "models":
+    "모델",
+  "port":
+    "포트",
+  "python":
+    "python",
+  "recipes":
+    "레시피",
+  "router":
+    "라우터",
+  "user manager":
+    "사용자 관리자",
+  "input directory":
+    "입력 디렉터리",
+  "output directory":
+    "출력 디렉터리",
+  "user directory":
+    "사용자 디렉터리",
+  "temp directory":
+    "임시 디렉터리",
+  "{version} for the launcher":
+    "런처용 {version}",
+  "{version} for the launcher — needs {need} or newer":
+    "런처용 {version} — {need} 이상이 필요합니다",
+  "{user}: on — the instance starts at boot":
+    "{user}: 켜짐 — 부팅하면 인스턴스가 시작됩니다",
+  "{user}: off — the user manager stops at logout (setup runs `loginctl enable-linger`)":
+    "{user}: 꺼짐 — 로그아웃하면 사용자 관리자가 멈춥니다 (설치가 `loginctl enable-linger`를 실행합니다)",
+  "systemd --user: {state}":
+    "systemd --user: {state}",
+  "systemd --user: not reachable":
+    "systemd --user: 연결할 수 없음",
+  "setup expects an {kind} GPU and none is usable here (driver installed and loaded?)":
+    "설치는 {kind} GPU를 기대하는데 여기서 쓸 수 있는 것이 없습니다 (드라이버가 설치되고 로드됐나요?)",
+  "from the dashboard: {recipes} (built as comfyfarm-build)":
+    "대시보드에서: {recipes} (comfyfarm-build 계정으로 빌드)",
+  "from the dashboard: allowed, but no recipe is installed — run setup again":
+    "대시보드에서: 허용됐지만 설치된 레시피가 없습니다 — 설치를 다시 실행하세요",
+  "no profile template in {art} — on a host with internet that mounts it here: python3 publish.py recipe {art} rocm-gfx1201 (docs/guide/rollouts.md §1)":
+    "{art}에 프로필 견본이 없습니다 — 인터넷이 되고 이 저장소를 같은 경로로 마운트한 호스트에서: python3 publish.py recipe {art} rocm-gfx1201 (docs/guide/rollouts.md §1)",
+  "{path} is not readable — is the store mounted here, at the same path as on the other hosts?":
+    "{path}을(를) 읽을 수 없습니다 — 저장소가 다른 호스트와 같은 경로로 여기 마운트돼 있나요?",
+  "{path} is not writable by {user}":
+    "{user} 계정이 {path}에 쓸 수 없습니다",
+  "the host's (a container keeps it); compared with the router's below":
+    "호스트의 시계 (컨테이너는 호스트 시계를 씁니다) — 아래에서 라우터 시계와 비교합니다",
+  "/dev/kfd present but {user} cannot open it or a render node — add the account to the render and video groups (setup does), then log in again":
+    "/dev/kfd가 있지만 {user} 계정이 그것이나 렌더 노드를 열 수 없습니다 — 계정을 render·video 그룹에 넣고(설치가 합니다) 다시 로그인하세요",
+  "/dev/nvidiactl present but {user} cannot open it":
+    "/dev/nvidiactl이 있지만 {user} 계정이 열 수 없습니다",
+  "no GPU found — this host can only run ComfyUI on the CPU":
+    "GPU가 없습니다 — 이 호스트는 ComfyUI를 CPU로만 돌릴 수 있습니다",
+  "{templates} (templates: System → Rollout → From a recipe makes profiles of them)":
+    "{templates} (견본: 시스템 → 롤아웃 → 레시피로 만들기에서 프로필로 만듭니다)",
+  "{templates}: their artifacts are missing — build again (System → Rollout → Build)":
+    "{templates}: 아티팩트가 없습니다 — 다시 빌드하세요 (시스템 → 롤아웃 → 빌드)",
+  "{path}: {n} published artifact(s)":
+    "{path}: 게시된 아티팩트 {n}개",
+  "{path}: nothing published — publish ComfyUI, a venv and the node set before assigning a profile":
+    "{path}: 게시된 것이 없습니다 — 프로필을 할당하기 전에 ComfyUI, venv, 노드 세트를 게시하세요",
+  "{path}: {gb} GB free":
+    "{path}: {gb} GB 남음",
+  "{path}: {gb} GB free — less than {min} GB: copies of ComfyUI and the node sets go here":
+    "{path}: {gb} GB 남음 — {min} GB 미만입니다: ComfyUI와 노드 세트 사본이 여기 놓입니다",
+  "{path} — missing or not writable by {who}; on shared storage give that uid write access there (every host uses the same uid)":
+    "{path} — 없거나 {who}이(가) 쓸 수 없습니다. 공유 저장소라면 그 uid에 쓰기 권한을 주세요 (모든 호스트가 같은 uid를 씁니다)",
+  "{path} — missing or not readable: mount the models there (the same on every GPU worker) or make the directory and copy them in":
+    "{path} — 없거나 읽을 수 없습니다: 모델을 거기 마운트하거나(모든 GPU 워커에 같게) 디렉터리를 만들고 복사해 넣으세요",
+  "Python {version} runs here":
+    "Python {version} 실행됨",
+  "NTP synchronised":
+    "NTP 동기화됨",
+  "not synchronised — job times and session expiry compare clocks across hosts":
+    "동기화 안 됨 — 작업 시간과 세션 만료는 호스트들의 시계를 서로 비교합니다",
+  "{router} answers, clocks {seconds} s apart":
+    "{router} 응답함, 시계 차이 {seconds}초",
+  "{router} answers":
+    "{router} 응답함",
+  "{router} does not answer: {error} — firewall, address, or the router is down":
+    "{router}이(가) 응답하지 않습니다: {error} — 방화벽, 주소, 또는 라우터가 꺼져 있습니다",
+  "{addr} is free":
+    "{addr} 비어 있음",
+  "{user}: {groups} — missing {missing}":
+    "{user}: {groups} — {missing} 없음",
+  "{user}: {groups}":
+    "{user}: {groups}",
+  "{n} GPU(s): {targets} · amdgpu {version}":
+    "GPU {n}개: {targets} · amdgpu {version}",
+  "{n} GPU(s): {targets}":
+    "GPU {n}개: {targets}",
+  "nvidia-smi failed: {error} — driver not loaded?":
+    "nvidia-smi 실패: {error} — 드라이버가 로드되지 않았나요?",
+  "{path} is empty — ComfyUI will list no models and every job that loads one fails: put them in its subdirectories as in ComfyUI's own models directory (checkpoints/, loras/, vae/, …)":
+    "{path}이(가) 비어 있습니다 — ComfyUI에 모델이 하나도 안 보이고, 모델을 불러오는 작업은 모두 실패합니다: ComfyUI의 models 디렉터리처럼 하위 디렉터리(checkpoints/, loras/, vae/ …)에 넣으세요",
+  "{path} overlaps <ART> or the code under <LOCAL> — the launcher will refuse every render (contract §4)":
+    "{path}이(가) <ART>나 <LOCAL> 아래 코드와 겹칩니다 — 런처가 모든 render를 거부합니다 (계약 §4)",
+  "torch cannot use this host's GPU: {error} — the NVIDIA driver must be new enough for that CUDA (nvidia-smi shows the highest it supports): update the driver, or use a recipe built for an older CUDA":
+    "torch가 이 호스트의 GPU를 쓰지 못합니다: {error} — NVIDIA 드라이버가 그 CUDA를 지원할 만큼 새로워야 합니다(nvidia-smi가 지원하는 최고 버전을 보여줍니다): 드라이버를 올리거나 더 낮은 CUDA용 레시피를 쓰세요",
+  "torch cannot use this host's GPU: {error}":
+    "torch가 이 호스트의 GPU를 쓰지 못합니다: {error}",
+  "a system library is missing on this host: {lib} — install {pkg} from your local mirror":
+    "이 호스트에 시스템 라이브러리가 없습니다: {lib} — 로컬 미러에서 {pkg}를 설치하세요",
+  "a system library is missing on this host: {lib} — install the package that provides it":
+    "이 호스트에 시스템 라이브러리가 없습니다: {lib} — 이를 제공하는 패키지를 설치하세요",
+  "its interpreter is not on this host ({path}) — a venv built before D-42 points into the build host; publish it again":
+    "인터프리터가 이 호스트에 없습니다 ({path}) — D-42 이전에 빌드한 venv는 빌드 호스트를 가리킵니다. 다시 게시하세요",
+  "does not run here: {error}":
+    "여기서 실행되지 않습니다: {error}",
+  "{seconds} s off the router's clock":
+    "라우터 시계와 {seconds}초 차이",
+  "check failed: {error}":
+    "점검 실패: {error}",
+  "{addr} is in use by this instance":
+    "{addr}을(를) 이 인스턴스가 쓰는 중",
+  "{addr} is in use by something else — pick another port for the instance":
+    "{addr}을(를) 다른 것이 쓰는 중 — 인스턴스에 다른 포트를 고르세요",
   // ---- audit actions (the router's fixed words) ----
   "comfyfarm (first start)": "comfyfarm (첫 시작)", "assign": "할당", "build requested": "빌드 요청",
   "first administrator created": "첫 관리자 생성", "instance configured": "인스턴스 설정", "instance removed": "인스턴스 삭제",

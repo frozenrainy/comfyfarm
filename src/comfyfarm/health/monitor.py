@@ -42,7 +42,8 @@ class HealthMonitor:
     async def tick(self):
         async with self.db.conn() as c:
             workers = [dict(r) for r in await c.fetch(
-                "SELECT id, base_url, state, capabilities, failing_since FROM workers WHERE enabled AND deleted_at IS NULL")]
+                "SELECT id, base_url, state, capabilities, failing_since, last_ok_at FROM workers "
+                "WHERE enabled AND deleted_at IS NULL")]
         results = await asyncio.gather(*(self.adapter.probe(w["base_url"]) for w in workers))
         became_online = refreshed_one = False
         for w, (ok, kind, detail) in zip(workers, results):
@@ -88,9 +89,12 @@ class HealthMonitor:
                                             || jsonb_build_object('refused_as', $5::text) ELSE capabilities END
                     WHERE id = $1 RETURNING state""", w["id"], kind, self.s.dead_after, self.s.busy_after, detail)
             # a warning when it goes offline or stops answering; the failure itself once (a restart is a few seconds
-            # of refused connections — not a warning, and not one line every 5 s)
-            if new != w["state"] and new in ("offline", "busy_unresponsive"):
+            # of refused connections — not a warning, and not one line every 5 s). A worker that never answered is
+            # being set up or built (the first start's UI worker): offline is what it is until then, not news
+            if new != w["state"] and new in ("offline", "busy_unresponsive") and w["last_ok_at"]:
                 log.warning("worker %s %s (%s: %s)", w["id"], new.replace("_", " "), kind, detail)
+            elif new != w["state"] and new in ("offline", "busy_unresponsive"):
+                log.info("worker %s %s (%s: %s) — it has not answered yet", w["id"], new.replace("_", " "), kind, detail)
             elif (kind, detail) != self.last_failure.get(w["id"]):
                 log.info("worker %s probe failed (%s): %s", w["id"], kind, detail)
             self.last_failure[w["id"]] = (kind, detail)

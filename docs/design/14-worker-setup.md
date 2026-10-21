@@ -78,7 +78,8 @@ the old one (status `replaced`), whose token stops working.
 
 Runs as the service account: at the end of setup, from the dashboard (*Check host*, via the agent's `check` verb), and
 from `comfyfarm doctor` for every instance with an ssh backend. One line per check, OK / WARN / FAIL, as JSON for the
-router:
+router. Each line also carries its English template and values (`t`, `a`): the dashboard shows it in the reader's
+language, and an older host's line without them as it is.
 
 - system: Linux, systemd user manager running, lingering on, Python version for the launcher
 - GPU: AMD — `/dev/kfd` and a render node readable/writable by the account, GPUs from the KFD topology (gfx target),
@@ -89,7 +90,8 @@ router:
 - venvs: every published venv runs here and imports torch — a missing system library is named with its package
   (rehearsal: ROCm torch needs `libatomic1`)
 - time: NTP synchronised (`timedatectl`), clock within a few seconds of the router's
-- network: the router answers (`/api/health/dispatch`), the instance port is free (or the instance owns it)
+- network: the router answers (`/api/health/dispatch`), the instance port is free (or the instance owns it) — the
+  address and port it last started with (the launcher's saved render), so a later *Configure* shows; setup's until then
 - shared storage: writes a marker into the output directory; the router reads every host's markers and says which
   hosts see the same files
 

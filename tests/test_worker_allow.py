@@ -171,3 +171,37 @@ async def test_a_worker_that_refuses_the_router_is_named_not_busy(dsn, monkeypat
             assert any(x.startswith("refuses the router: its allow-list does not have 127.0.0.1 — ") for x in w["warnings"])
     finally:
         await runner.cleanup()
+
+
+async def test_offline_is_a_warning_only_for_a_worker_that_answered_before(dsn, fakes, caplog):
+    """QA (dev.11): the first start logged a WARNING for the UI worker going offline while it was still being built —
+    it had never answered. A worker that ran and stopped answering is still a warning."""
+    import logging
+    from conftest import free_port
+    app = create_app(fast_settings(dsn))
+    async with app.router.lifespan_context(app):
+        r = app.state.router
+        live = await fakes()
+        await add_worker(r, f"http://127.0.0.1:{free_port()}", name="never")
+        await add_worker(r, live.url, name="was-up")
+
+        async def until(name, state):
+            for _ in range(60):
+                await r.health.tick()
+                async with r.db.conn() as c:
+                    if await c.fetchval("SELECT state FROM workers WHERE name = $1", name) == state:
+                        return
+                await asyncio.sleep(0.1)
+            raise AssertionError(f"{name} never became {state}")
+        await until("was-up", "online")
+        await live.stop()
+        with caplog.at_level(logging.INFO, logger="comfyfarm.health.monitor"):
+            await until("never", "offline")
+            await until("was-up", "offline")
+        offline = [(x.levelname, x.getMessage()) for x in caplog.records if " offline (" in x.getMessage()]
+        ids = {}
+        async with r.db.conn() as c:
+            for name in ("never", "was-up"):
+                ids[name] = await c.fetchval("SELECT id FROM workers WHERE name = $1", name)
+        assert [lv for lv, m in offline if m.startswith(f"worker {ids['never']} ")] == ["INFO"], offline
+        assert [lv for lv, m in offline if m.startswith(f"worker {ids['was-up']} ")] == ["WARNING"], offline

@@ -234,7 +234,8 @@ def test_the_host_check_names_the_recipes_a_build_may_use(tmp_path):
     c = hostcheck.Check({}, {"instance": "x"}, root=str(root), cmd=lambda *a, **k: (127, ""), user="comfyfarm")
     c.builds()
     assert c.out == [{"level": "OK", "name": "builds", "detail": "from the dashboard: rocm-gfx1201 (built as comfyfarm-build)",
-                      "recipes": ["rocm-gfx1201"]}]
+                      "recipes": ["rocm-gfx1201"], "t": "from the dashboard: {recipes} (built as comfyfarm-build)",
+                      "a": {"recipes": "rocm-gfx1201"}}]
     (root / "etc" / "comfyfarm" / "agent.env").write_text("COMFYFARM_AGENT_BUILD=0\n")
     c.out = []
     c.builds()

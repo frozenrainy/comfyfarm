@@ -47,3 +47,28 @@ def test_translated_worker_warnings_still_match_what_the_router_says():
     block = js[js.index("function warnText"):js.index("const head")]
     for sentence in set(re.findall(r'\[?\s*"((?:[^"\\]|\\.)*)"\s*[:,]\s*\n?\s*t\(', block)):
         assert sentence.rstrip(" :") in src.replace('"\n                   + (', ''), sentence
+
+
+def test_every_host_check_line_has_a_korean_entry():
+    """hostcheck.py sends each line's English template (Msg) and the line names; the dashboard translates them at run
+    time, so the scan of t("…") above never sees them."""
+    import ast
+    tree = ast.parse((DASH.parent / "hostcheck.py").read_text())
+    templates = {n.args[0].value for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "Msg"
+                 and n.args and isinstance(n.args[0], ast.Constant)}
+    names = {n.args[1].value for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "add"
+             and len(n.args) >= 2 and isinstance(n.args[1], ast.Constant)}
+    names |= {f"{k} directory" for k in ("input", "output", "user", "temp")}
+    assert len(templates) > 40 and len(names) > 15
+    missing = sorted((templates | names) - ko_keys())
+    assert not missing, f"add to dashboard/js/lang/ko.js: {missing}"
+
+
+def test_translated_warnings_with_an_address_still_match_the_router():
+    """admin.js reads the address out of these two router sentences with a pattern: a reworded one stays English."""
+    src = (DASH.parent / "api" / "admin.py").read_text()
+    js = (DASH / "js" / "pages" / "admin.js").read_text()
+    assert "/^refuses the router: its allow-list does not have (.+?) — add that address/" in js
+    assert "refuses the router: its allow-list does not have {seen} — add that address to" in src
+    assert r"/^refused (\d+) request\(s\), the last from (.+?) — if that is/" in js
+    assert "request(s), the last from {ref.get('last_peer')} — if that is" in src
