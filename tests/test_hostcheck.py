@@ -341,3 +341,28 @@ def test_the_port_is_where_the_instance_runs_now(tmp_path, router):
     os.remove(f"{local}/run/gpu-1/render.json")                    # never started: what setup was asked for
     out = hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()
     assert next(r for r in out if r["name"] == "port")["detail"].startswith("0.0.0.0:8188 ")
+
+
+def test_a_host_that_keeps_copies(tmp_path, router):
+    """docs/design/16: an empty store is fine in copy mode; what matters is the pinned key and the fetch service."""
+    root, paths, art, local = host(tmp_path)
+    env = {"COMFY_LAUNCH_ROUTER": router, "COMFY_LAUNCH_ARTIFACTS": art, "COMFY_LAUNCH_LOCAL": local}
+    cfg = {"gpu": "amd", "paths": paths, "store": "copy", "instance": "gpu-1"}
+    out = hostcheck.Check(env, cfg, root=root, cmd=fake_cmd(), user="comfyfarm").run()
+    lines = {(r["name"], r["level"]) for r in out}
+    assert ("artifact store", "OK") in lines and next(r for r in out if r["name"] == "artifact store")["detail"].endswith(
+        "the ones a profile needs are copied before it starts")
+    assert [r["level"] for r in out if r["name"] == "copies"] == ["FAIL", "FAIL"]       # no key, no service
+    os.makedirs(f"{root}/etc/comfyfarm", exist_ok=True)
+    open(f"{root}/etc/comfyfarm/artifact-signers", "w").write("comfyfarm-builder ssh-ed25519 AAAA\n")
+    out = hostcheck.Check(env, cfg, root=root, cmd=fake_cmd({"systemctl is-active comfyfarm-fetch.path": (0, "active")}),
+                          user="comfyfarm").run()
+    assert [r["level"] for r in out if r["name"] == "copies"] == ["OK", "OK"]
+    assert not any(r["name"] == "recipes" for r in out)                    # templates are the control plane's business
+
+
+def test_a_cpu_only_worker_does_not_fail_on_a_gpu_it_cannot_use(tmp_path, router):
+    """E2E (dev.14): a CPU-only worker on a machine whose GPU its account cannot open failed its setup."""
+    out, _ = check(tmp_path, router, kfd_mode=0o000, cfg_extra={"gpu": "none"})
+    if os.getuid() != 0:
+        assert levels(out)["GPU (AMD)"] == "WARN" and not [r for r in out if r["name"].startswith("GPU") and r["level"] == "FAIL"]

@@ -42,6 +42,7 @@ const TIPS = {
   path_output: "Results. Shared by every worker and the UI worker: the same storage everywhere — never {instance}. Mount it before setup: setup never mounts storage.",
   path_user: "Users' workflows and settings. Shared by every worker and the UI worker — never {instance}. Mount it before setup: setup never mounts storage.",
   path_temp: "Previews and other temporary files of this instance, on this host. {instance} becomes the instance name.",
+  store: "Copied: this host keeps its own copy of the artifact store at the same path, filled by the farm with what its profiles need — checked file by file against the builder's signature, so nothing else can be slipped in. Mounted: you mount the control plane's store there (NFS, a share); the farm copies nothing.",
   listen: "ComfyUI's --listen. 0.0.0.0 answers on every address of the host — the worker's allow-list refuses everyone but the router and the gateway either way. One address (this host's) when your site wants nothing open on all addresses.",
   builds: "Lets System → Rollout → Profiles → From a recipe ask this host to build a recipe installed here. A separate build account owns the artifact store; ComfyUI's account only reads it. Needs internet and git; setup brings a pinned uv.",
 };
@@ -141,6 +142,15 @@ export async function setupWorker(refresh, again = null, fix = null) {
         hint: t("the same number on every host: shared storage checks numbers, not names") },
       { name: "router_url", required: true, label: t("Router address as the worker sees it"), value: last?.router_url ?? routerGuess, placeholder: "http://10.0.0.5:8188",
         hint: t("http://<router address>:<router port> — the address the launcher fetches its render from") },
+      // docs/design/16: the farm copies the artifacts a profile needs to the host (checked against the builder's
+      // signature) — no share needed; a mounted store (NFS, a share at the same path) stays a choice
+      { name: "store", label: t("Artifact store on this host"), type: "select",
+        value: last?.store === "mount" || !builderState?.signing ? "mount" : "copy",
+        options: [...(builderState?.signing ? [{ value: "copy", label: t("Copied here by the farm (no share needed)") }] : []),
+                  { value: "mount", label: t("Mounted here — a share (NFS, SMB) at the same path") }],
+        hint: builderState?.signing
+          ? t("copies: what a profile needs is copied before it starts, checked against the builder's signature; the first start of a new build waits for the copy")
+          : t("this farm has no builder that signs: mount the control plane's store here (or copy it yourself)") },
       ...PATHS.map(([k, label, d]) => ({ name: `path_${k}`, label: t(label), value: pathOf(k, d),
         hint: (k === "art" ? dflt.art : shared[k]) ? t("the control plane's: {path}", { path: k === "art" ? dflt.art : shared[k] }) : "" })),
       // builds on a worker host: for farms without the control-plane builder (or a host that already has them on)
@@ -163,6 +173,7 @@ export async function setupWorker(refresh, again = null, fix = null) {
       account: v.account.trim(), uid: v.uid || null, router_url: v.router_url.trim(),
       paths: Object.fromEntries(PATHS.map(([k]) => [k, v[`path_${k}`].trim().replace("{instance}", inst)])),
       builds: !!v.builds, worker_id: again ? again.worker_id : null, replaces: fix ? fix.id : null,
+      store: v.builds ? "mount" : v.store,
     };
     // The control plane's own paths (compose): the artifact store its builder publishes to and the storage its UI
     // worker serves — every host must see both at those same paths. Different ones are marked once (QA: a GPU host set

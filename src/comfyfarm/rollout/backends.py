@@ -18,6 +18,7 @@ NAMES = ("manual", "ssh", "http-agent", "systemd-local")
 DEFAULT_KEYS_DIR = "/etc/comfyfarm/keys"
 TOKEN_ENV_PREFIX = "COMFYFARM_AGENT_TOKEN"        # the only environment variables a token may be read from
 SSH_USER = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,31}$")
+ARTIFACT = re.compile(r"^(core|venv|nodes|frontend)/[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")      # fetch.py's names
 HOST_NAME = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
 UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._:\\-]{0,255}$")
 
@@ -60,6 +61,12 @@ class Backend:
     async def build(self, recipe: str, state: bool = False) -> dict | None:
         """Builds from the dashboard (build.py): ask for one (state=False) or read its state; None without an agent.
         The agent refuses unless setup allowed builds on that host, and takes only recipes root installed there."""
+        return None
+
+    async def fetch(self, artifacts: list[str], state: bool = False) -> dict | None:
+        """Copies on the host (fetch.py, docs/design/16): ask for them (state=False) or read their state per artifact
+        ({"venv/x": {"state": "present"|"queued"|"running"|"failed"|"missing", …}}); None without an agent that
+        knows them (a manual backend, the UI worker container, older worker tools)."""
         return None
 
 
@@ -164,6 +171,22 @@ class Ssh(Backend):
             except ValueError:
                 raise BackendError(f"the agent's build state is not JSON: {out[-200:]}")
         return {"requested": True, "detail": out.strip()[-300:]}
+
+    async def fetch(self, artifacts, state=False):
+        if not artifacts or not all(ARTIFACT.match(a) for a in artifacts):
+            raise BackendError(f"bad artifact names {artifacts!r}")
+        rc, out = await _run(self.argv("fetch-status" if state else "fetch", ",".join(artifacts)))
+        if rc != 0:
+            # an older agent (no such command) or a host whose store is mounted: nothing to fetch there
+            if "unknown command" in out or "not set up on this host" in out:
+                return None
+            raise BackendError(out.strip()[-300:] or f"the agent answered {rc}")
+        if not state:
+            return {"requested": True, "detail": out.strip()[-300:]}
+        try:
+            return json.loads(out)
+        except ValueError:
+            raise BackendError(f"the agent's copy state is not JSON: {out[-200:]}")
 
 
 def _is_ip(host: str) -> bool:

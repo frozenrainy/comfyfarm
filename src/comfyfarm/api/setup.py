@@ -48,6 +48,8 @@ class SetupIn(BaseModel):
     paths: dict[str, str]                       # art, local, models, input, output, user, temp
     mounts: list | None = None                  # gone in 0.1.0-dev.8 (storage is the site's): refused, not ignored
     builds: bool = False                        # allow builds from the dashboard on this host (build.py)
+    store: str | None = None                    # copy: the farm copies the artifacts here (docs/design/16) · mount;
+                                                # none: copy when the builder signs (the compose deployment), else mount
     replaces: int | None = None                 # an unfinished setup this one corrects: its token stops working
     worker_id: int | None = None                # set up an existing worker again (new tools, other options)
 
@@ -82,6 +84,10 @@ def check_spec(body: SetupIn) -> None:
         raise HTTPException(400, "a UI worker belongs to no group: it serves the screen, jobs go to GPU workers")
     if not be._is_ip(body.listen):
         raise HTTPException(400, "listen: an IP address of the host (0.0.0.0 = every address)")
+    if body.store not in (None, "copy", "mount"):
+        raise HTTPException(400, "store: copy (the farm copies the artifacts to the host) or mount (a share you mount)")
+    if body.store == "copy" and body.builds:
+        raise HTTPException(400, "store: a host that builds keeps its own store — choose mount with builds")
     for p in (body.port, body.ssh_port):
         if not 1 <= p <= 65535:
             raise HTTPException(400, "port out of range")
@@ -167,12 +173,21 @@ def make_router(ctx: Ctx) -> APIRouter:
             pub = await hostsetup.agent_public_key(settings.keys_dir)
         except hostsetup.SetupError as e:
             raise HTTPException(400, str(e))
+        from .builds import signing_key
+        signer = signing_key(settings.builds_dir) if body.store != "mount" and not body.builds else None
+        store = "copy" if signer else "mount"
+        if body.store == "copy":
+            if signer is None:
+                raise HTTPException(400, "store: copies are checked against the control-plane builder's key, and there "
+                                         "is none yet (no builder here, or it has not started) — choose mount, or "
+                                         "start the builder (docker compose ps builder)")
         token = secrets.token_urlsafe(24)
         base = body.router_url.rstrip("/")
         spec = {"instance": body.instance, "role": body.role, "account": body.account, "uid": body.uid, "router_url": base,
                 "art": body.paths["art"], "local": body.paths["local"], "gpu": "none" if body.role == "ui" else body.gpu, "port": body.port, "listen": body.listen,
                 "paths": {k: v for k, v in body.paths.items() if k not in ("art", "local")},
-                "agent_pubkey": pub, "router_networks": router_networks(),
+                "agent_pubkey": pub, "router_networks": router_networks(), "store": store,
+                **({"artifact_signer": signer} if signer else {}),
                 "builds": body.builds, **({"previous_account": previous_account} if previous_account else {})}
         extra = {"name": body.name.strip(), "host": body.host, "ssh_port": body.ssh_port, "group": body.group,
                  "profile_id": body.profile_id, "again": body.worker_id}

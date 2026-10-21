@@ -460,6 +460,16 @@ export default {
   "not 8188 when it shares the host with the router": "라우터와 같은 호스트라면 8188은 피하세요",
   "Continue: {name} on {host} ({status}, {at})": "이어서: {host}의 {name} ({status}, {at})",
   "ComfyUI listens on": "ComfyUI 수신 주소",
+  "Artifact store on this host": "이 호스트의 아티팩트 저장소",
+  "Copied here by the farm (no share needed)": "팜이 여기로 복사 (공유 저장소 필요 없음)",
+  "Mounted here — a share (NFS, SMB) at the same path": "여기에 마운트 — 같은 경로의 공유 (NFS, SMB)",
+  "copies: what a profile needs is copied before it starts, checked against the builder's signature; the first start of a new build waits for the copy":
+    "복사: 프로필에 필요한 것을 시작 전에 복사하고 빌더 서명으로 검증합니다. 새 빌드의 첫 시작은 복사를 기다립니다",
+  "this farm has no builder that signs: mount the control plane's store here (or copy it yourself)":
+    "이 팜에는 서명하는 빌더가 없습니다: 제어 영역 저장소를 여기에 마운트하세요 (또는 직접 복사)",
+  "Copied: this host keeps its own copy of the artifact store at the same path, filled by the farm with what its profiles need — checked file by file against the builder's signature, so nothing else can be slipped in. Mounted: you mount the control plane's store there (NFS, a share); the farm copies nothing.":
+    "복사: 이 호스트가 같은 경로에 자체 사본을 두고, 팜이 프로필에 필요한 것을 채웁니다 — 파일마다 빌더 서명으로 검증하므로 다른 것이 끼어들 수 없습니다. 마운트: 제어 영역 저장소를 직접 마운트합니다 (NFS, 공유). 팜은 아무것도 복사하지 않습니다.",
+  "fetching": "복사 중",
   "the control plane's: {path}": "제어 영역의 값: {path}",
   "The control plane publishes to {path}: every host must see the artifact store at that same path (mount or copy it there)":
     "제어 영역은 {path}에 게시합니다: 모든 호스트가 아티팩트 저장소를 바로 그 경로로 봐야 합니다 (그 경로에 마운트하거나 복사하세요)",
@@ -616,6 +626,20 @@ export default {
     "{addr}을(를) 이 인스턴스가 쓰는 중",
   "{addr} is in use by something else — pick another port for the instance":
     "{addr}을(를) 다른 것이 쓰는 중 — 인스턴스에 다른 포트를 고르세요",
+  "copies":
+    "복사본",
+  "checked against the builder's key ({path})":
+    "빌더의 키로 검증 ({path})",
+  "{path} is missing: copies cannot be checked — set the host up again":
+    "{path}이(가) 없습니다: 복사본을 검증할 수 없습니다 — 호스트를 다시 설치하세요",
+  "comfyfarm-fetch.path takes the requests":
+    "comfyfarm-fetch.path가 요청을 받습니다",
+  "comfyfarm-fetch.path is {state}: nothing makes the copies — sudo systemctl enable --now comfyfarm-fetch.path":
+    "comfyfarm-fetch.path가 {state} 상태입니다: 복사본을 만드는 것이 없습니다 — sudo systemctl enable --now comfyfarm-fetch.path",
+  "{path}: copies of the control plane's artifacts — {n} here; the ones a profile needs are copied before it starts":
+    "{path}: 제어 영역 아티팩트의 복사본 — 지금 {n}개. 프로필에 필요한 것은 시작 전에 복사됩니다",
+  "/dev/kfd present but {user} cannot open it — not needed: this worker runs on the CPU":
+    "/dev/kfd가 있지만 {user} 계정이 열 수 없습니다 — 필요 없습니다: 이 워커는 CPU로 돕니다",
   // ---- audit actions (the router's fixed words) ----
   "comfyfarm (first start)": "comfyfarm (첫 시작)", "assign": "할당", "build requested": "빌드 요청",
   "first administrator created": "첫 관리자 생성", "instance configured": "인스턴스 설정", "instance removed": "인스턴스 삭제",

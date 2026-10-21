@@ -54,7 +54,7 @@ def test_setup_builds_a_worker_and_reports(tmp_path):
     res = ws.setup(payload(), host)
     assert res["ok"], res
     assert [s["step"] for s in res["steps"]] == ["preconditions", "account", "worker tools", "configuration", "directories",
-                                                  "router access", "user manager", "builds"]
+                                                  "artifact store", "router access", "user manager", "builds"]
     assert res["host_keys"] == ["ssh-ed25519 AAAAhostkey"]
     # account with a real shell (sshd runs the forced command through it)
     assert rec.ran("useradd")[0][-3:] == ["--shell", "/bin/sh", "comfyfarm"] or "/bin/sh" in rec.ran("useradd")[0]
@@ -266,3 +266,48 @@ def test_a_missing_tool_or_a_bug_is_a_report_not_a_half_done_stop(tmp_path, monk
     assert not res["ok"] and res["steps"][-1] == {"step": "configuration", "ok": False,
                                                   "error": "configuration: ValueError: odd host"}
     assert "host_keys" in res                                                    # reported like any failure
+
+
+SIGNER = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBuilderKeyForTestsOnly0000000000000000000"
+
+
+def test_copies_of_the_artifacts_are_set_up_by_default(tmp_path):
+    """docs/design/16: a store account owns this host's copies, the builder's key is pinned (root's file), the service
+    account drops requests into root's drop box, the fetch units take them, and the launcher knows to ask."""
+    root, rec = fake_root(tmp_path), Recorder()
+    host = ws.Host(root=str(root), run=rec)
+    res = ws.setup(payload(store="copy", artifact_signer=SIGNER), host)
+    assert res["ok"], res
+    assert rec.ran("useradd", "--system", "--no-create-home", "--home-dir", "/var/lib/comfyfarm-store/home")
+    assert (root / "srv/art").is_dir()
+    assert (root / "etc/comfyfarm/artifact-signers").read_text() == f'comfyfarm-builder namespaces="comfyfarm-artifact" {SIGNER}\n'
+    assert "COMFYFARM_STORE_ART=/srv/art" in (root / "etc/comfyfarm/store.env").read_text()
+    assert "DirectoryNotEmpty=/var/lib/comfyfarm-store/requests" in (root / "etc/systemd/system/comfyfarm-fetch.path").read_text()
+    assert "fetch.py run" in (root / "etc/systemd/system/comfyfarm-fetch.service").read_text()
+    assert rec.ran("systemctl", "enable", "--now", "comfyfarm-fetch.path")
+    assert rec.ran("chgrp", "comfyfarm", "/var/lib/comfyfarm-store/requests")
+    assert oct(os.stat(root / "var/lib/comfyfarm-store").st_mode & 0o777) == "0o711"
+    assert "COMFY_LAUNCH_FETCH=1" in (root / "etc/comfyfarm/gpu-1.env").read_text()
+    assert json.loads((root / "etc/comfyfarm/gpu-1.check.json").read_text())["store"] == "copy"
+    # mounted on request: the units go (the account and its copies stay), the launcher no longer asks
+    res = ws.setup(payload(store="mount"), ws.Host(root=str(root), run=Recorder()))
+    assert res["ok"] and not (root / "etc/systemd/system/comfyfarm-fetch.path").exists()
+    assert "COMFY_LAUNCH_FETCH" not in (root / "etc/comfyfarm/gpu-1.env").read_text()
+
+
+def test_a_store_that_holds_someone_elses_artifacts_is_used_as_it_is(tmp_path):
+    """The control plane's own store on a one-server farm (the builder's), or a share mounted there: never taken."""
+    root = fake_root(tmp_path)
+    (root / "srv/art/venv/v-1").mkdir(parents=True)
+    host = ws.Host(root=str(root), run=Recorder())
+    res = ws.setup(payload(store="copy", artifact_signer=SIGNER), host)
+    assert res["ok"], res
+    assert any(line.startswith("artifact store: mount — /srv/art belongs to") for line in host.done), host.done
+    assert not (root / "etc/systemd/system/comfyfarm-fetch.path").exists()
+    assert "COMFY_LAUNCH_FETCH" not in (root / "etc/comfyfarm/gpu-1.env").read_text()
+
+
+def test_copies_without_the_builders_key_are_refused(tmp_path):
+    root = fake_root(tmp_path)
+    res = ws.setup(payload(store="copy"), ws.Host(root=str(root), run=Recorder()))
+    assert not res["ok"] and res["steps"][-1]["step"] == "artifact store" and "no key of its builder" in res["error"]

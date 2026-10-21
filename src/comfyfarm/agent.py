@@ -1,6 +1,7 @@
 """Restart agent for a worker host (contract §6): the only things the router may ask a host are `restart <instance>`,
 `status <instance>` and `check <instance>` (the read-only host check, docs/design/14) — and, only where setup allowed
-builds from the dashboard, `build <recipe>` / `build-status <recipe>` (build.py: a request by name). Standard library only —
+builds from the dashboard, `build <recipe>` / `build-status <recipe>` (build.py: a request by name); where it keeps
+copies of the artifacts, `fetch <kind/name,…>` / `fetch-status <kind/name,…>` (fetch.py, docs/design/16). Standard library only —
 installed by worker setup into /opt/comfyfarm/worker/ (root-owned: the router cannot replace it, D-40).
 
 SSH forced command (backend `ssh`): in ~/.ssh/authorized_keys of the service account
@@ -73,6 +74,15 @@ def systemctl(*args: str) -> subprocess.CompletedProcess:
 
 def do(verb: str, instance: str) -> tuple[int, str]:
     """(exit code, output). restart: delivery only — the router watches the worker go down and come back."""
+    if verb in ("fetch", "fetch-status"):            # the second word is a list of artifacts here
+        try:
+            from . import fetch as f
+        except ImportError:                          # run as a copied single file next to fetch.py
+            import fetch as f                        # type: ignore
+        try:
+            return (0, f.request(instance)) if verb == "fetch" else (0, json.dumps(f.status(instance)))
+        except (f.Refused, OSError) as e:
+            raise Refused(str(e))
     if verb in ("build", "build-status"):            # the second word is a recipe name here
         if setting("COMFYFARM_AGENT_BUILD") != "1":
             raise Refused("builds from the dashboard are not allowed on this host (worker setup decides)")
@@ -105,7 +115,8 @@ def ssh_main() -> int:
     words = os.environ.get("SSH_ORIGINAL_COMMAND", "").split()
     try:
         if len(words) != 2:
-            raise Refused("expected: restart|status|check <instance>, or build|build-status <recipe>")
+            raise Refused("expected: restart|status|check <instance>, build|build-status <recipe>, or "
+                          "fetch|fetch-status <kind/name,…>")
         rc, out = do(words[0], words[1])
     except Refused as e:
         print(f"refused: {e}", file=sys.stderr)

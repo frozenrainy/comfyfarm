@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import re
 import time
 
 import httpx
@@ -38,6 +39,18 @@ BAD = ("failed", "reverted", "revert_failed")
 BROKEN_WORKFLOW = {"1": {"class_type": "ComfyFarmVerifyNoSuchNode", "inputs": {}}}
 SMOKE_WORKFLOW = {"1": {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}},
                   "2": {"class_type": "PreviewImage", "inputs": {"images": ["1", 0]}}}
+
+
+FETCH_TIMEOUT = 3 * 3600.0          # copies of a target's artifacts (a large venv over a slow link)
+
+
+def copy_detail(st: dict) -> str:
+    """'copying 2 of 3 · 4.1/9.8 GB' — the rollout step's detail while the host copies."""
+    left = {k: v for k, v in (st or {}).items() if v.get("state") != "present"}
+    got = sum(v.get("bytes") or 0 for v in left.values())
+    total = sum(v.get("total") or 0 for v in left.values())
+    return (f"copying {len(left)} of {len(st or {})} artifact(s)" + (f" · {got / 2**30:.1f}/{total / 2**30:.1f} GB"
+                                                                      if total else "") + " — the worker keeps working")
 
 
 class StepFailed(Exception):
@@ -69,6 +82,7 @@ class Engine:
         self.db, self.s = router.db, router.s
         self.make_backend = functools.partial(be.make, keys_dir=self.s.keys_dir)     # tests replace it
         self.poll = 1.0                                  # probe interval while watching a restart
+        self.fetch_poll = 5.0                            # asking a host how its copies come along (docs/design/16)
         self.start_lock = asyncio.Lock()                 # startups are serialised (shared storage, D: docs/design/07)
         self.current: int | None = None
         self._status_at: dict[str, float] = {}
@@ -187,7 +201,7 @@ class Engine:
             rows = await c.fetch(
                 "SELECT s.*, j.started_at AS job_started, j.progress AS job_progress, w.current_job_id "
                 "FROM rollout_steps s JOIN workers w ON w.id = s.worker_id LEFT JOIN jobs j ON j.id = w.current_job_id "
-                "WHERE s.rollout_id = $1 AND s.status IN ('pending', 'draining', 'restarting', 'starting', 'verifying', 'reverting') "
+                "WHERE s.rollout_id = $1 AND s.status IN ('pending', 'fetching', 'draining', 'restarting', 'starting', 'verifying', 'reverting') "
                 "ORDER BY s.position", rid)
         now = time.time()
 
@@ -271,6 +285,18 @@ class Engine:
         # interrupted after the drain: the assignment may have changed and a restart was under way — a failure reverts,
         # and an abort lets it finish (as for any restart under way)
         changed = step["status"] in ("restarting", "starting", "verifying")
+        if not changed and step["status"] in ("pending", "fetching"):
+            # the target's artifacts copied to a host that keeps copies, before it is drained: it keeps taking jobs
+            # while they come, and is out of service for the restart only. Nothing about the worker changed yet.
+            try:
+                await self.prefetch(sid, backend, inst, rd.build(to, inst), opts, aborting)
+            except Aborted:
+                await self.set_step(sid, "skipped", "aborted while copying the artifacts")
+                return True
+            except (StepFailed, be.BackendError) as e:
+                log.warning("rollout step on %s: copies failed: %s", w["name"], e)
+                await self.set_step(sid, "failed", error=f"copies of the artifacts: {e}")
+                return False
         if changed:
             async def aborting():
                 return False
@@ -343,6 +369,35 @@ class Engine:
             await self.set_step(sid, "reverted", f"back on {frm['name']}; left in maintenance")
         except Exception as e2:
             await self.set_step(sid, "revert_failed", "left in maintenance", error=f"{why} · revert: {type(e2).__name__}: {e2}")
+
+    async def prefetch(self, sid: int, backend, inst: dict, render: dict, opts: dict, aborting) -> None:
+        """Ask the host's agent for copies of what the render needs (docs/design/16) and follow them. An agent without
+        copies — a mounted store, the UI worker container, a manual backend, older worker tools — says nothing: then
+        the launcher fetches at start, if anything."""
+        art = (inst.get("paths") or {}).get("art") or ""
+        names = [f"{m.group(1)}/{m.group(2)}" for r in render.get("require", [])
+                 if (m := re.fullmatch(re.escape(art) + r"/(core|venv|nodes|frontend)/([^/]+)/READY", r))]
+        if not art or not names:
+            return
+        st = await backend.fetch(names, state=True)
+        if st is None or all(v.get("state") == "present" for v in st.values()):
+            return
+        await backend.fetch(names)
+        deadline = time.monotonic() + opts.get("fetch_timeout", FETCH_TIMEOUT)
+        while True:
+            await self.set_step(sid, "fetching", copy_detail(st))
+            if await aborting():
+                raise Aborted()
+            await asyncio.sleep(self.fetch_poll)
+            st = await backend.fetch(names, state=True) or {}
+            if all(v.get("state") == "present" for v in st.values()):
+                return
+            if failed := [(k, v) for k, v in st.items() if v.get("state") == "failed"]:
+                raise StepFailed(f"copying {failed[0][0]} failed: {failed[0][1].get('error') or '?'}")
+            if any(v.get("state") == "missing" for v in st.values()):
+                await backend.fetch(names)                    # its request went without a copy (removed by hand): again
+            if time.monotonic() > deadline:
+                raise StepFailed(f"the copies did not arrive in {opts.get('fetch_timeout', FETCH_TIMEOUT) / 60:.0f} min")
 
     async def undrain(self, w: dict, sid: int, actor: str):
         async with self.db.conn() as c:

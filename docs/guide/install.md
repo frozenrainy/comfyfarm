@@ -18,7 +18,7 @@ takes it from nothing to an artist running a workflow; the rest of this page is 
 | **UI worker** | ComfyUI on the CPU with the `comfyfarm_ui` extension: the screen and the users' files | the `ui` container (or a host of its own, §2) |
 | **GPU workers** | ComfyUI with the `comfyfarm_worker` extension, started by the launcher — a systemd service on the host, not a container | each GPU machine (the control-plane host, too) |
 | **shared storage** | `input`, `output`, `user` for every ComfyUI | one machine: a local directory (the default); more: a NAS or an NFS/SMB share |
-| **artifact store** | ComfyUI, venvs and node sets the builder publishes | at the **same absolute path** on every host (a share, or a copy) |
+| **artifact store** | ComfyUI, venvs and node sets the builder publishes | on the control plane; each GPU machine gets **copies** at the same path (or mounts it) |
 | **models** | checkpoints, LoRAs, VAEs … in ComfyUI's folder layout | on each GPU worker (local disk is fine); the same files on every worker of a group |
 
 **Words used here.** A *recipe* says which ComfyUI and which PyTorch to build for a kind of GPU — `rocm-gfx1201` for AMD
@@ -147,7 +147,7 @@ On a machine with internet access, take the image of a release (never `latest`: 
 changes) and carry it in:
 
 ```sh
-V=0.1.0-dev.13                                                 # a release tag without the v
+V=0.1.0-dev.14                                                 # a release tag without the v
 docker pull ghcr.io/frozenrainy/comfyfarm:$V                  # or build it: docker build -f deploy/Dockerfile -t ghcr.io/frozenrainy/comfyfarm:$V .
 docker pull postgres:17
 docker save ghcr.io/frozenrainy/comfyfarm:$V postgres:17 | gzip > comfyfarm-images.tar.gz
@@ -340,25 +340,32 @@ The router's keys directory holds its agent key (made on first use) and `known_h
 
 What it must share with the farm, at the **same absolute paths** as on the control-plane host:
 
-- the artifact store (`COMFYFARM_ARTIFACTS_MOUNT`, read-only is enough) and the shared storage (`COMFYFARM_SHARED`:
-  `input`, `output`, `user`, writable by uid 47800);
+- the shared storage (`COMFYFARM_SHARED`: `input`, `output`, `user`, writable by uid 47800);
 - for its group, the same models (above).
 
-On one control-plane host that holds them locally, export them, e.g. NFS (`/etc/exports` there, then the same
-`/etc/fstab` line on the GPU machine, mounted before you run setup):
+The **artifact store is copied, not shared**, by default (*Artifact store on this host: Copied here by the farm*):
+setup gives the GPU machine its own store at the control plane's path (`COMFYFARM_ARTIFACTS_MOUNT`), and the farm
+copies into it what a profile needs — before a rollout drains the worker, or when it first starts — each file checked
+against the builder's signature ([16-artifact-copies.md](../design/16-artifact-copies.md)). Nothing to mount; the
+disk needs room for the venvs (tens of GB with several builds). A small NAS gains most: the venvs are read locally.
+*Mounted here* instead uses a share you mount at that path (read-only is enough), as before.
+
+On one control-plane host that holds the shared storage locally, export it, e.g. NFS (`/etc/exports` there, then
+the same `/etc/fstab` line on the GPU machine, mounted before you run setup):
 
 ```
-/srv/comfyfarm/art     <gpu-host>(ro,no_subtree_check)
 /srv/comfyfarm/shared  <gpu-host>(rw,no_subtree_check,all_squash,anonuid=47800,anongid=47800)
-# on the GPU machine:  <control-plane>:/srv/comfyfarm/art  /srv/comfyfarm/art  nfs  ro,_netdev,nofail  0 0
+# on the GPU machine:  <control-plane>:/srv/comfyfarm/shared  /srv/comfyfarm/shared  nfs  _netdev,nofail  0 0
+# a mounted artifact store, if you choose it:
+/srv/comfyfarm/art     <gpu-host>(ro,no_subtree_check)
 ```
 
 On SMB the owner comes from the mount (`uid=47800,gid=47800`), not from `chown`. Mount before Docker and setup start: a
 directory used before its share is mounted fills the local disk under the mount point. Then *Set up a worker* for that
 machine (its address, port 8188 is fine there); the form shows the control plane's paths under its fields and marks one
 that differs. The same kind of GPU: the same group and profile. Another kind: a new
-group, a *Build* with its recipe, its own profiles. Network: the GPU machine reaches the router's 8188; the
-control-plane host reaches the GPU machine's ssh (22) and its ComfyUI port.
+group, a *Build* with its recipe, its own profiles. Network: the GPU machine reaches the router's 8188 (renders and
+copies of the artifacts); the control-plane host reaches the GPU machine's ssh (22) and its ComfyUI port.
 
 ### Removing a worker host
 
@@ -367,12 +374,14 @@ control-plane host reaches the GPU machine's ssh (22) and its ComfyUI port.
 ```sh
 sudo systemctl --user -M comfyfarm@ stop 'comfyfarm@*'           # its ComfyUI instances
 sudo loginctl disable-linger comfyfarm && sudo loginctl terminate-user comfyfarm
-sudo systemctl disable --now comfyfarm-build.path 2>/dev/null     # only if builds were allowed there
-sudo rm -rf /etc/comfyfarm /opt/comfyfarm /etc/systemd/user/comfyfarm@.service /etc/systemd/system/comfyfarm-build.*
+sudo systemctl disable --now comfyfarm-build.path comfyfarm-fetch.path 2>/dev/null    # builds, copies
+sudo rm -rf /etc/comfyfarm /opt/comfyfarm /etc/systemd/user/comfyfarm@.service /etc/systemd/system/comfyfarm-build.* \
+            /etc/systemd/system/comfyfarm-fetch.* /var/lib/comfyfarm-store
 sudo userdel -r comfyfarm             # its home: the router's key, the local copies, temp; -r comfyfarm-build likewise
+sudo userdel comfyfarm-store          # copy mode: then remove its copies, the artifact store path on this host
 ```
 
-Storage is the site's and stays: the models, the shared storage, the artifact store. A host that keeps other instances
+Storage is the site's and stays: the models, the shared storage, a mounted artifact store. A host that keeps other instances
 keeps all of this: stop and disable `comfyfarm@<instance>` only, and remove its `/etc/comfyfarm/<instance>.env` and
 `.check.json`.
 

@@ -436,6 +436,34 @@ def runtime_env(python: str, env: dict) -> dict:
     return out
 
 
+FETCH_WAIT = 3 * 3600.0            # copies (docs/design/16): a large venv over a slow link takes a while
+
+
+def copies(render: dict, art: str, timeout: float = FETCH_WAIT) -> None:
+    """Copy mode (COMFY_LAUNCH_FETCH=1): ask this host's fetch service for the artifacts the render needs and are not
+    here yet, and wait for them — checked against the builder's signature there, never here (the service account only
+    reads the store). A failed copy is a refusal."""
+    names = []
+    for r in render.get("require", []):
+        m = re.fullmatch(re.escape(art) + r"/(core|venv|nodes|frontend)/([^/]+)/READY", _norm(r))
+        if m and not os.path.isfile(r):
+            names.append(f"{m.group(1)}/{m.group(2)}")
+    if not names:
+        return
+    try:
+        from . import fetch
+    except ImportError:                   # on a worker: installed next to this file
+        import fetch                      # type: ignore
+    def say(m):
+        print(f"comfyfarm-launcher: {m}", file=sys.stderr, flush=True)
+    say(f"waiting for copies of {', '.join(names)} (comfyfarm-fetch)")
+    try:
+        fetch.wait(names, art, timeout, say=say)
+    except fetch.Refused as e:
+        raise Refused(str(e))
+    say("copies are here")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     env = os.environ
@@ -447,13 +475,19 @@ def main(argv: list[str] | None = None) -> int:
             raise Refused("bad instance name")
         prefixes = [p for p in env.get("COMFY_LAUNCH_PREFIXES", "").split(",") if p]
         render = fetch(cfg["router"], cfg["instance"], cfg["local"])
+        copying = env.get("COMFY_LAUNCH_FETCH") == "1"
         try:
-            validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes)
+            # copy mode: the artifacts may not be here yet — checked again once they are
+            validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes,
+                     check_files=not copying)
         except (TypeError, AttributeError, KeyError, ValueError) as e:     # any malformed render is a refusal, not a crash
             raise Refused(f"malformed render ({type(e).__name__}: {e})".replace("\n", " "))
         if "--check" in args:
             print(f"ok {render['rev']}")
             return 0
+        if copying:
+            copies(render, cfg["artifacts"])
+            validate(render, instance=cfg["instance"], art=cfg["artifacts"], local=cfg["local"], prefixes=prefixes)
         run_dir = os.path.join(cfg["local"], "run", cfg["instance"])
         for d in render.get("mkdirs", []):
             os.makedirs(d, exist_ok=True)

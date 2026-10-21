@@ -12,8 +12,10 @@ standard library only and never import router code.
 
 ## 1. Artifact store
 
-Choose a directory every worker can read at the **same path** (a shared mount, or a copy per host): `<ART>`. Publish
-on a machine with internet access that mounts `<ART>` at that path.
+Choose a directory every worker can read at the **same path**: `<ART>`. With the compose deployment's builder, GPU hosts
+set up from the dashboard keep **copies** there by default — the farm fills them with what a profile needs, checked
+against the builder's signature ([design 16](../design/16-artifact-copies.md)); a shared mount is the other choice.
+Without it, publish on a machine with internet access that mounts `<ART>` at that path, and share or copy it yourself.
 
 **From the dashboard** (the compose deployment's builder, [design 15](../design/15-control-plane-builds.md)): *System →
 Rollout → Node packs* lists the farm's custom nodes; *Build* publishes a recipe — the kind of GPU — with them, for the

@@ -593,3 +593,62 @@ async def test_restart_option_restarts_a_worker_that_runs_the_target(farm):
     bad = await api.post("/api/admin/rollouts", headers=H, json={"profile_id": farm["p1"], "worker_ids": [h.wid],
                                                                  "options": {"restart": "yes"}})
     assert bad.status_code == 400
+
+
+def copying_backend(hosts, script, seen):
+    """FakeHostBackend whose host keeps copies (docs/design/16): `script` answers the state asks one after the other;
+    `seen` records each ask with the step's state and the worker's maintenance flag at that moment."""
+    from comfyfarm.testing.fake_host import FakeHostBackend
+
+    class Copying(FakeHostBackend):
+        async def fetch(self, artifacts, state=False):
+            seen.append(("state" if state else "request", sorted(artifacts)))
+            if not state:
+                return {"requested": True}
+            return script.pop(0) if len(script) > 1 else script[0]
+    return Copying(hosts)
+
+
+async def test_copies_come_before_the_drain(farm):
+    """docs/design/16: the target's artifacts are copied while the worker still works; it is drained and restarted
+    once they are there. The step says how far the copy got."""
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    seen, steps = [], []
+    script = [{"core/c2": {"state": "present"}, "venv/v2": {"state": "missing"}},
+              {"core/c2": {"state": "present"}, "venv/v2": {"state": "running", "bytes": 2**30, "total": 2 * 2**30}},
+              {"core/c2": {"state": "present"}, "venv/v2": {"state": "present"}}]
+    r.rollout.make_backend = lambda _n, _c: copying_backend(hosts, script, seen)
+    r.rollout.fetch_poll = 0.1
+    orig = r.rollout.set_step
+
+    async def watch(sid, status, detail=None, error=None):
+        if status == "fetching":
+            async with r.db.conn() as c:
+                steps.append((detail, await c.fetchval("SELECT maintenance FROM workers WHERE id = $1", hosts["w1"].wid)))
+        await orig(sid, status, detail, error)
+    r.rollout.set_step = watch
+    rid = await start(api, farm["p2"], [hosts["w1"].wid])
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "succeeded", ro
+    assert seen[0] == ("state", ["core/c2", "venv/v2"]) and seen[1] == ("request", ["core/c2", "venv/v2"])
+    assert steps and all(m is False for _, m in steps)                     # never out of service while copying
+    assert "copying 1 of 2 artifact(s) · 1.0/2.0 GB" in [d.split(" —")[0] for d, _ in steps]
+    assert hosts["w1"].restarts == 1
+
+
+async def test_a_failed_copy_fails_the_step_and_changes_nothing(farm):
+    api, hosts, r = farm["api"], farm["hosts"], farm["router"]
+    seen = []
+    script = [{"venv/v2": {"state": "missing"}, "core/c2": {"state": "missing"}},
+              {"venv/v2": {"state": "failed", "error": "fetch: the list of files is not signed by this farm's builder"},
+               "core/c2": {"state": "present"}}]
+    r.rollout.make_backend = lambda _n, _c: copying_backend(hosts, script, seen)
+    r.rollout.fetch_poll = 0.1
+    rid = await start(api, farm["p2"], [hosts["w1"].wid])
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "failed" and ro["steps"][0]["status"] == "failed"
+    assert "copies of the artifacts: copying venv/v2 failed: fetch: the list of files is not signed" in ro["steps"][0]["error"]
+    assert hosts["w1"].restarts == 0
+    w = next(x for x in (await api.get("/api/admin/workers", headers=H)).json() if x["id"] == hosts["w1"].wid)
+    assert w["maintenance"] is False
+    assert (await instances(api))["w1"]["profile"] == "p1"                 # still on its profile

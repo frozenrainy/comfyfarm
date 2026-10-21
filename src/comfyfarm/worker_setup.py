@@ -38,6 +38,11 @@ ACCOUNT = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 MARK = "# managed by ComfyFarm worker setup — changes are overwritten"
 BUILD_USER, BUILD_HOME = "comfyfarm-build", "/var/lib/comfyfarm-build"     # BUILD_HOME: root; the account's own home: /home below
 BUILD_UNITS = ("/etc/systemd/system/comfyfarm-build.path", "/etc/systemd/system/comfyfarm-build.service")
+# copies of the artifacts (fetch.py, docs/design/16): the same names as there
+STORE_USER, STORE_HOME = "comfyfarm-store", "/var/lib/comfyfarm-store"
+STORE_UNITS = ("/etc/systemd/system/comfyfarm-fetch.path", "/etc/systemd/system/comfyfarm-fetch.service")
+SIGNERS, STORE_ENV = "/etc/comfyfarm/artifact-signers", "/etc/comfyfarm/store.env"
+SIGNER_KEY = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/=]+$")
 # uv for builds, pinned with this ComfyFarm version: the release's own checksums (astral-sh/uv), checked before
 # anything is unpacked. Root-owned under TOOLS, used only by the build service — not put on anyone's PATH.
 UV_VERSION = "0.13.3"
@@ -409,9 +414,11 @@ def configure(h: Host, spec: dict, home: str):
         # VideoHelperSuite lets any user list and load server paths unless told not to (custom-nodes.md §7): off by
         # default here; a site that wants it changes this line (setup keeps an edit only until it runs again)
         "VHS_STRICT_PATHS=1"]
+        # copies (docs/design/16): the launcher asks for the artifacts a render needs and waits for them
+        + (["COMFY_LAUNCH_FETCH=1"] if store_mode(h, spec)[0] == "copy" else [])
         + ([f"COMFYFARM_ALLOW_NETWORK={','.join(allow)}"] if (allow := router_allow(h, spec["router_url"], spec.get("router_networks"))) else []) + [""]))
     h.write(f"{ETC}/{inst}.check.json", json.dumps({
-        "gpu": spec.get("gpu", "any"), "paths": paths, "port": spec.get("port", 8188),
+        "gpu": spec.get("gpu", "any"), "paths": paths, "port": spec.get("port", 8188), "store": store_mode(h, spec)[0],
         "listen": spec.get("listen", "0.0.0.0"), "account": user, "uid": spec.get("uid")}, indent=1) + "\n")
     served = set()
     for line in h.read(f"{ETC}/agent.env").splitlines():
@@ -420,6 +427,35 @@ def configure(h: Host, spec: dict, home: str):
     h.write(f"{ETC}/agent.env", "\n".join([MARK, f"COMFYFARM_AGENT_INSTANCES={','.join(sorted(served | {inst}))}",
                                            "COMFYFARM_AGENT_USER=1"]
                                           + (["COMFYFARM_AGENT_BUILD=1"] if spec.get("builds") else []) + [""]))
+
+
+def store_mode(h: Host, spec: dict) -> tuple[str, str]:
+    """("copy" | "mount", why): copies (docs/design/16) unless setup was asked for a mounted store, builds publish into
+    this host's store, or <ART> already holds someone else's artifacts — a mount (NFS, a share), or the control plane's
+    own store on a one-server farm. That one is used as it is; nothing is copied into it."""
+    if spec.get("store", "mount") != "copy":
+        return "mount", "setup was asked for a mounted store"
+    if spec.get("builds"):
+        return "mount", "builds from the dashboard publish into this host's store"
+    art = h.p(spec["art"])
+    if not os.path.lexists(art):
+        return "copy", f"{spec['art']} is made for the copies"
+    if os.path.ismount(art):
+        return "mount", f"{spec['art']} is a mount"
+    st = os.stat(art)
+
+    def uid(name):
+        try:
+            return pwd.getpwnam(name).pw_uid
+        except KeyError:
+            return None
+    if st.st_uid == uid(STORE_USER):
+        return "copy", f"{spec['art']} holds this host's copies"
+    if not os.listdir(art) and st.st_uid in (0, uid(spec["account"])):
+        return "copy", f"{spec['art']} is empty: given to {STORE_USER}"
+    # another account's, even empty: the control plane's own store on a one-server farm (the builder's) is never taken
+    return "mount", (f"{spec['art']} belongs to {owner_name(st.st_uid)}" + (" and holds artifacts" if os.listdir(art) else "")
+                     + " — a share, or the control plane's own store: used as it is")
 
 
 def directories(h: Host, spec: dict):
@@ -440,6 +476,75 @@ def directories(h: Host, spec: dict):
     if paths.get("models") and h.mkdir(paths["models"], 0o755):
         h.log(f"{paths['models']} is new and empty: put the models there (checkpoints/, loras/, vae/ … as in ComfyUI's "
               "models directory) or mount the shared models directory at this path")
+
+
+def store(h: Host, spec: dict):
+    """Copies of the artifacts (fetch.py, docs/design/16): an account that owns the store here and fetches into it,
+    the builder's key the copies are checked against, a drop box the service account (the launcher, the agent) puts
+    artifact names into, and the units that take them. A mounted store: the units go, the account and copies stay."""
+    mode, why = store_mode(h, spec)
+    h.log(f"artifact store: {mode} — {why}")
+    if mode != "copy":
+        if any(os.path.exists(h.p(u)) for u in STORE_UNITS):
+            h.run(["systemctl", "disable", "--now", "comfyfarm-fetch.path"], check=False)
+            for u in STORE_UNITS:
+                h.remove(u)
+            h.run(["systemctl", "daemon-reload"])
+            h.log("copies of the artifacts: turned off")
+        return
+    signer = (spec.get("artifact_signer") or "").strip()
+    if not SIGNER_KEY.match(signer):
+        raise Failed("the router sent no key of its builder to check copies with — upgrade the router, or set the "
+                     "host up with a mounted store")
+    try:
+        pw = pwd.getpwnam(STORE_USER)
+    except KeyError:
+        pw = None
+    if pw is not None and (why := person_account(pw, h.root)):
+        raise Failed(f"{STORE_USER} is {why} — the store account must be its own")
+    home = f"{STORE_HOME}/home"
+    if pw is None:
+        h.run(["useradd", "--system", "--no-create-home", "--home-dir", home, "--shell", "/usr/sbin/nologin", STORE_USER])
+        h.log(f"account {STORE_USER} created — it owns the copies; ComfyUI's account only reads them")
+    art = spec["art"]
+    if not os.path.isdir(h.p(art)):
+        h.mkdir(art, 0o755, owner=STORE_USER)
+    elif not h.dry and os.stat(h.p(art)).st_uid != h.uid(STORE_USER):
+        h.run(["chown", STORE_USER, art])               # empty (store_mode says so): given to the store account
+        h.run(["chmod", "0755", art])
+    # as builds: root owns STORE_HOME, status/ and requests/ (what root writes there is never a link the store account
+    # made); the service account passes through (0711) to drop a request (0730, its group) or read a state
+    h.mkdir(STORE_HOME, 0o711)
+    h.run(["chmod", "0711", STORE_HOME])
+    h.mkdir(home, 0o700, owner=STORE_USER)
+    h.mkdir(f"{STORE_HOME}/status", 0o755)
+    h.mkdir(f"{STORE_HOME}/requests", 0o730)
+    h.run(["chgrp", spec["account"], f"{STORE_HOME}/requests"])
+    h.run(["chmod", "0730", f"{STORE_HOME}/requests"])
+    h.write(SIGNERS, f'comfyfarm-builder namespaces="comfyfarm-artifact" {signer}\n', 0o644)
+    h.write(STORE_ENV, "\n".join([MARK, f"COMFYFARM_STORE_ROUTER={spec['router_url'].rstrip('/')}",
+                                   f"COMFYFARM_STORE_ART={art}", ""]), 0o644)
+    h.write(STORE_UNITS[0], f"""{MARK}
+[Unit]
+Description=ComfyFarm: copies of artifacts asked for
+
+[Path]
+DirectoryNotEmpty={STORE_HOME}/requests
+
+[Install]
+WantedBy=multi-user.target
+""")
+    h.write(STORE_UNITS[1], f"""{MARK}
+[Unit]
+Description=ComfyFarm: copy the artifacts asked for from the router, checked against the builder's signature (as {STORE_USER})
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+ExecStart=/usr/bin/python3 {TOOLS}/fetch.py run
+""")
+    h.run(["systemctl", "daemon-reload"])
+    h.run(["systemctl", "enable", "--now", "comfyfarm-fetch.path"])
 
 
 def ssh_access(h: Host, spec: dict, home: str):
@@ -588,6 +693,7 @@ def setup(payload: dict, h: Host) -> dict:
                          ("worker tools", lambda: tools(h, payload.get("files", {}), payload.get("version", ""))),
                          ("configuration", lambda: configure(h, spec, result["home"])),
                          ("directories", lambda: directories(h, spec)),
+                         ("artifact store", lambda: store(h, spec)),
                          ("router access", lambda: ssh_access(h, spec, result["home"])),
                          ("user manager", lambda: user_manager(h, spec)),
                          ("builds", lambda: builds(h, spec, payload.get("build_files", {})))]:

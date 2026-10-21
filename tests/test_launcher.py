@@ -373,3 +373,38 @@ def test_comfyui_gets_the_venvs_nvidia_libraries_and_no_runtime_installs(tmp_pat
     assert env["PIP_NO_INDEX"] == "1"
     cpu = launcher.runtime_env(str(tmp_path / "art" / "venv" / "cpu-1" / "bin" / "python"), {})
     assert "LD_LIBRARY_PATH" not in cpu and cpu["PIP_NO_INDEX"] == "1"
+
+
+def test_copy_mode_waits_for_the_artifacts_then_starts(tmp_path, monkeypatch, capsys):
+    """docs/design/16: with COMFY_LAUNCH_FETCH=1 the launcher asks this host's fetch service for what the render needs
+    and is not here, waits, and goes on; a failed copy is a refusal (exit 2, no restart loop)."""
+    import threading
+    import time
+    from comfyfarm import fetch
+    store, art = tmp_path / "store", tmp_path / "art"
+    (store / "requests").mkdir(parents=True); (store / "status").mkdir()
+    monkeypatch.setattr(fetch, "REQUESTS", str(store / "requests"))
+    monkeypatch.setattr(fetch, "STATUS", str(store / "status"))
+    (art / "core" / "c-1").mkdir(parents=True); (art / "core" / "c-1" / "READY").write_text("")      # one is here
+    render = {"require": [f"{art}/core/c-1/READY", f"{art}/venv/v-1/READY"]}
+
+    def service():
+        time.sleep(0.3)
+        assert sorted(os.listdir(store / "requests")) == ["venv.v-1"]          # only what is missing was asked for
+        os.remove(store / "requests" / "venv.v-1")
+        (art / "venv" / "v-1").mkdir(parents=True); (art / "venv" / "v-1" / "READY").write_text("")
+    threading.Thread(target=service).start()
+    launcher.copies(render, str(art), timeout=10)
+    assert "waiting for copies of venv/v-1" in capsys.readouterr().err
+    launcher.copies(render, str(art), timeout=10)                               # all here: nothing asked
+    assert os.listdir(store / "requests") == []
+
+    render["require"].append(f"{art}/nodes/n-1/READY")
+    (store / "status" / "nodes.n-1.json").write_text(json.dumps({"state": "failed", "error": "not signed by this farm's builder"}))
+
+    def fails():
+        time.sleep(0.3)
+        os.remove(store / "requests" / "nodes.n-1")                             # taken, tried again, failed again
+    threading.Thread(target=fails).start()
+    with pytest.raises(launcher.Refused, match="copying nodes/n-1 failed: not signed"):
+        launcher.copies(render, str(art), timeout=10)

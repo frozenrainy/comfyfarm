@@ -74,7 +74,7 @@ class RolloutIn(BaseModel):
 
 
 OPTION_KEYS = {"drain_timeout": (int, float), "start_timeout": (int, float), "observe_timeout": (int, float),
-               "verify_timeout": (int, float), "smoke": bool,
+               "verify_timeout": (int, float), "fetch_timeout": (int, float), "smoke": bool,
                "restart": bool}          # restart even a worker that runs the target (after Set up again: new tools, env)
 
 
@@ -566,7 +566,10 @@ def make_router(ctx: Ctx) -> APIRouter:
                     for s in await c.fetch("SELECT s.*, w.name FROM rollout_steps s JOIN workers w ON w.id = s.worker_id "
                                            "WHERE s.rollout_id = $1 AND s.status NOT IN ('pending','done','failed','reverted',"
                                            "'revert_failed','skipped')", rid):
-                        if s["status"] == "draining":
+                        if s["status"] == "fetching":          # only copies ran: nothing about the worker changed
+                            await c.execute("UPDATE rollout_steps SET status = 'skipped', detail = 'aborted', "
+                                            "finished_at = now() WHERE id = $1", s["id"])
+                        elif s["status"] == "draining":
                             if not s["was_maintenance"]:
                                 await c.execute("UPDATE workers SET maintenance = false WHERE id = $1", s["worker_id"])
                                 await audit(c, who, "maintenance off", s["name"], rollout=rid)

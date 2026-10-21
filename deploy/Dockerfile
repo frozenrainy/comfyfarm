@@ -5,7 +5,11 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-client postgresql-client git \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid 10001 comfyfarm \
- && useradd --system --create-home --uid 10001 --gid 10001 comfyfarm   # a fixed gid too: 999 is a host group
+ && useradd --system --create-home --uid 10001 --gid 10001 comfyfarm \
+ && groupadd --system --gid 10002 comfyfarm-builder \
+ && useradd --system --no-create-home --home-dir /var/lib/comfyfarm-builder --uid 10002 --gid 10002 comfyfarm-builder
+# fixed gids too (999 is a host group). The builder's account must exist here: ssh-keygen, which signs the artifacts
+# GPU hosts copy (docs/design/16), refuses to run for a uid without a passwd entry
 WORKDIR /opt/comfyfarm
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src

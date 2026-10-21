@@ -100,6 +100,16 @@ def templates(art: str | None) -> list[dict]:
     return out
 
 
+def signing_key(builds_dir: str | None) -> str | None:
+    """The builder's public key (its policy): what GPU hosts pin to check their copies of the artifacts with."""
+    try:
+        with open(os.path.join(builds_dir, "status", "policy.json")) as f:
+            key = json.load(f).get("signing_key")
+    except (OSError, ValueError, TypeError):
+        return None
+    return key if isinstance(key, str) and re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+", key) else None
+
+
 def make_router(ctx: Ctx) -> APIRouter:
     api = APIRouter()
     router, db, s = ctx.router, ctx.router.db, ctx.settings
@@ -167,7 +177,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         return {"configured": bool(s.builds_dir), "up": bool(p and p["up"]), "recipes": (p or {}).get("recipes", []),
                 "about": (p or {}).get("about", {}),
                 "node_sources": (p or {}).get("node_sources", []), "artifacts": bool(s.artifacts_dir),
-                "first_start": dict(first)}
+                "signing": bool((p or {}).get("signing_key")), "first_start": dict(first)}
 
     @api.get("/api/admin/getting-started")
     async def getting_started(x_comfyfarm_user: str | None = Header(default=None)):

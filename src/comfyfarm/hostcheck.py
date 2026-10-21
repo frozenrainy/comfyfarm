@@ -168,12 +168,16 @@ class Check:
                 gpus = dict(n=len(targets), targets=", ".join(targets) or "?")
                 self.add(OK, "GPU (AMD)", Msg("{n} GPU(s): {targets} · amdgpu {version}", **gpus, version=ver) if ver
                          else Msg("{n} GPU(s): {targets}", **gpus))
+            elif want == "none":                   # a CPU-only worker: a GPU it cannot use does not matter
+                self.add(WARN, "GPU (AMD)", Msg("/dev/kfd present but {user} cannot open it — not needed: this worker "
+                         "runs on the CPU", user=self.user))
             else:
                 self.add(FAIL, "GPU (AMD)", Msg("/dev/kfd present but {user} cannot open it or a render node — add the "
                          "account to the render and video groups (setup does), then log in again", user=self.user))
         if os.path.exists(self.p("/dev/nvidiactl")):
             if not os.access(self.p("/dev/nvidiactl"), os.R_OK | os.W_OK):
-                self.add(FAIL, "GPU (NVIDIA)", Msg("/dev/nvidiactl present but {user} cannot open it", user=self.user))
+                self.add(WARN if want == "none" else FAIL, "GPU (NVIDIA)",
+                         Msg("/dev/nvidiactl present but {user} cannot open it", user=self.user))
             else:
                 code, out = self.cmd(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"])
                 if code == 0 and out:
@@ -235,7 +239,12 @@ class Check:
     def paths(self):
         art, local = self.env.get("COMFY_LAUNCH_ARTIFACTS", ""), self.env.get("COMFY_LAUNCH_LOCAL", "")
         published = len(glob.glob(os.path.join(art, "*", "*", "READY"))) if art else 0
-        if not art or not os.path.isdir(art) or not os.access(art, os.R_OK | os.X_OK):
+        if self.cfg.get("store") == "copy" and art and os.path.isdir(art) and os.access(art, os.R_OK | os.X_OK):
+            # copies (docs/design/16): empty until a profile needs something — then fetched before it starts
+            self.add(OK, "artifact store", Msg("{path}: copies of the control plane's artifacts — {n} here; the ones a "
+                                               "profile needs are copied before it starts", path=art, n=published))
+            self.copies()
+        elif not art or not os.path.isdir(art) or not os.access(art, os.R_OK | os.X_OK):
             self.add(FAIL, "artifact store", Msg("{path} is not readable — is the store mounted here, at the same path as "
                      "on the other hosts?", path=art or "(not set)"))
         else:
@@ -299,6 +308,21 @@ class Check:
                     f.write(f"{int(time.time())}\n")
             except OSError:
                 pass                                                     # the directory check above says why
+
+    def copies(self):
+        """What copies need on this host: the builder's key they are checked against, and the service that makes them."""
+        signers = self.p("/etc/comfyfarm/artifact-signers")
+        if os.path.isfile(signers) and os.access(signers, os.R_OK):
+            self.add(OK, "copies", Msg("checked against the builder's key ({path})", path="/etc/comfyfarm/artifact-signers"))
+        else:
+            self.add(FAIL, "copies", Msg("{path} is missing: copies cannot be checked — set the host up again",
+                                         path="/etc/comfyfarm/artifact-signers"))
+        code, out = self.cmd(["systemctl", "is-active", "comfyfarm-fetch.path"])
+        if out.strip() == "active":
+            self.add(OK, "copies", Msg("comfyfarm-fetch.path takes the requests"))
+        else:
+            self.add(FAIL, "copies", Msg("comfyfarm-fetch.path is {state}: nothing makes the copies — sudo systemctl "
+                                         "enable --now comfyfarm-fetch.path", state=out.strip() or "not running"))
 
     # ---- venvs ----------------------------------------------------------------------------------------------------
     def venvs(self):

@@ -352,3 +352,76 @@ def test_device_names_read_like_the_card():
     assert device_name("cuda:0 AMD Radeon Graphics : native") == "AMD Radeon Graphics"
     assert device_name("cuda:1 NVIDIA GeForce RTX 3080 Ti : cudaMallocAsync") == "NVIDIA GeForce RTX 3080 Ti"
     assert device_name("Some Card") == "Some Card" and device_name(None) is None
+
+
+def test_the_builder_signs_what_it_publishes_for_copies(tmp_path):
+    """docs/design/16: GPU hosts accept a copy only with the builder's signature over its list of files. The key is the
+    builder's own (made once); the store's older artifacts are signed too, and nothing twice."""
+    from comfyfarm import fetch
+    from test_fetch import published
+    for d in ("requests", "status", "art", "share/recipes"):
+        (tmp_path / d).mkdir(parents=True)
+    key = str(tmp_path / "home" / "signing" / "artifacts")
+    b = builder.Builder(str(tmp_path / "requests"), str(tmp_path / "status"), str(tmp_path / "art"), str(tmp_path / "share"),
+                        None, [], key=key)
+    assert b.policy()["signing_key"] is None and b.sign_store() == 0          # no key yet: nothing signed
+    b.ensure_key()
+    assert b.policy()["signing_key"].startswith("ssh-ed25519 ") and oct(os.stat(os.path.dirname(key)).st_mode & 0o777) == "0o700"
+    published(tmp_path / "art", "venv", "v-1")
+    published(tmp_path / "art", "core", "c-1")
+    (tmp_path / "art" / "nodes" / "half-done").mkdir(parents=True)          # no READY: not published, not signed
+    assert b.sign_store() == 2 and b.sign_store() == 0
+    signers = tmp_path / "allowed"
+    signers.write_text(f'{fetch.PRINCIPAL} namespaces="{fetch.NAMESPACE}" {b.policy()["signing_key"]}\n')
+    lst = tmp_path / "art" / "signed" / "venv" / "v-1.json"
+    fetch.verify(lst.read_bytes(), (tmp_path / "art" / "signed" / "venv" / "v-1.json.sig").read_bytes(), str(signers))
+    assert lst.read_bytes() == fetch.file_list(str(tmp_path / "art" / "venv" / "v-1"), "venv", "v-1")
+    assert not (tmp_path / "art" / "signed" / "nodes").exists()
+
+
+async def test_the_router_hands_on_signed_artifacts_to_its_hosts_only(farm, tmp_path):
+    """docs/design/16: a host of the farm gets the builder's signed list and the tree; the copy it makes from them
+    passes every check. Anyone else gets 403; an artifact not signed yet, 404 with the reason."""
+    import io
+    from comfyfarm import fetch
+    from conftest import add_worker
+    from test_fetch import published
+    r, c, builds, art = farm
+    published(art, "venv", "v-1")
+    _, wid = await add_worker(r, "http://192.0.2.21:8188", name="gpu-a")
+    async with r.db.conn() as x:
+        await x.execute("INSERT INTO instances(worker_id, instance, role, platform, hosts, listen, port, paths, "
+                        "restart_backend, restart_config) VALUES ($1, 'gpu-a', 'gpu', 'posix', $2, '0.0.0.0', 8188, "
+                        "'{}'::jsonb, 'manual', '{}'::jsonb)", wid, ["127.0.0.1"])
+    assert (await c.get("/api/worker_artifacts/venv/v-1/signed")).status_code == 404          # not signed yet
+    key = str(tmp_path / "bkey" / "artifacts")
+    b = builder.Builder(str(builds / "requests"), str(builds / "status"), str(art), str(tmp_path), None, [], key=key)
+    b.ensure_key()
+    assert b.sign_store() == 1
+    got = (await c.get("/api/worker_artifacts/venv/v-1/signed")).json()
+    stream = await c.get("/api/worker_artifacts/venv/v-1/tar")
+    assert stream.status_code == 200 and stream.headers["content-type"] == "application/x-tar"
+    signers = tmp_path / "allowed"
+    signers.write_text(f'{fetch.PRINCIPAL} namespaces="{fetch.NAMESPACE}" {b.public_key()}\n')
+    fetch.verify(got["list"].encode(), got["sig"].encode(), str(signers))
+    host_art = tmp_path / "host-art"
+    fetch.install(io.BytesIO(stream.content), str(host_art), "venv", "v-1", got["list"].encode(), got["sig"].encode())
+    assert fetch.file_list(str(host_art / "venv" / "v-1"), "venv", "v-1") == got["list"].encode()
+    for bad in ("/api/worker_artifacts/venv/nope/tar", "/api/worker_artifacts/etc/passwd/tar",
+                "/api/worker_artifacts/venv/..%2F..%2Fstate/signed"):
+        assert (await c.get(bad)).status_code == 404, bad
+    stranger = httpx.AsyncClient(transport=httpx.ASGITransport(app=c._transport.app, client=("192.0.2.99", 4000)),
+                                 base_url="http://farm")
+    async with stranger:
+        assert (await stranger.get("/api/worker_artifacts/venv/v-1/tar")).status_code == 403
+        assert (await stranger.get("/api/worker_artifacts/venv/v-1/signed")).status_code == 403
+
+
+def test_a_builder_that_cannot_make_its_key_still_builds(tmp_path, monkeypatch, capsys):
+    """Field (E2E, dev.14): ssh-keygen refused to run for the builder's uid without a passwd entry, and the builder
+    crashed in a loop. Builds go on without a key; only copies on GPU hosts wait for one."""
+    b = builder.Builder(str(tmp_path), str(tmp_path), str(tmp_path), str(tmp_path), None, [],
+                        key=str(tmp_path / "signing" / "artifacts"))
+    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 255, "", "No user exists for uid 10002"))
+    b.ensure_key()
+    assert "copies on GPU hosts are off" in capsys.readouterr().out and b.public_key() is None

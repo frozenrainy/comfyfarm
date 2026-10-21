@@ -15,7 +15,7 @@ from importlib import resources
 
 AGENT_KEY = "comfyfarm-agent"                 # in the keys directory; the public half goes into every worker setup
 KNOWN_HOSTS = "known_hosts"
-TOOLS = ("launcher.py", "agent.py", "hostcheck.py")
+TOOLS = ("launcher.py", "agent.py", "hostcheck.py", "fetch.py")
 PAYLOAD_LINE = re.compile(r"^PAYLOAD = None.*$", re.M)
 HOST_KEY = re.compile(r"^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa) [A-Za-z0-9+/=]+$")
 

@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-from . import publish
+from . import fetch, publish
 
 REQUEST = re.compile(r"^[0-9]{10,20}-[0-9a-f]{8}$")
 REF = re.compile(r"^(?!-)[A-Za-z0-9][A-Za-z0-9._/+-]{0,120}$")
@@ -59,11 +59,12 @@ def say(line: str) -> None:
 
 class Builder:
     def __init__(self, requests: str, status: str, art: str, share: str, uv: str | None, node_sources: list[str],
-                 platform_tag: str | None = None, runner=subprocess.run):
+                 platform_tag: str | None = None, runner=subprocess.run, key: str | None = None):
         self.requests, self.status, self.art, self.share, self.uv = requests, status, art, share, uv
         self.node_sources = [s for s in node_sources if s]
         self.platform = platform_tag
         self.run = runner
+        self.key = key                     # the signing key of the copies GPU hosts make (docs/design/16)
         self.lock = threading.Lock()
 
     # ---- what the router may ask -------------------------------------------------------------------------------
@@ -102,7 +103,57 @@ class Builder:
 
     def policy(self) -> dict:
         return {"recipes": self.recipes(), "about": self.about(), "node_sources": self.node_sources,
-                "platform": self.platform, "alive": now(), "pid": os.getpid()}
+                "platform": self.platform, "signing_key": self.public_key(), "alive": now(), "pid": os.getpid()}
+
+    # ---- signatures (docs/design/16) ---------------------------------------------------------------------------
+    def ensure_key(self) -> None:
+        """An SSH key of its own, made once in its home: what it signs, GPU hosts accept as this farm's (setup pins
+        the public half). Neither the router nor anything else holds it."""
+        if not self.key or os.path.exists(self.key):
+            return
+        os.makedirs(os.path.dirname(self.key), mode=0o700, exist_ok=True)
+        p = subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", fetch.PRINCIPAL, "-f", self.key],
+                           capture_output=True, text=True)
+        if p.returncode != 0:                        # builds go on; GPU hosts cannot keep copies until it has one
+            say(f"no signing key: ssh-keygen said {(p.stderr or p.stdout).strip()!r} — copies on GPU hosts are off")
+            return
+        say(f"made the signing key {self.key}.pub")
+
+    def public_key(self) -> str | None:
+        try:
+            with open(self.key + ".pub") as f:
+                parts = f.read().split()
+            return f"{parts[0]} {parts[1]}" if len(parts) >= 2 else None
+        except (OSError, TypeError):
+            return None
+
+    def sign_store(self) -> int:
+        """Sign every published artifact not signed yet — new builds, and what the store held before signatures:
+        <ART>/signed/<kind>/<name>.json (the list of its files) and .json.sig."""
+        if not self.key or not os.path.exists(self.key):
+            return 0
+        n = 0
+        for kind in fetch.KINDS:
+            d = os.path.join(self.art, kind)
+            for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+                lst = os.path.join(self.art, "signed", kind, name + ".json")
+                if (not fetch.NAME.match(name) or not os.path.isfile(os.path.join(d, name, "READY"))
+                        or os.path.exists(lst + ".sig")):
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(lst), exist_ok=True)
+                    with open(lst + ".tmp", "wb") as f:
+                        f.write(fetch.file_list(os.path.join(d, name), kind, name))
+                    os.chmod(lst + ".tmp", 0o644)
+                    os.replace(lst + ".tmp", lst)
+                    fetch.sign(lst, self.key)
+                    os.chmod(lst + ".sig", 0o644)
+                    n += 1
+                except (OSError, fetch.Refused) as e:
+                    say(f"could not sign {kind}/{name}: {e}")
+        if n:
+            say(f"signed {n} artifact(s) for copies on GPU hosts")
+        return n
 
     # ---- the work ----------------------------------------------------------------------------------------------
     def pending(self, kind: str) -> list[str]:
@@ -203,6 +254,8 @@ class Builder:
             p = self.run(argv, stdout=subprocess.PIPE, stderr=log, cwd="/")
         if p.returncode != 0:
             raise Refused(f"the build failed (exit {p.returncode}) — its log says why")
+        with self.lock:
+            self.sign_store()                        # what it just published, before anyone asks for a copy
         try:
             template = json.loads(p.stdout or b"null")
         except ValueError:
@@ -226,6 +279,12 @@ class Builder:
 
     def serve(self, poll: float = 2.0) -> None:
         self.recover()
+        self.ensure_key()
+
+        def sign_old():
+            with self.lock:                          # what the store held before signatures; a build waits for it
+                self.sign_store()
+        threading.Thread(target=sign_old, daemon=True).start()
 
         def lane(kind: str):
             while True:
@@ -260,7 +319,8 @@ def main(argv=None) -> int:
         ap.error(f"{a.art} is not writable by this account (uid {os.getuid()}): the builder owns the artifact store")
     sources = [s.strip() for s in os.environ.get("COMFYFARM_BUILD_NODE_SOURCES", "").split(",") if s.strip()]
     plat = os.environ.get("COMFYFARM_BUILD_PLATFORM", default_platform() or "") or None
-    b = Builder(a.requests, a.status, a.art, a.share, a.uv if os.path.exists(a.uv) else None, sources, plat)
+    key = os.path.join(os.environ.get("HOME") or "/var/lib/comfyfarm-builder", "signing", "artifacts")
+    b = Builder(a.requests, a.status, a.art, a.share, a.uv if os.path.exists(a.uv) else None, sources, plat, key=key)
     print(f"comfyfarm builder: store {a.art}, recipes {', '.join(b.recipes()) or 'none'}, dashboard node packs "
           + (f"from {', '.join(sources)}" if sources else "off"), flush=True)
     b.serve()
