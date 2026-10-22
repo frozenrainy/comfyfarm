@@ -673,3 +673,25 @@ async def test_a_failed_copy_fails_the_step_and_changes_nothing(farm):
     w = next(x for x in (await api.get("/api/admin/workers", headers=H)).json() if x["id"] == hosts["w1"].wid)
     assert w["maintenance"] is False
     assert (await instances(api))["w1"]["profile"] == "p1"                 # still on its profile
+
+
+async def test_the_audit_log_comes_a_page_at_a_time(farm):
+    """A long audit log is paged; an older page stays put while new entries come in (upto)."""
+    api, r = farm["api"], farm["router"]
+    async with r.db.conn() as c:
+        await c.execute("DELETE FROM audit_log")
+        for i in range(45):
+            await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ('t', 'step', $1, '{}')", str(i))
+    first = (await api.get("/api/admin/audit/page?limit=20", headers=H)).json()
+    assert first["total"] == 45 and [e["target"] for e in first["items"]][:2] == ["44", "43"] and len(first["items"]) == 20
+    upto = first["upto"]
+    async with r.db.conn() as c:                                  # new entries while one reads page 2
+        for i in range(45, 50):
+            await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ('t', 'step', $1, '{}')", str(i))
+    p2 = (await api.get(f"/api/admin/audit/page?limit=20&offset=20&upto={upto}", headers=H)).json()
+    assert p2["total"] == 45 and [e["target"] for e in p2["items"]][0] == "24"     # where it was, not 5 further
+    p3 = (await api.get(f"/api/admin/audit/page?limit=20&offset=40&upto={upto}", headers=H)).json()
+    assert [e["target"] for e in p3["items"]] == ["4", "3", "2", "1", "0"]
+    live = (await api.get("/api/admin/audit/page?limit=20", headers=H)).json()     # the first page shows them
+    assert live["total"] == 50 and live["items"][0]["target"] == "49"
+    assert (await api.get("/api/admin/audit/page", headers={"X-ComfyFarm-User": "mallory"})).status_code == 403

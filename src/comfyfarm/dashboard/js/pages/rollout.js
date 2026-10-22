@@ -1,6 +1,6 @@
 // Rollout tab (docs/design/07): how each worker is launched (instance), what it should run (profile), and rolling a
 // profile out one worker at a time — drain, restart, wait for the badge, verify, revert that worker on failure.
-import { act, api, button, formDialog, h, namedRow, pill, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
+import { act, api, button, formDialog, h, namedRow, pill, qs, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
 import { checkDetail, checkHost } from "./setup.js";
 
 const ACTIVE = ["running", "aborting", "interrupted"];
@@ -30,6 +30,12 @@ export function rollout(root, { refresh }) {
   const profT = table([[t("Profile")], [t("Core")], [t("Venv")], [t("Nodes")], [t("Flags")], [t(t("Assigned")), "num"], [t("Note")], ["", "actions"]]);
   const packT = table([[t("Node pack")], [t("Repository")], [t("Commit")], [t("UI worker")], [t("Note")], ["", "actions"]]);
   const auditT = table([[t("When")], [t("Who")], [t("What")], [t("Target")], [t("Detail")]]);
+  // the audit log a page at a time; an older page stays put while new entries come in (upto: the newest when it left)
+  const AUDIT_PAGE = 20;
+  const audit = { offset: 0, upto: null, top: null };
+  const auditInfo = h("span", { class: "muted" });
+  const auditPrev = button(t("← Newer"), () => { audit.offset = Math.max(0, audit.offset - AUDIT_PAGE); if (!audit.offset) audit.upto = null; refresh(); });
+  const auditNext = button(t("Older →"), () => { audit.upto ??= audit.top; audit.offset += AUDIT_PAGE; refresh(); });
   const history = h("div");
 
   const startBtn = button(t("Start rollout"), async () => {
@@ -72,7 +78,7 @@ export function rollout(root, { refresh }) {
       h("p", { class: "muted small" }, t("A profile in use cannot be changed — copy it and roll the copy out.")), profT.el),
     h("section", {}, head(t("Node packs"), button(t("Build"), () => buildOnPlane(), { cls: "primary" }),
                           button(t("Add node pack"), () => addPack())), packInfo, packT.el),
-    h("section", {}, head(t("Audit log")), auditT.el));
+    h("section", {}, head(t("Audit log")), auditT.el, h("div", { class: "pager" }, auditPrev, auditInfo, auditNext)));
 
   // ---- instances ---------------------------------------------------------------------------------------------
   async function configure(i) {
@@ -495,7 +501,7 @@ export function rollout(root, { refresh }) {
     poll: 2000,
     async refresh() {
       const [i, p, r, a, b, np] = await Promise.all([api("GET", "/api/admin/instances"), api("GET", "/api/admin/profiles"),
-        api("GET", "/api/admin/rollouts?limit=10"), api("GET", "/api/admin/audit?limit=30"), api("GET", "/api/admin/builder"),
+        api("GET", "/api/admin/rollouts?limit=10"), api("GET", `/api/admin/audit/page?${qs({ offset: audit.offset, limit: AUDIT_PAGE, upto: audit.upto ?? "" })}`), api("GET", "/api/admin/builder"),
         api("GET", "/api/admin/node-packs")]);
       insts = i; profiles = p; builder = b; packs = np;
       renderBuilder(b);
@@ -509,7 +515,11 @@ export function rollout(root, { refresh }) {
       const sig = JSON.stringify(r.filter((x) => !ACTIVE.includes(x.status)).map((x) => [x.id, x.status]));
       if (history.dataset.v !== sig) { history.dataset.v = sig; renderHistory(r); }
       // the actions are fixed English words from the router: shown in the page's language (names stay as they are)
-      auditT.tbody.replaceChildren(...a.map((e) => h("tr", {}, h("td", { class: "nowrap" }, when(e.at)),
+      audit.top = a.upto;
+      setText(auditInfo, a.total ? t("{from}–{to} of {total}", { from: a.offset + 1, to: a.offset + a.items.length, total: a.total }) : "");
+      auditPrev.disabled = audit.offset === 0;
+      auditNext.disabled = a.offset + a.items.length >= a.total;
+      auditT.tbody.replaceChildren(...a.items.map((e) => h("tr", {}, h("td", { class: "nowrap" }, when(e.at)),
         h("td", { class: "nowrap" }, ["comfyfarm (first start)", "worker setup"].includes(e.actor) ? t(e.actor) : e.actor),
         h("td", { class: "nowrap" }, t(e.action)), h("td", { class: "nowrap" }, e.target ?? ""), h("td", { class: "muted small" }, Object.keys(e.detail || {}).length ? JSON.stringify(e.detail).slice(0, 160) : ""))));
     },

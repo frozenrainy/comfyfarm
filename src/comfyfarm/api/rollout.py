@@ -613,4 +613,18 @@ def make_router(ctx: Ctx) -> APIRouter:
         return [{"at": iso(r["at"]), "actor": r["actor"], "action": r["action"], "target": r["target"], "detail": r["detail"]}
                 for r in rows]
 
+    @api.get("/api/admin/audit/page")
+    async def audit_page(x_comfyfarm_user: str | None = Header(default=None), offset: int = 0, limit: int = 20,
+                         upto: int | None = None):
+        """A page of the audit log and how many entries there are. `upto`: the newest entry when the reader left the
+        first page — older pages stay put while new entries come in (the first page, without it, shows them)."""
+        ctx.admin(x_comfyfarm_user)
+        offset, limit = max(offset, 0), min(max(limit, 1), 200)
+        async with db.conn() as c:
+            top = upto if upto is not None else await c.fetchval("SELECT coalesce(max(id), 0) FROM audit_log")
+            total = await c.fetchval("SELECT count(*) FROM audit_log WHERE id <= $1", top)
+            rows = await c.fetch("SELECT * FROM audit_log WHERE id <= $1 ORDER BY id DESC OFFSET $2 LIMIT $3", top, offset, limit)
+        return {"items": [{"id": r["id"], "at": iso(r["at"]), "actor": r["actor"], "action": r["action"], "target": r["target"],
+                           "detail": r["detail"]} for r in rows], "total": total, "offset": offset, "upto": top}
+
     return api
