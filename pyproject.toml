@@ -1,6 +1,6 @@
 [project]
 name = "comfyfarm"
-version = "0.1.0.dev17"
+version = "0.1.0.dev18"
 description = "Job router for a farm of ComfyUI workers (CUDA and ROCm)"
 readme = "README.md"
 license = "Apache-2.0"
