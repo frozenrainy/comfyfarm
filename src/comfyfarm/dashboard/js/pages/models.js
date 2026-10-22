@@ -33,13 +33,20 @@ export function models(root, { refresh }) {
   let data = null, groups = [], server = [];
   const info = h("div");
   const uploadsEl = h("div"), inboxEl = h("div");
-  const modelsT = table([[t("Model")], [t("Source")], [t("Size")], [t("State")], [t("Groups")], [t("Note")], ["", "actions"]]);
+  // several models into or out of groups at once (field: an inbox of many files, each its own Groups dialog)
+  const selected = new Set();
+  const allBox = h("input", { type: "checkbox", title: t("Select all"), onchange: (e) => {
+    for (const m of data?.models || []) e.target.checked ? selected.add(m.id) : selected.delete(m.id);
+    syncRows(modelsT.tbody, data.models, (m) => m.id, buildModel, updateModel); renderBulk();
+  } });
+  const modelsT = table([[allBox, "pick"], [t("Model")], [t("Source")], [t("Size")], [t("State")], [t("Groups")], [t("Note")], ["", "actions"]]);
+  const bulkEl = h("div");
   const workersT = table([[t("Worker")], [t("Group")], [t("Copies")], [t("Copying")], [t("Problems")]]);
   const empty = h("p", { class: "empty muted" }, t("No models yet. Add Hugging Face links — the builder downloads them, GPU workers get copies."));
   root.append(
     h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Models")),
       button(t("Add models"), () => add(), { cls: "primary" }), button(t("Upload"), () => pick()),
-      button(t("Scan the inbox"), () => scan())), info, uploadsEl, inboxEl, modelsT.el, empty),
+      button(t("Scan the inbox"), () => scan())), info, uploadsEl, inboxEl, bulkEl, modelsT.el, empty),
     h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Copies on the GPU workers"))),
       h("p", { class: "muted small" }, t("Each worker gets the models its group uses, in the background — no restart. ComfyUI lists a new one when its model list is refreshed.")),
       workersT.el));
@@ -153,7 +160,32 @@ export function models(root, { refresh }) {
   // ---- the inbox ---------------------------------------------------------------------------------------------
   async function scan() {
     if (!data?.builder?.inbox) return toast(t("the builder has no model store (COMFYFARM_MODELS, docs/guide/models.md)"), true);
-    act(() => api("POST", "/api/admin/models/inbox"), t("The builder takes in what the inbox holds — the models appear below"), refresh);
+    const v = await formDialog(t("Scan the inbox"), [
+      { ...groupBoxes(groups.length === 1 ? [groups[0].id] : []), hint: t("every model this scan takes in goes into these groups; none checked: no groups yet") },
+    ], t("Scan"));
+    if (!v) return;
+    act(() => api("POST", "/api/admin/models/inbox", { groups: v.groups.map(Number) }),
+        t("The builder takes in what the inbox holds — the models appear below"), refresh);
+  }
+
+  function renderBulk() {
+    allBox.checked = !!data?.models?.length && data.models.every((m) => selected.has(m.id));
+    allBox.indeterminate = selected.size > 0 && !allBox.checked;
+    if (!selected.size) return bulkEl.replaceChildren();
+    const ids = () => [...selected];
+    const change = async (how) => {
+      const v = await formDialog(how === "add" ? t("Add {n} model(s) to groups", { n: selected.size }) : t("Take {n} model(s) out of groups", { n: selected.size }),
+        [{ ...groupBoxes([]), label: t("Groups"), hint: how === "add" ? t("their GPU workers get copies in the background")
+                                                                       : t("the workers of those groups keep the copies they have") }],
+        how === "add" ? t("Add") : t("Take out"));
+      if (!v || !v.groups.length) return;
+      act(() => api("POST", "/api/admin/models/groups", { models: ids(), [how]: v.groups.map(Number) }),
+          (r) => how === "add" ? t("{n} model(s) added to groups", { n: r.models }) : t("{n} model(s) taken out of groups", { n: r.models }),
+          refresh);
+    };
+    bulkEl.replaceChildren(h("div", { class: "bulk" }, h("strong", {}, t("{n} selected", { n: selected.size })),
+      button(t("Add to groups"), () => change("add"), { cls: "primary" }), button(t("Take out of groups"), () => change("remove")),
+      button(t("Clear selection"), () => { selected.clear(); syncRows(modelsT.tbody, data.models, (m) => m.id, buildModel, updateModel); renderBulk(); })));
   }
   let inboxSig = "";
   function renderInbox() {
@@ -182,7 +214,9 @@ export function models(root, { refresh }) {
   }
 
   function buildModel() {
-    const tr = namedRow(["model", "source", "size", "state", "groups", "note", "actions"], { actions: "actions", source: "muted small", size: "nowrap" });
+    const tr = namedRow(["pick", "model", "source", "size", "state", "groups", "note", "actions"], { pick: "pick", actions: "actions", source: "muted small", size: "nowrap" });
+    tr.pick = h("input", { type: "checkbox", onchange: (e) => { e.target.checked ? selected.add(tr._item.id) : selected.delete(tr._item.id); renderBulk(); } });
+    tr.c.pick.append(tr.pick);
     const retry = button(t("Retry"), () => act(() => api("POST", `/api/admin/models/${tr._item.id}/retry`), t("Asked again"), refresh));
     const remove = button(t("Remove"), () => {
       if (confirm(t("Remove {name} from the list? It never arrived: nothing is in the store or on a worker.", { name: tr._item.filename })))
@@ -193,6 +227,7 @@ export function models(root, { refresh }) {
     return tr;
   }
   function updateModel(tr, m) {
+    tr.pick.checked = selected.has(m.id);
     setText(tr.c.model, `${m.folder}/${m.filename}`);
     setText(tr.c.source, m.source === "upload" ? t("uploaded by {who}", { who: m.created_by || "?" })
       : m.source === "inbox" ? t("from the inbox") : `${m.repo} · ${m.path} @ ${m.revision ? m.revision.slice(0, 10) : m.ref}`);
@@ -242,7 +277,9 @@ export function models(root, { refresh }) {
           (b.formats ? t("Formats: {formats} — others can run code when ComfyUI loads them.", { formats: b.formats.join(", ") }) : t("All formats allowed (COMFYFARM_MODELS_ALLOW_PICKLE=1).")) + " "
           + (b.hf_token ? t("A Hugging Face token is set for gated models.") : t("No Hugging Face token: gated models fail until one is in the builder's hf_token file.")))]));
       }
+      for (const id of [...selected]) if (!data.models.some((m) => m.id === id)) selected.delete(id);      // gone since
       syncRows(modelsT.tbody, data.models, (m) => m.id, buildModel, updateModel);
+      renderBulk();
       empty.hidden = data.models.length > 0; modelsT.el.hidden = !data.models.length;
       syncRows(workersT.tbody, data.workers, (w) => w.id, buildWorker, updateWorker);
     },

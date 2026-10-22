@@ -153,6 +153,9 @@ pre.code { font: .78rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; back
 .callout { border: 1px solid var(--amber); color: var(--text); background: var(--panel); border-left-width: 4px; border-radius: 6px;
            padding: .6rem .9rem; margin: .6rem 0; }
 .callout strong { color: var(--amber); }
+.bulk { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .4rem 0; padding: .45rem .7rem;
+        border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+th.pick, td.pick { width: 1.6rem; text-align: center; }
 .s-match, .s-done, .s-succeeded { color: var(--ok); }
 .s-differs, .s-reverted, .s-interrupted, .s-aborting, .s-reverting, .s-fetching, .s-draining, .s-restarting, .s-starting, .s-verifying { color: var(--amber); }
 .s-revert_failed, .s-aborted { color: var(--bad); }

@@ -247,3 +247,29 @@ async def test_hosts_get_copies_of_their_groups_models_in_the_background(farm, m
 
 async def _none():
     return None
+
+
+async def test_several_models_go_into_groups_and_out_at_once(farm):
+    """Field (dev.18): an inbox of many files, each needing its own Groups dialog."""
+    r, c, builds, models = farm
+    g1, _ = await add_worker(r, "http://192.0.2.21:8188", group="video")
+    g2, _ = await add_worker(r, "http://192.0.2.22:8188", group="stills")
+    async with r.db.conn() as x:
+        ids = [await x.fetchval("INSERT INTO models(folder, filename, source, state, key) VALUES ('loras', $1, 'inbox', "
+                                "'ready', $2) RETURNING id", f"l{i}.safetensors", f"{i}" * 32) for i in range(1, 4)]
+        await x.execute("INSERT INTO group_models(group_id, model_id) VALUES ($1, $2)", g2, ids[0])
+    bulk = lambda body, who="admin": c.post("/api/admin/models/groups", json=body, headers={"X-ComfyFarm-User": who})  # noqa: E731
+    got = (await bulk({"models": ids, "add": [g1, g2]})).json()
+    assert got == {"models": 3, "added": 5, "removed": 0}                       # one of the six was there already
+    groups = lambda: {m["id"]: m["groups"] for m in listed}                     # noqa: E731
+    listed = (await c.get("/api/admin/models", headers=H)).json()["models"]
+    assert groups() == {i: sorted([g1, g2]) for i in ids}
+    assert (await bulk({"models": ids[:2], "remove": [g2]})).json()["removed"] == 2
+    listed = (await c.get("/api/admin/models", headers=H)).json()["models"]
+    assert groups() == {ids[0]: [g1], ids[1]: [g1], ids[2]: sorted([g1, g2])}
+    for body, code in (({"models": ids, "add": [g1], "remove": [g1]}, 400), ({"models": ids}, 400), ({"models": [], "add": [g1]}, 400),
+                       ({"models": ids, "add": [99999]}, 400), ({"models": ids + [99999], "add": [g1]}, 404)):
+        assert (await bulk(body)).status_code == code, body
+    assert (await bulk({"models": ids, "add": [g2]}, who="mallory")).status_code == 403
+    actions = [a["action"] for a in (await c.get("/api/admin/audit", headers=H)).json()]
+    assert actions.count("models' groups changed") == 2                         # one entry a change, not one a model

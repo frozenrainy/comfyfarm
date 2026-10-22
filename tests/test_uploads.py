@@ -283,3 +283,20 @@ def test_a_request_no_lane_takes_is_failed_not_left_waiting(tmp_path):
     failed = {p.name: json.loads(p.read_text())["error"] for p in (tmp_path / "status").glob("*.json")}
     assert failed == {"1792000000000-00000002.json": "unknown request kind 'mystery'",
                       "1792000000000-00000003.json": "unknown request kind 'None'"}
+
+
+async def test_the_inbox_puts_what_it_takes_in_into_the_groups_asked_for(farm):
+    c, r, models = farm["c"], farm["r"], farm["models"]
+    g1, _ = await add_worker(r, "http://192.0.2.21:8188", group="video")
+    for i in range(3):
+        p = models / "inbox" / "loras" / f"l{i}.safetensors"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(os.urandom(100))
+        os.chmod(p, 0o644)
+    assert (await c.post("/api/admin/models/inbox", json={"groups": [99999]}, headers=H)).status_code == 400
+    await c.post("/api/admin/models/inbox", json={"groups": [g1]}, headers=H)
+    run_requests(farm)
+    assert await r.models_register_inbox() is True
+    listed = (await c.get("/api/admin/models", headers=H)).json()
+    assert sorted((m["filename"], m["groups"]) for m in listed["models"]) == [(f"l{i}.safetensors", [g1]) for i in range(3)]
+    assert listed["inbox"]["groups"] == [g1]

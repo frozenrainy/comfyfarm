@@ -54,6 +54,16 @@ class ModelPatch(BaseModel):
     note: str | None = None
 
 
+class GroupsBulk(BaseModel):
+    models: list[int]
+    add: list[int] = []                 # groups the models are given
+    remove: list[int] = []              # groups they are taken out of (their copies stay, as for one)
+
+
+class InboxScan(BaseModel):
+    groups: list[int] = []              # given to every model this scan takes in
+
+
 def check_model(m: ModelIn, formats: list[str] | None) -> dict:
     """What an operator typed or pasted → repo, path, ref, folder, filename; refused here what the builder would."""
     repo, path, ref = m.repo, m.path, m.ref
@@ -209,6 +219,34 @@ def make_router(ctx: Ctx) -> APIRouter:
         wake.set()
         return {"saved": True}
 
+    @api.post("/api/admin/models/groups")
+    async def bulk_groups(body: GroupsBulk, x_comfyfarm_user: str | None = Header(default=None)):
+        """Several models into groups, or out of them, at once (field: an inbox of many files, each its own Groups
+        dialog). Taken out of a group, their copies stay on its workers, as for one."""
+        who = ctx.admin(x_comfyfarm_user)
+        if not body.models or len(body.models) > 1000:
+            raise HTTPException(400, "1 to 1000 models")
+        if not body.add and not body.remove:
+            raise HTTPException(400, "add or remove: at least one group")
+        if set(body.add) & set(body.remove):
+            raise HTTPException(400, "a group to add and remove at once")
+        async with db.conn() as c:
+            async with c.transaction():
+                await check_groups(c, sorted(set(body.add) | set(body.remove)))
+                found = [r["id"] for r in await c.fetch("SELECT id FROM models WHERE id = ANY($1) FOR UPDATE", body.models)]
+                if missing := sorted(set(body.models) - set(found)):
+                    raise HTTPException(404, f"no model {missing[0]}")
+                added = await c.fetchval(
+                    "WITH x AS (INSERT INTO group_models(group_id, model_id) SELECT g, m FROM unnest($1::bigint[]) g, "
+                    "unnest($2::bigint[]) m ON CONFLICT DO NOTHING RETURNING 1) SELECT count(*) FROM x", body.add, found)
+                removed = await c.fetchval(
+                    "WITH x AS (DELETE FROM group_models WHERE group_id = ANY($1) AND model_id = ANY($2) RETURNING 1) "
+                    "SELECT count(*) FROM x", body.remove, found)
+                await audit(c, who, "models' groups changed", f"{len(found)} model(s)", models=found, add=body.add,
+                            remove=body.remove)
+        wake.set()
+        return {"models": len(found), "added": added, "removed": removed}
+
     @api.post("/api/admin/models/{model_id}/retry")
     async def retry_model(model_id: int, x_comfyfarm_user: str | None = Header(default=None)):
         """A download that failed, asked for again: the builder goes on from what it had (a gated model whose terms
@@ -261,18 +299,21 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     # ---- the inbox (docs/design/18): files an operator copied into <model store>/inbox/<folder>/ --------------------
     @api.post("/api/admin/models/inbox")
-    async def scan_inbox(x_comfyfarm_user: str | None = Header(default=None)):
-        """Ask the builder to take in what the inbox holds; the models it took appear in the list (no groups yet)."""
+    async def scan_inbox(body: InboxScan | None = None, x_comfyfarm_user: str | None = Header(default=None)):
+        """Ask the builder to take in what the inbox holds; the models it took appear in the list, in the groups
+        asked for here (none: no groups yet)."""
         who = ctx.admin(x_comfyfarm_user)
         need_builder()
+        groups = sorted(set((body or InboxScan()).groups))
         async with db.conn() as c:
+            await check_groups(c, groups)
             cur = await c.fetchval("SELECT value FROM settings WHERE key = $1", INBOX)
             if cur and (st := builder_status(s.builds_dir, cur.get("request", ""))) and st.get("state") in ("queued", "running"):
                 raise HTTPException(409, "the builder is scanning the inbox already")
             rid = write_builder_request(s.builds_dir, {"kind": "model-inbox", "by": who})
             await c.execute("INSERT INTO settings(key, value, updated_by) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE "
                             "SET value = excluded.value, updated_by = excluded.updated_by, updated_at = now()",
-                            INBOX, {"request": rid, "by": who, "registered": False}, who)
+                            INBOX, {"request": rid, "by": who, "registered": False, "groups": groups}, who)
             await audit(c, who, "model inbox scanned", None, request=rid)
         wake.set()
         return {"id": rid}
@@ -282,7 +323,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         if not cur or not s.builds_dir:
             return None
         st = builder_status(s.builds_dir, cur.get("request", "")) or {"state": "failed", "error": "the builder lost the scan"}
-        return {"request": cur.get("request"), "state": st.get("state"), "error": st.get("error"),
+        return {"request": cur.get("request"), "state": st.get("state"), "error": st.get("error"), "groups": cur.get("groups") or [],
                 "results": st.get("results") or [], "model": st.get("model"), "finished": st.get("finished")}
 
     async def register_inbox() -> bool:
@@ -296,13 +337,17 @@ def make_router(ctx: Ctx) -> APIRouter:
                 return False
             got = False
             async with c.transaction():
+                groups = [g for g in cur.get("groups") or [] if isinstance(g, int)]
                 for x in st.get("results") or []:
                     if x.get("key") and not x.get("error"):
                         got = True
-                        await c.execute(
+                        mid = await c.fetchval(
                             "INSERT INTO models(folder, filename, source, size, sha256, key, state, bytes, created_by) "
-                            "VALUES ($1,$2,'inbox',$3,$4,$5,'ready',$3,$6) ON CONFLICT (folder, filename) DO NOTHING",
-                            x["folder"], x["filename"], x.get("size"), x.get("sha256"), x["key"], cur.get("by"))
+                            "VALUES ($1,$2,'inbox',$3,$4,$5,'ready',$3,$6) ON CONFLICT (folder, filename) DO NOTHING "
+                            "RETURNING id", x["folder"], x["filename"], x.get("size"), x.get("sha256"), x["key"], cur.get("by"))
+                        if mid is not None and groups:        # the groups asked for at the scan (a group gone since: none)
+                            await c.execute("INSERT INTO group_models(group_id, model_id) SELECT g.id, $1 FROM worker_groups g "
+                                            "WHERE g.id = ANY($2) ON CONFLICT DO NOTHING", mid, groups)
                 await c.execute("UPDATE settings SET value = value || jsonb_build_object('registered', true) WHERE key = $1",
                                 INBOX)
             return got
