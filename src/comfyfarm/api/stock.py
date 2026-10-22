@@ -10,6 +10,7 @@ import random
 import time
 import uuid
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 
@@ -265,7 +266,9 @@ def make_router(ctx) -> APIRouter:
 
     async def fetch_object_info(w) -> tuple[bytes, int] | None:
         try:
-            r = await router.adapter.http.get(f"{w['base_url']}/object_info", timeout=90)
+            # multi-MB, slow to make: 90 s to read — but a worker that is away is known in seconds (a read after a copy
+            # or a rollout asks one the health monitor may not have seen go)
+            r = await router.adapter.http.get(f"{w['base_url']}/object_info", timeout=httpx.Timeout(90, connect=5))
             if r.status_code != 200:
                 return None
             return r.content, len(r.json())

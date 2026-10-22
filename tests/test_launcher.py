@@ -431,3 +431,21 @@ def test_the_farm_model_store_is_the_hosts_own_setting(tmp_path):
     # a store users can write into would let an upload be loaded as a model
     assert rd.path_problems(dict(p, model_store=p["input"]), False) == ["paths.input overlaps paths.model_store"]
     assert rd.path_problems(dict(p, model_store=store), False) == []
+
+
+def test_the_model_folders_a_render_may_list():
+    """Hosts set up since 0.1.0-dev.19 take the farm's folders (its own come and go), not just the legacy list —
+    safe names only, each its own directory under this host's model store."""
+    nodes = ["/l/nodes/farm-gpu-1"]
+    ok = launcher.nodes_yaml(nodes, "/srv/ms", launcher.MODEL_FOLDERS + ("ipadapter",))
+    assert launcher.yaml_ok(ok, nodes, "/srv/ms")
+    assert launcher.yaml_ok(launcher.nodes_yaml(nodes, "/srv/ms"), nodes, "/srv/ms")           # the legacy list too
+    assert launcher.yaml_ok(launcher.nodes_yaml(nodes), nodes, None)
+    head = launcher.nodes_yaml(nodes) + "comfyfarm_models:\n  base_path: /srv/ms\n"
+    for bad in (launcher.nodes_yaml(nodes, "/srv/elsewhere", ("loras",)),                      # not this host's store
+                head + "  loras: ../../etc\n", head + "  ..: ..\n", head + "  custom_nodes: custom_nodes\n",
+                head + "  loras: loras\n  loras: loras\n", head + "  loras: vae\n", head,
+                head + "  loras: loras\n" + "extra: 1\n", launcher.nodes_yaml(nodes, "/srv/ms", ("loras",)) + "\n",
+                launcher.nodes_yaml(["/l/nodes/other"], "/srv/ms", ("loras",))):
+        assert not launcher.yaml_ok(bad, nodes, "/srv/ms"), bad
+    assert not launcher.yaml_ok(launcher.nodes_yaml(nodes, "/srv/ms"), nodes, None)          # no store here

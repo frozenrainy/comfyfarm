@@ -422,3 +422,71 @@ def test_the_fetch_service_copies_a_model_the_host_asked_for(tmp_path, keys):
         fetch.parse("model/../../etc/passwd")
     with pytest.raises(fetch.Refused, match="not an artifact name"):
         fetch.parse("model/tiny.safetensors")                                       # a key, never a file name
+
+
+def test_a_host_drops_the_copies_the_farm_no_longer_gives_it(tmp_path, keys):
+    """docs/design/17 phase 2: a model out of the worker's group, or out of the farm — the store account removes the
+    file its own entry describes and the entry; another revision at the place, and the site's files, stay."""
+    key_file, signers = keys
+    data = os.urandom(20_000)
+    srv, key, _ = model_router(tmp_path, key_file, data, folder="frame_interpolation", filename="rife49.safetensors")
+    models = tmp_path / "host-models"
+    try:
+        fetch.get_model(srv.url, str(models), key, str(signers), out=io.StringIO())     # a folder ComfyUI added lately
+    finally:
+        srv.stop()
+    (models / "loras").mkdir()
+    (models / "loras" / "site-own.safetensors").write_bytes(b"not the farm's")
+    store = tmp_path / "store"
+    requests, status_dir = store / "requests", store / "status"
+    requests.mkdir(parents=True); status_dir.mkdir()
+    cfg = store / "store.env"
+    cfg.write_text(f"COMFYFARM_STORE_ROUTER=http://router\nCOMFYFARM_STORE_ART={tmp_path / 'art'}\nCOMFYFARM_STORE_MODELS={models}\n")
+    assert fetch.forget(f"model/{key}", str(requests)) == f"dropping model/{key}"
+    assert fetch.forget(f"model/{key}", str(requests)) == "already asked to drop"
+    with pytest.raises(fetch.Refused, match="only model copies"):
+        fetch.forget("venv/v-1", str(requests))
+
+    class Child:                                       # `fetch.py drop` as the store account, here in-process
+        def __init__(self, argv, **kw):
+            assert argv[-4:] == ["drop", str(models), key][-4:] or argv[-3:] == ["drop", str(models), key]
+            fetch.drop(argv[-2], argv[-1])
+            self.stdout, self.stderr = io.StringIO(""), io.StringIO("")
+
+        def wait(self):
+            return 0
+    assert fetch.run(str(requests), str(status_dir), str(cfg), popen=Child) == [f"drop/{key}"]
+    assert not (models / "frame_interpolation" / "rife49.safetensors").exists()
+    assert not (models / "signed" / "model" / f"{key}.json").exists() and not fetch.model_present(str(models), key)
+    assert (models / "loras" / "site-own.safetensors").exists() and os.listdir(requests) == []
+    # an entry whose file was replaced by another revision: the entry goes, the other file stays
+    entry = fetch.model_entry("vae", "ae.safetensors", 3, "a" * 64)
+    k2 = json.loads(entry)["key"]
+    (models / "vae").mkdir()
+    (models / "vae" / "ae.safetensors").write_bytes(b"another revision")
+    (models / "signed" / "model" / f"{k2}.json").write_bytes(entry)
+    assert fetch.drop(str(models), k2) is False
+    assert (models / "vae" / "ae.safetensors").exists() and not (models / "signed" / "model" / f"{k2}.json").exists()
+
+
+async def test_older_agents_cannot_drop_copies_and_say_so(monkeypatch, tmp_path):
+    from comfyfarm import agent
+    from comfyfarm.rollout import backends as be
+    (tmp_path / "k").write_text("key")
+    b = be.make("ssh", {"host": "192.0.2.21", "user": "comfyfarm", "key": "k"}, keys_dir=str(tmp_path))
+    answers = iter([(2, "refused: unknown command 'fetch-forget'"), (0, "dropping model/" + "a" * 32)])
+
+    async def run(argv, timeout=30.0):
+        assert "fetch-forget" in " ".join(argv)
+        return next(answers)
+    monkeypatch.setattr(be, "_run", run)
+    assert await b.forget(["model/" + "a" * 32]) is None
+    assert (await b.forget(["model/" + "a" * 32]))["requested"]
+    with pytest.raises(be.BackendError, match="bad model names"):
+        await b.forget(["venv/v-1"])
+    store = tmp_path / "store"
+    (store / "requests").mkdir(parents=True)
+    monkeypatch.setattr(fetch, "REQUESTS", str(store / "requests"))
+    assert agent.do("fetch-forget", "model/" + "b" * 32) == (0, "dropping model/" + "b" * 32)
+    with pytest.raises(agent.Refused):
+        agent.do("fetch-forget", "model/../../etc")

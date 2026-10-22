@@ -1,6 +1,8 @@
 # 17 — Models from the dashboard: a model store on the control plane, copies on the GPU hosts
 
-Status: **approved** (2026-10-21) — phase 1 implemented (0.1.0-dev.17; operators: [models.md](../guide/models.md)).
+Status: **approved** (2026-10-21) — phase 1 implemented (0.1.0-dev.17); phase 2: files added by hand (design 18,
+0.1.0-dev.18), removing models and the farm's own folders (0.1.0-dev.19); free space before copying not yet
+(operators: [models.md](../guide/models.md)).
 
 ## Why
 
@@ -51,6 +53,13 @@ model is added as it comes out (tens of GB each with its text encoders).
    status in the dashboard, resumable transfers, the pickle rule.
 2. Removing models (from groups, from the store), free-space checks before copying, files added by hand to the store
    (a closed network: copy them in, the builder hashes and signs them).
+   - Removing: a model out of a group is dropped by that group's workers; one deleted from the farm is taken out of
+     the store by the builder and dropped by every worker (fetch.py `drop`, through the drop box as the store
+     account). The router keeps a deleted model's key, so hosts that were away when it went still drop their copy.
+   - Folders: ComfyUI's own single-file folders and the farm's own. A host's launcher took a fixed list of folders
+     before 0.1.0-dev.19; since then it takes any safe names under its own model store. The router records per
+     instance which folders it lists (`instances.model_folders`; none means the legacy list), so a farm with both
+     kinds of hosts keeps working.
 
 ## Not
 

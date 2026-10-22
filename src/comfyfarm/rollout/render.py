@@ -57,7 +57,10 @@ def build(profile: dict, inst: dict) -> dict:
     render = {
         "contract": CONTRACT, "instance": name, "profile": profile["name"], "role": inst["role"],
         "argv": argv, "cwd": core_dst, "env": dict(profile.get("env") or {}), "sync": sync,
-        "files": {yaml_path: launcher.nodes_yaml(node_dirs, paths.get("model_store"))}, "require": require,
+        # the instance's model folders: none recorded = set up before 0.1.0-dev.19, its launcher takes the legacy list only
+        "files": {yaml_path: launcher.nodes_yaml(node_dirs, paths.get("model_store"),
+                                                 tuple(inst.get("model_folders") or launcher.LEGACY_MODEL_FOLDERS))},
+        "require": require,
         "mkdirs": [run_dir, paths["input"], paths["output"], paths["user"], paths["temp"]],
     }
     if win:

@@ -64,7 +64,31 @@ class InboxScan(BaseModel):
     groups: list[int] = []              # given to every model this scan takes in
 
 
-def check_model(m: ModelIn, formats: list[str] | None) -> dict:
+class FolderIn(BaseModel):
+    name: str
+
+
+FOLDERS = "model_folders"               # settings key: the farm's own model folders (a custom node's), {"custom": [...]}
+
+
+async def model_folders(c) -> list[str]:
+    """ComfyUI's model folders and the farm's own: what models may go in, and what hosts set up since 0.1.0-dev.19
+    list in ComfyUI (instances.model_folders)."""
+    v = await c.fetchval("SELECT value FROM settings WHERE key = $1", FOLDERS) or {}
+    return list(fetch.MODEL_FOLDERS) + [f for f in v.get("custom") or [] if fetch.folder_ok(f) and f not in fetch.MODEL_FOLDERS]
+
+
+async def set_custom_folders(c, custom: list[str], who: str) -> None:
+    """The farm's own folders, and with them every instance that lists folders (its render changes: ComfyUI on it sees
+    a new folder after its next start)."""
+    await c.execute("INSERT INTO settings(key, value, updated_by) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET "
+                    "value = excluded.value, updated_by = excluded.updated_by, updated_at = now()",
+                    FOLDERS, {"custom": custom}, who)
+    await c.execute("UPDATE instances SET model_folders = $1, updated_at = now() WHERE model_folders IS NOT NULL",
+                    list(fetch.MODEL_FOLDERS) + custom)
+
+
+def check_model(m: ModelIn, formats: list[str] | None, folders=fetch.MODEL_FOLDERS) -> dict:
     """What an operator typed or pasted → repo, path, ref, folder, filename; refused here what the builder would."""
     repo, path, ref = m.repo, m.path, m.ref
     if m.url:
@@ -80,8 +104,8 @@ def check_model(m: ModelIn, formats: list[str] | None) -> dict:
         raise ValueError(f"file: a path in the repository, not {path!r}")
     if not REF.match(ref):
         raise ValueError(f"revision: a branch, tag or commit, not {ref!r}")
-    if m.folder not in fetch.MODEL_FOLDERS:
-        raise ValueError(f"folder: one of {', '.join(fetch.MODEL_FOLDERS)}")
+    if m.folder not in folders:
+        raise ValueError(f"folder: one of {', '.join(folders)} (System → Models → Folders adds one)")
     filename = (m.filename or "").strip() or path.rsplit("/", 1)[-1]
     if not fetch.MODEL_FILE.match(filename):
         raise ValueError(f"file name: letters, digits, spaces and . _ + ( ) - — not {filename!r}")
@@ -134,10 +158,11 @@ def make_router(ctx: Ctx) -> APIRouter:
         ctx.admin(x_comfyfarm_user)
         p = policy() if s.builds_dir else None
         async with db.conn() as c:
-            rows = await c.fetch("SELECT * FROM models ORDER BY folder, filename")
+            rows = await c.fetch("SELECT * FROM models WHERE state <> 'deleted' ORDER BY folder, filename")
             links = await c.fetch("SELECT model_id, group_id FROM group_models")
+            folders = await model_folders(c)
             workers = await c.fetch("SELECT w.id, w.name, w.group_id, w.state, "
-                                    "coalesce(i.paths->>'model_store', '') <> '' AS copies "
+                                    "coalesce(i.paths->>'model_store', '') <> '' AS copies, i.model_folders IS NULL AS legacy "
                                     "FROM workers w LEFT JOIN instances i ON i.worker_id = w.id "
                                     "WHERE w.kind = 'gpu' AND w.deleted_at IS NULL ORDER BY w.name")
         by_model: dict[int, list[int]] = {}
@@ -149,10 +174,47 @@ def make_router(ctx: Ctx) -> APIRouter:
                 "builder": {"configured": bool(s.builds_dir), "up": bool(p and p["up"]), "models": bool(p and p.get("models")),
                             "inbox": (p or {}).get("inbox"), "archives": bool(p and p.get("node_archives")),
                             "formats": (p or {}).get("model_formats"), "hf_token": bool(p and p.get("hf_token")),
-                            "store": bool(s.models_dir), "folders": list(fetch.MODEL_FOLDERS)},
+                            "store": bool(s.models_dir), "folders": folders,
+                            "custom_folders": [f for f in folders if f not in fetch.MODEL_FOLDERS]},
                 "models": [row_out(r, sorted(by_model.get(r["id"], []))) for r in rows],
                 "workers": [{"id": w["id"], "name": w["name"], "group_id": w["group_id"], "state": w["state"],
-                             "copies": bool(w["copies"]), **copies.get(w["id"], {})} for w in workers]}
+                             "copies": bool(w["copies"]), "legacy": bool(w["copies"] and w["legacy"]),
+                             **copies.get(w["id"], {})} for w in workers]}
+
+    # ---- the farm's own model folders ----------------------------------------------------------------------------
+    @api.post("/api/admin/models/folders")
+    async def add_folder(body: FolderIn, x_comfyfarm_user: str | None = Header(default=None)):
+        """A folder a custom node looks its models up in (folder_paths): models may go in it, and ComfyUI on hosts set
+        up since 0.1.0-dev.19 lists it after its next start."""
+        who = ctx.admin(x_comfyfarm_user)
+        name = body.name.strip()
+        if not fetch.folder_ok(name):
+            raise HTTPException(400, "folder: lowercase letters, digits and _ . - (as the custom node names it); not "
+                                     + ", ".join(fetch.RESERVED_FOLDERS))
+        async with db.conn() as c:
+            async with c.transaction():
+                folders = await model_folders(c)
+                if name in folders:
+                    raise HTTPException(409, f"{name} is a folder already")
+                await set_custom_folders(c, [f for f in folders if f not in fetch.MODEL_FOLDERS] + [name], who)
+                await audit(c, who, "model folder added", name)
+        return {"folders": folders + [name]}
+
+    @api.delete("/api/admin/models/folders/{name}")
+    async def remove_folder(name: str, x_comfyfarm_user: str | None = Header(default=None)):
+        who = ctx.admin(x_comfyfarm_user)
+        async with db.conn() as c:
+            async with c.transaction():
+                folders = await model_folders(c)
+                if name in fetch.MODEL_FOLDERS:
+                    raise HTTPException(409, f"{name} is one of ComfyUI's own folders")
+                if name not in folders:
+                    raise HTTPException(404, "no such folder")
+                if n := await c.fetchval("SELECT count(*) FROM models WHERE folder = $1 AND state <> 'deleted'", name):
+                    raise HTTPException(409, f"{n} model(s) are in {name} — delete them first")
+                await set_custom_folders(c, [f for f in folders if f not in fetch.MODEL_FOLDERS and f != name], who)
+                await audit(c, who, "model folder removed", name)
+        return {"deleted": True}
 
     @api.post("/api/admin/models")
     async def add_models(body: ModelsIn, x_comfyfarm_user: str | None = Header(default=None)):
@@ -162,9 +224,11 @@ def make_router(ctx: Ctx) -> APIRouter:
         if not body.models or len(body.models) > MAX_BATCH:
             raise HTTPException(400, f"1 to {MAX_BATCH} models at a time")
         items, seen = [], set()
+        async with db.conn() as c:
+            folders = await model_folders(c)
         for i, m in enumerate(body.models, 1):
             try:
-                it = check_model(m, p.get("model_formats"))
+                it = check_model(m, p.get("model_formats"), folders)
             except ValueError as e:
                 raise HTTPException(400, f"line {i}: {e}" if len(body.models) > 1 else str(e))
             if (it["folder"], it["filename"]) in seen:
@@ -198,14 +262,16 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.patch("/api/admin/models/{model_id}")
     async def patch_model(model_id: int, body: ModelPatch, x_comfyfarm_user: str | None = Header(default=None)):
-        """Which groups use it. Taken out of a group, its copies stay on that group's workers (removing them comes
-        with removing models, docs/design/17 phase 2); added to one, its workers get a copy in the background."""
+        """Which groups use it. Added to one, its workers get a copy in the background; taken out of one, that
+        group's workers drop theirs (docs/design/17 phase 2 — hosts set up since 0.1.0-dev.19)."""
         who = ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
             async with c.transaction():
-                r = await c.fetchrow("SELECT folder, filename FROM models WHERE id = $1 FOR UPDATE", model_id)
-                if r is None:
+                r = await c.fetchrow("SELECT folder, filename, state FROM models WHERE id = $1 FOR UPDATE", model_id)
+                if r is None or r["state"] == "deleted":
                     raise HTTPException(404, "no such model")
+                if body.groups and r["state"] == "deleting":
+                    raise HTTPException(409, "it is being deleted from the farm")
                 if body.groups is not None:
                     await check_groups(c, body.groups)
                     await c.execute("DELETE FROM group_models WHERE model_id = $1 AND NOT (group_id = ANY($2))", model_id, body.groups)
@@ -222,7 +288,7 @@ def make_router(ctx: Ctx) -> APIRouter:
     @api.post("/api/admin/models/groups")
     async def bulk_groups(body: GroupsBulk, x_comfyfarm_user: str | None = Header(default=None)):
         """Several models into groups, or out of them, at once (field: an inbox of many files, each its own Groups
-        dialog). Taken out of a group, their copies stay on its workers, as for one."""
+        dialog). Taken out of a group, its workers drop their copies, as for one."""
         who = ctx.admin(x_comfyfarm_user)
         if not body.models or len(body.models) > 1000:
             raise HTTPException(400, "1 to 1000 models")
@@ -233,7 +299,8 @@ def make_router(ctx: Ctx) -> APIRouter:
         async with db.conn() as c:
             async with c.transaction():
                 await check_groups(c, sorted(set(body.add) | set(body.remove)))
-                found = [r["id"] for r in await c.fetch("SELECT id FROM models WHERE id = ANY($1) FOR UPDATE", body.models)]
+                found = [r["id"] for r in await c.fetch("SELECT id FROM models WHERE id = ANY($1) AND state NOT IN "
+                                                        "('deleting', 'deleted') FOR UPDATE", body.models)]
                 if missing := sorted(set(body.models) - set(found)):
                     raise HTTPException(404, f"no model {missing[0]}")
                 added = await c.fetchval(
@@ -277,17 +344,27 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.delete("/api/admin/models/{model_id}")
     async def delete_model(model_id: int, x_comfyfarm_user: str | None = Header(default=None)):
-        """Only one that never arrived (a typo, a gated model): nothing of it is in the store or on a worker. One in
-        the store stays until removing models comes (docs/design/17 phase 2)."""
+        """One that never arrived (a typo, a gated model) goes from the list. One in the store is deleted from the
+        farm (docs/design/17 phase 2): out of its groups, the builder takes it out of the store, and the hosts drop
+        their copies. The site's own models directory is never touched."""
         who = ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
             async with c.transaction():
-                r = await c.fetchrow("SELECT folder, filename, state, upload FROM models WHERE id = $1 FOR UPDATE", model_id)
-                if r is None:
+                r = await c.fetchrow("SELECT folder, filename, state, upload, key FROM models WHERE id = $1 FOR UPDATE",
+                                     model_id)
+                if r is None or r["state"] == "deleted":
                     raise HTTPException(404, "no such model")
-                if r["state"] != "failed":
-                    raise HTTPException(409, "only a model that failed can be removed for now — one in the store stays "
-                                             "(take it out of its groups to stop new copies)")
+                if r["state"] in ("queued", "downloading"):
+                    raise HTTPException(409, f"it is {r['state']} — delete it once it is in the store or has failed")
+                if r["state"] in ("ready", "deleting"):
+                    need_builder()
+                    rid = write_builder_request(s.builds_dir, {"kind": "model-remove", "key": r["key"], "by": who})
+                    await c.execute("DELETE FROM group_models WHERE model_id = $1", model_id)
+                    await c.execute("UPDATE models SET state = 'deleting', request = $2, error = NULL WHERE id = $1",
+                                    model_id, rid)
+                    await audit(c, who, "model deleted", f"{r['folder']}/{r['filename']}", key=r["key"], request=rid)
+                    wake.set()
+                    return {"deleting": True}
                 await c.execute("DELETE FROM models WHERE id = $1", model_id)
                 await audit(c, who, "model removed", f"{r['folder']}/{r['filename']}")
         if r["upload"] and s.models_dir:                     # its upload, kept for a Retry until now
@@ -338,13 +415,18 @@ def make_router(ctx: Ctx) -> APIRouter:
             got = False
             async with c.transaction():
                 groups = [g for g in cur.get("groups") or [] if isinstance(g, int)]
+                folders = await model_folders(c)              # a folder an operator made in the inbox: the farm's own now
+                new = sorted({x["folder"] for x in st.get("results") or [] if x.get("key") and not x.get("error")
+                              and x.get("folder") not in folders and fetch.folder_ok(x.get("folder"))})
+                if new:
+                    await set_custom_folders(c, [f for f in folders if f not in fetch.MODEL_FOLDERS] + new, cur.get("by") or "?")
                 for x in st.get("results") or []:
                     if x.get("key") and not x.get("error"):
                         got = True
                         mid = await c.fetchval(
                             "INSERT INTO models(folder, filename, source, size, sha256, key, state, bytes, created_by) "
-                            "VALUES ($1,$2,'inbox',$3,$4,$5,'ready',$3,$6) ON CONFLICT (folder, filename) DO NOTHING "
-                            "RETURNING id", x["folder"], x["filename"], x.get("size"), x.get("sha256"), x["key"], cur.get("by"))
+                            "VALUES ($1,$2,'inbox',$3,$4,$5,'ready',$3,$6) ON CONFLICT (folder, filename) "
+                            "WHERE state <> 'deleted' DO NOTHING RETURNING id", x["folder"], x["filename"], x.get("size"), x.get("sha256"), x["key"], cur.get("by"))
                         if mid is not None and groups:        # the groups asked for at the scan (a group gone since: none)
                             await c.execute("INSERT INTO group_models(group_id, model_id) SELECT g.id, $1 FROM worker_groups g "
                                             "WHERE g.id = ANY($2) ON CONFLICT DO NOTHING", mid, groups)
@@ -388,15 +470,26 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     # ---- the background: builder states, copies on hosts ---------------------------------------------------------
     async def follow_builder() -> bool:
-        """Queued and downloading models: what the builder wrote about their requests. True when one became ready."""
+        """Queued and downloading models: what the builder wrote about their requests. True when one became ready.
+        Deleting ones: deleted once the builder took them out of the store (hosts drop their copies: follow_copies)."""
         if not s.builds_dir:
             return False
         ready = False
         async with db.conn() as c:
-            rows = await c.fetch("SELECT id, request, state FROM models WHERE state IN ('queued', 'downloading')")
+            rows = await c.fetch("SELECT id, request, state FROM models WHERE state IN ('queued', 'downloading', 'deleting')")
         for r in rows:
             st = builder_status(s.builds_dir, r["request"]) if r["request"] else None
             async with db.conn() as c:
+                if r["state"] == "deleting":
+                    if st and st.get("state") == "done":
+                        await c.execute("UPDATE models SET state = 'deleted', deleted_at = now(), error = NULL "
+                                        "WHERE id = $1 AND request = $2", r["id"], r["request"])
+                        ready = True                   # the hosts are told now
+                    elif st is None or st.get("state") == "failed":
+                        await c.execute("UPDATE models SET error = $2 WHERE id = $1 AND request = $3", r["id"],
+                                        str((st or {}).get("error") or "the builder has no record of it — Delete again")[:2000],
+                                        r["request"])
+                    continue
                 if st is None:
                     await c.execute("UPDATE models SET state = 'failed', error = $2 WHERE id = $1 AND state = $3", r["id"],
                                     "the builder has no record of this download (its status was deleted?) — Retry", r["state"])
@@ -414,19 +507,31 @@ def make_router(ctx: Ctx) -> APIRouter:
                                     str(st.get("error") or "failed")[:2000], r["request"])
         return ready
 
-    async def copies_of(w, names: list[str]) -> dict:
-        """One host: how its copies stand; ask for the missing ones, and failed ones again now and then."""
+    async def copies_of(w, names: list[str], unwanted: list[str] = ()) -> dict:
+        """One host: how its copies stand; ask for the missing ones, and failed ones again now and then; drop the ones
+        its group no longer uses or the farm deleted (`unwanted`: every other model the farm ever had)."""
         backend = be.make(w["restart_backend"], w["restart_config"], keys_dir=s.keys_dir)
         out: dict = {"wanted": len(names), "at": time.time()}
-        if not names:
+        if not names and not unwanted:
             return out | {"present": 0}
         try:
-            st = await backend.fetch(names, state=True)
+            got = await backend.fetch(sorted(set(names) | set(unwanted)), state=True)
         except (be.BackendError, OSError) as e:
             return out | {"error": str(e)[-300:]}
-        if st is None:
+        if got is None:
             return out | {"error": "its agent keeps no copies (older worker tools, or another restart backend) — "
                                    "set the worker up again to have them"}
+        st = {n: v for n, v in got.items() if n in names}
+        stale = [n for n in unwanted if (got.get(n) or {}).get("state") == "present"]
+        if stale:
+            try:
+                if await backend.forget(stale) is None:
+                    out["error"] = (f"{len(stale)} copy(ies) of models it no longer uses stay — its worker tools predate "
+                                    "removing them: set the worker up again")
+                else:
+                    out["removing"] = len(stale)
+            except (be.BackendError, OSError) as e:
+                out["error"] = str(e)[-300:]
         now = time.monotonic()
         ask = [n for n, v in st.items() if v.get("state") == "missing"
                or (v.get("state") == "failed" and now - asked.get((w["id"], n), 0) > RETRY_FAILED)]
@@ -454,6 +559,7 @@ def make_router(ctx: Ctx) -> APIRouter:
             for r in await c.fetch("SELECT gm.group_id, m.key FROM group_models gm JOIN models m ON m.id = gm.model_id "
                                    "WHERE m.state = 'ready' AND m.key IS NOT NULL"):
                 want.setdefault(r["group_id"], []).append(f"model/{r['key']}")
+            known = [f"model/{r['key']}" for r in await c.fetch("SELECT DISTINCT key FROM models WHERE key IS NOT NULL")]
         for gone in set(copies) - {w["id"] for w in ws}:
             copies.pop(gone, None)
         before = {wid: x.get("present") for wid, x in copies.items()}
@@ -461,12 +567,13 @@ def make_router(ctx: Ctx) -> APIRouter:
 
         async def one(w):
             async with limit:
-                copies[w["id"]] = await copies_of(w, sorted(want.get(w["group_id"], [])))
+                mine = sorted(want.get(w["group_id"], []))
+                copies[w["id"]] = await copies_of(w, mine, [k for k in known if k not in set(mine)])
         await asyncio.gather(*(one(w) for w in ws))
-        # a copy arrived: the editor's node definitions (its model lists) come from the group's snapshot, read again
-        # from a worker that has the most copies — else the new model would show only after a rollout
+        # a copy arrived or went: the editor's node definitions (its model lists) come from the group's snapshot, read
+        # again from a worker that has the most copies — else the change would show only after a rollout
         grown = {w["group_id"] for w in ws if before.get(w["id"]) is not None
-                 and (copies[w["id"]].get("present") or 0) > before[w["id"]]}
+                 and (copies[w["id"]].get("present") or 0) != before[w["id"]]}
         refresh = getattr(router, "refresh_snapshot", None)
         for gid in sorted(grown) if refresh else []:
             mine = [w["id"] for w in ws if w["group_id"] == gid]

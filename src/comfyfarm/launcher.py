@@ -86,18 +86,54 @@ WRITABLE = ("--input-directory", "--output-directory", "--temp-directory", "--us
 
 
 # ComfyUI's model folders the farm's model store may fill (docs/design/17); the same list in fetch.py
-MODEL_FOLDERS = ("checkpoints", "diffusion_models", "text_encoders", "vae", "loras", "clip_vision", "controlnet",
-                 "upscale_models", "embeddings", "style_models", "model_patches", "audio_encoders",
-                 "latent_upscale_models")
+# The farm's model folders (docs/design/17). LEGACY: what hosts set up before 0.1.0-dev.19 take, exactly — their
+# launcher compares the yaml with this list. MODEL_FOLDERS: the single-file folders ComfyUI registers itself (not
+# diffusers: folder models); a farm adds its own (the custom nodes'), and a host set up since takes any safe names.
+LEGACY_MODEL_FOLDERS = ("checkpoints", "diffusion_models", "text_encoders", "vae", "loras", "clip_vision", "controlnet",
+                        "upscale_models", "embeddings", "style_models", "model_patches", "audio_encoders",
+                        "latent_upscale_models")
+MODEL_FOLDERS = LEGACY_MODEL_FOLDERS + ("background_removal", "classifiers", "detection", "frame_interpolation",
+                                        "geometry_estimation", "gligen", "hypernetworks", "optical_flow", "photomaker",
+                                        "vae_approx")
+FOLDER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+RESERVED_FOLDERS = ("custom_nodes", "configs", "diffusers", "inbox")
 
 
-def nodes_yaml(node_dirs: list[str], model_store: str | None = None) -> str:
+def folder_ok(name) -> bool:
+    """A model folder's name: one directory under the model store, never a path or a folder ComfyUI uses otherwise."""
+    return isinstance(name, str) and bool(FOLDER.match(name)) and ".." not in name and name not in RESERVED_FOLDERS
+
+
+
+def nodes_yaml(node_dirs: list[str], model_store: str | None = None, folders=LEGACY_MODEL_FOLDERS) -> str:
     """The extra-model-paths file of a render: the custom node directories and, where the host has one, the farm's
     model store (docs/design/17) beside the site's own models (--models-directory)."""
     out = ("comfyfarm:\n  custom_nodes: |\n" + "".join(f"    {d}\n" for d in node_dirs)) if node_dirs else "comfyfarm: {}\n"
     if model_store:
-        out += f"comfyfarm_models:\n  base_path: {model_store}\n" + "".join(f"  {f}: {f}\n" for f in MODEL_FOLDERS)
+        out += f"comfyfarm_models:\n  base_path: {model_store}\n" + "".join(f"  {f}: {f}\n" for f in folders)
     return out
+
+
+def yaml_ok(content, node_dirs: list[str], model_store: str | None) -> bool:
+    """The render's extra model paths: the synced node artifacts, and — on a host with a model store — that store with
+    folders of safe names only, each its own directory under it (which folders is the farm's choice: its own come and
+    go; where they are is the host's)."""
+    head = nodes_yaml(node_dirs)
+    if not isinstance(content, str) or not content.startswith(head):
+        return False
+    rest = content[len(head):]
+    if not model_store:
+        return rest == ""
+    pre = f"comfyfarm_models:\n  base_path: {model_store}\n"
+    if not rest.startswith(pre):
+        return False
+    names = []
+    for line in rest[len(pre):].splitlines(keepends=True):
+        m = re.fullmatch(r"  ([a-z0-9][a-z0-9_.-]{0,63}): \1\n", line)
+        if not m or not folder_ok(m.group(1)) or m.group(1) in names:
+            return False
+        names.append(m.group(1))
+    return bool(names)
 
 
 class Refused(Exception):
@@ -240,8 +276,7 @@ def validate(render: dict, *, instance: str, art: str, local: str, prefixes: lis
         if not re.fullmatch(re.escape(run_dir) + r"/extra_model_paths\.[0-9a-f]{12}\.yaml", _norm(path)):
             raise Refused(f"files may only be {run_dir}/extra_model_paths.<rev>.yaml: {path!r}")
         # the model store is the host's own setting (COMFY_LAUNCH_MODEL_STORE), never one the render brings
-        if not isinstance(content, str) or content != nodes_yaml([f"{local}/nodes/{n}" for n in synced["nodes"]],
-                                                                  model_store):
+        if not yaml_ok(content, [f"{local}/nodes/{n}" for n in synced["nodes"]], model_store):
             raise Refused("extra model paths content is not the synced node artifacts and this host's model store "
                           f"({model_store or 'none set up here'})")
     for opt, vals in opts:

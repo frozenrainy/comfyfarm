@@ -107,7 +107,6 @@ async def test_models_are_checked_asked_of_the_builder_and_followed(farm):
     await follow_builder()
     lost = next(m for m in (await c.get("/api/admin/models", headers=H)).json()["models"] if m["id"] == rid["flux-ae.safetensors"]["id"])
     assert lost["state"] == "failed" and "no record" in lost["error"]
-    assert (await c.delete(f"/api/admin/models/{rid['flux dev.safetensors']['id']}", headers=H)).status_code == 409
     assert (await c.delete(f"/api/admin/models/{rid['flux-ae.safetensors']['id']}", headers=H)).status_code == 200
     # groups and note
     g2, _ = await add_worker(r, "http://192.0.2.22:8188", group="stills")
@@ -174,7 +173,7 @@ class FakeHost(be.Backend):
 
     def __init__(self, states):
         super().__init__({})
-        self.states, self.asked, self.looked = states, [], 0
+        self.states, self.asked, self.looked, self.forgot, self.old = states, [], 0, [], False
 
     async def fetch(self, artifacts, state=False):
         if state:
@@ -183,6 +182,14 @@ class FakeHost(be.Backend):
         self.asked.append(list(artifacts))
         for a in artifacts:
             self.states[a] = {"state": "queued"}
+        return {"requested": True}
+
+    async def forget(self, names):
+        self.forgot.append(list(names))
+        if self.old:
+            return None                                   # worker tools before 0.1.0-dev.19
+        for n in names:
+            self.states.pop(n, None)
         return {"requested": True}
 
 

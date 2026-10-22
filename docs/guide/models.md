@@ -41,11 +41,20 @@ loras https://huggingface.co/<owner>/<repo>/blob/main/my-style.safetensors
 - **Folder**:
   - With the default, *from the link*, a path through `split_files/<folder>/` (the Comfy-Org repositories) names it.
   - Otherwise pick one for the whole list, or start a line with its folder.
-  - The folders are ComfyUI's: `checkpoints`, `diffusion_models`, `text_encoders`, `vae`, `loras`, `clip_vision`,
-    `controlnet`, `upscale_models`, `embeddings`, `style_models`, `model_patches`, `audio_encoders`,
-    `latent_upscale_models`.
-- **Groups**: their GPU workers get a copy. Change them later with *Groups*. A group added later gets its copies in the
-  background.
+  - The folders are ComfyUI's own single-file model folders: `checkpoints`, `diffusion_models`, `text_encoders`,
+    `vae`, `loras`, `clip_vision`, `controlnet`, `upscale_models`, `embeddings`, `style_models`, `model_patches`,
+    `audio_encoders`, `latent_upscale_models`, `background_removal`, `classifiers`, `detection`, `frame_interpolation`,
+    `geometry_estimation`, `gligen`, `hypernetworks`, `optical_flow`, `photomaker`, `vae_approx`. Not `diffusers`: its
+    models are folders.
+  - Plus the farm's own (*Folders*), such as a folder a custom node looks its models up in (`ipadapter`, `sams`, …).
+    Name it as the node does: lowercase letters, digits and `_ . -`.
+  - A worker lists a folder in ComfyUI after its next start. Each new folder type therefore needs a rollout or a
+    restart once; new files in existing folders need nothing.
+- **Groups**: their GPU workers get a copy.
+  - Change them later with *Groups*, or for several models at once: tick them (a folder's box ticks all of it), then
+    *Add to groups* or *Take out of groups*.
+  - A group added later gets its copies in the background.
+  - A group taken out drops its workers' copies.
 - **Revision**:
   - The link's branch (`main`) or tag is pinned to the commit it names when the builder fetches the file.
   - A newer upload on that branch does not change what the farm has.
@@ -118,11 +127,23 @@ node pack sources, it is the builder's setting, and the dashboard cannot change 
   URLs.
 - A control plane without internet: carry the files in and put them in the inbox (above).
 
-## Not yet (phase 2)
+## Deleting a model
 
-- **Removing a model** from the store and from the workers. Until then:
-  - *Remove* takes away only a model that never arrived.
-  - Taking a model out of a group stops new copies; the workers keep the copy they have.
+*Delete* takes a model out of the farm:
+- It leaves its groups.
+- The builder takes it out of the model store.
+- Each worker that has a copy drops it in the background.
+
+Jobs already running are not disturbed, because they have the model loaded. Queued jobs that name it will fail. The
+same name can be added again afterwards. *Remove* on a model that never arrived only takes it off the list.
+
+The site's own *Models directory* is never touched. Only the farm's copies are removed.
+
+**Workers set up before 0.1.0-dev.19** take ComfyUI's older 13 folders only and cannot drop copies. *System →
+Models* names them. *Set up again* (System → Workers) once, then roll out or restart them.
+
+## Not yet
+
 - **Free space shown before copying.** For now the host check shows the free space, and a copy that does not fit
   fails with `needs N GB more`.
 - **Sources other than Hugging Face** (Civitai and others: a URL with a known SHA-256).

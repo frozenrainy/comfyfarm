@@ -130,7 +130,8 @@ def instance_config(spec: dict, extra: dict, seen: str | None = None) -> dict:
     hosts = [extra["host"]] + ([seen] if seen and seen != extra["host"] else [])
     return {"instance": spec["instance"], "role": spec.get("role", "gpu"), "platform": "posix", "hosts": hosts,
             "listen": spec["listen"], "port": spec["port"], "paths": dict(spec["paths"], art=spec["art"], local=spec["local"]),
-            "restart_backend": "ssh", "restart_config": cfg}
+            "restart_backend": "ssh", "restart_config": cfg,
+            "open_folders": True}            # these worker tools take the farm's model folders (0.1.0-dev.19)
 
 
 def make_router(ctx: Ctx) -> APIRouter:

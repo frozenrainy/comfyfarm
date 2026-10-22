@@ -99,8 +99,10 @@ def make_router(ctx: Ctx) -> APIRouter:
     async def check_model(c, body: UploadIn, p: dict) -> dict:
         m = body.meta
         folder, groups = m.get("folder"), m.get("groups") or []
-        if folder not in fetch.MODEL_FOLDERS:
-            raise HTTPException(400, f"folder: one of {', '.join(fetch.MODEL_FOLDERS)}")
+        from .models import model_folders
+        folders = await model_folders(c)
+        if folder not in folders:
+            raise HTTPException(400, f"folder: one of {', '.join(folders)} (System → Models → Folders adds one)")
         if not fetch.MODEL_FILE.match(body.filename):
             raise HTTPException(400, f"file name: letters, digits, spaces and . _ + ( ) - — not {body.filename!r}")
         formats = p.get("model_formats")
@@ -111,7 +113,8 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(400, "groups: a list of group ids")
         if groups and len({r["id"] for r in await c.fetch("SELECT id FROM worker_groups WHERE id = ANY($1)", groups)}) != len(set(groups)):
             raise HTTPException(400, "no such group")
-        if await c.fetchval("SELECT 1 FROM models WHERE folder = $1 AND filename = $2", folder, body.filename) or \
+        if await c.fetchval("SELECT 1 FROM models WHERE folder = $1 AND filename = $2 AND state <> 'deleted'",
+                            folder, body.filename) or \
                 await c.fetchval("SELECT 1 FROM uploads WHERE kind = 'model' AND state = 'uploading' AND meta->>'folder' = $1 "
                                  "AND filename = $2", folder, body.filename):
             raise HTTPException(409, f"{folder}/{body.filename} is in the list already")

@@ -300,3 +300,110 @@ async def test_the_inbox_puts_what_it_takes_in_into_the_groups_asked_for(farm):
     listed = (await c.get("/api/admin/models", headers=H)).json()
     assert sorted((m["filename"], m["groups"]) for m in listed["models"]) == [(f"l{i}.safetensors", [g1]) for i in range(3)]
     assert listed["inbox"]["groups"] == [g1]
+
+
+async def test_a_model_deleted_from_the_farm_leaves_the_store_and_the_workers(farm, monkeypatch):
+    """docs/design/17 phase 2: out of its groups, out of the store (the builder), and the hosts drop their copies; the
+    same place can be filled again. Taken out of a group, that group's workers drop theirs too."""
+    from comfyfarm.rollout import backends as be
+    from test_models import FakeHost
+    c, r, b, models = farm["c"], farm["r"], farm["b"], farm["models"]
+    follow_builder, follow_copies, copies = r.models_step
+    gid, wid = await add_worker(r, "http://192.0.2.21:8188", group="video", name="gpu-a")
+    data = os.urandom(4000)
+    part = farm["tmp"] / "m.part"
+    part.write_bytes(data)
+    key = b.place_model(str(part), "loras", "gone.safetensors", len(data), hashlib.sha256(data).hexdigest())
+    async with r.db.conn() as x:
+        await x.execute("INSERT INTO instances(worker_id, instance, role, platform, hosts, listen, port, paths, restart_backend, "
+                        "restart_config, model_folders) VALUES ($1, 'gpu-a', 'gpu', 'posix', $2, '0.0.0.0', 8188, $3, 'ssh', "
+                        "'{}'::jsonb, $4)", wid, ["192.0.2.21"], {"model_store": "/srv/ms"}, list(fetch.MODEL_FOLDERS))
+        mid = await x.fetchval("INSERT INTO models(folder, filename, source, state, key, size) VALUES ('loras', "
+                               "'gone.safetensors', 'upload', 'ready', $1, $2) RETURNING id", key, len(data))
+        await x.execute("INSERT INTO group_models VALUES ($1, $2)", gid, mid)
+    host = FakeHost({f"model/{key}": {"state": "present"}})
+    monkeypatch.setattr(be, "make", lambda *a, **k: host)
+    refreshed = []
+
+    async def refresh(gid, prefer=None):                      # the group's node definitions: read again (not here)
+        refreshed.append(gid)
+    monkeypatch.setattr(r, "refresh_snapshot", refresh)
+    await follow_copies()
+    assert host.forgot == [] and copies[wid]["present"] == 1                    # wanted: kept
+    assert (await c.delete(f"/api/admin/models/{mid}", headers=H)).json() == {"deleting": True}
+    listed = (await c.get("/api/admin/models", headers=H)).json()["models"]
+    assert [(m["state"], m["groups"]) for m in listed] == [("deleting", [])]
+    assert (await c.patch(f"/api/admin/models/{mid}", json={"groups": [gid]}, headers=H)).status_code == 409
+    run_requests(farm)                                                         # the builder takes it out of the store
+    assert not (models / "loras" / "gone.safetensors").exists() and not fetch.model_present(str(models), key)
+    assert await follow_builder() is True
+    assert (await c.get("/api/admin/models", headers=H)).json()["models"] == []
+    await follow_copies()
+    assert host.forgot == [[f"model/{key}"]]                                    # the host drops its copy
+    await follow_copies()
+    assert refreshed == [gid]                                                   # its model lists read again
+    assert len(host.forgot) == 1                                                # gone: not asked again
+    async with r.db.conn() as x:                                               # the same place can be filled again
+        again = await x.fetchval("INSERT INTO models(folder, filename, source, state) VALUES ('loras', 'gone.safetensors', "
+                                 "'upload', 'queued') RETURNING id")
+    assert again != mid
+    # taken out of a group: that group's workers drop their copies; a host with older tools says so
+    async with r.db.conn() as x:
+        m2 = await x.fetchval("INSERT INTO models(folder, filename, source, state, key) VALUES ('vae', 'v.safetensors', "
+                              "'inbox', 'ready', $1) RETURNING id", "e" * 32)
+        await x.execute("INSERT INTO group_models VALUES ($1, $2)", gid, m2)
+    host.states[f"model/{'e' * 32}"] = {"state": "present"}
+    await follow_copies()
+    assert len(host.forgot) == 1
+    assert (await c.post("/api/admin/models/groups", json={"models": [m2], "remove": [gid]}, headers=H)).status_code == 200
+    host.old = True
+    await follow_copies()
+    assert host.forgot[-1] == [f"model/{'e' * 32}"] and "set the worker up again" in copies[wid]["error"]
+    # a failed one still goes from the list at once; one still downloading cannot be deleted
+    async with r.db.conn() as x:
+        f = await x.fetchval("INSERT INTO models(folder, filename, state) VALUES ('vae', 'f.safetensors', 'failed') RETURNING id")
+        q = await x.fetchval("INSERT INTO models(folder, filename, state) VALUES ('vae', 'q.safetensors', 'downloading') RETURNING id")
+    assert (await c.delete(f"/api/admin/models/{f}", headers=H)).json() == {"deleted": True}
+    assert (await c.delete(f"/api/admin/models/{q}", headers=H)).status_code == 409
+
+
+async def test_a_farm_adds_model_folders_of_its_own(farm):
+    """Field (dev.18): frame_interpolation and geometry_estimation were missing, and custom nodes have their own.
+    Hosts set up since 0.1.0-dev.19 list the farm's folders; older ones keep the legacy list (their launcher)."""
+    from comfyfarm.rollout import render as rd
+    c, r = farm["c"], farm["r"]
+    _, new = await add_worker(r, "http://192.0.2.21:8188", group="video", name="gpu-new")
+    _, old = await add_worker(r, "http://192.0.2.22:8188", group="video", name="gpu-old")
+    for wid, open_ in ((new, True), (old, None)):
+        put = await c.put(f"/api/admin/instances/{wid}", headers=H, json={
+            "instance": f"i{wid}", "hosts": ["127.0.0.1"], "port": 8188, "restart_backend": "manual", "open_folders": open_,
+            "paths": {"art": "/a", "local": "/l", "models": "/m", "input": "/s/i", "output": "/s/o", "user": "/s/u",
+                      "temp": "/t", "model_store": "/srv/ms"}})
+        assert put.status_code == 200, put.text
+    folders = (await c.get("/api/admin/models", headers=H)).json()["builder"]["folders"]
+    assert "frame_interpolation" in folders and "geometry_estimation" in folders
+    for bad, code in (("../x", 400), ("custom_nodes", 400), ("Has Caps", 400), ("loras", 409), ("inbox", 400)):
+        assert (await c.post("/api/admin/models/folders", json={"name": bad}, headers=H)).status_code == code, bad
+    assert (await c.post("/api/admin/models/folders", json={"name": "ipadapter"}, headers=H)).status_code == 200
+    got = (await c.get("/api/admin/models", headers=H)).json()["builder"]
+    assert got["custom_folders"] == ["ipadapter"] and got["folders"][-1] == "ipadapter"
+    async with r.db.conn() as x:
+        rows = {w: dict(await x.fetchrow("SELECT * FROM instances WHERE worker_id = $1", w)) for w in (new, old)}
+    assert rows[new]["model_folders"][-1] == "ipadapter" and rows[old]["model_folders"] is None
+    profile = {"name": "p", "core": "c", "venv": "v", "nodes": [], "flags": [], "env": {}}
+    new_yaml = next(iter(rd.build(profile, rows[new])["files"].values()))
+    old_yaml = next(iter(rd.build(profile, rows[old])["files"].values()))
+    assert "  ipadapter: ipadapter\n" in new_yaml and "  frame_interpolation: frame_interpolation\n" in new_yaml
+    assert "ipadapter" not in old_yaml and "frame_interpolation" not in old_yaml          # what its launcher takes
+    up = (await c.post("/api/admin/uploads", json={"kind": "model", "filename": "ip.safetensors", "size": 10,
+                                                   "meta": {"folder": "ipadapter"}}, headers=H))
+    assert up.status_code == 200
+    assert (await c.delete("/api/admin/models/folders/loras", headers=H)).status_code == 409   # ComfyUI's own
+    async with r.db.conn() as x:
+        await x.execute("INSERT INTO models(folder, filename, state) VALUES ('ipadapter', 'a.safetensors', 'failed')")
+    assert (await c.delete("/api/admin/models/folders/ipadapter", headers=H)).status_code == 409   # in use
+    async with r.db.conn() as x:
+        await x.execute("DELETE FROM models WHERE folder = 'ipadapter'")
+    assert (await c.delete("/api/admin/models/folders/ipadapter", headers=H)).status_code == 200
+    async with r.db.conn() as x:
+        assert "ipadapter" not in await x.fetchval("SELECT model_folders FROM instances WHERE worker_id = $1", new)

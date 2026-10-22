@@ -59,6 +59,9 @@ class InstanceIn(BaseModel):
     paths: dict[str, str]
     restart_backend: str = "manual"
     restart_config: dict = {}
+    # worker setup since 0.1.0-dev.19: its launcher takes any safe model folders — the render lists the farm's
+    # (instances.model_folders); left out: the instance keeps what it had (none: the legacy list)
+    open_folders: bool | None = None
 
 
 class AssignIn(BaseModel):
@@ -301,6 +304,11 @@ def make_router(ctx: Ctx) -> APIRouter:
                 if await in_active_rollout(c, worker_id):
                     raise HTTPException(409, "the worker is part of an active rollout")
                 cur = await inst_row(c, worker_id)
+                if body.open_folders is not None:
+                    from .models import model_folders
+                    v["model_folders"] = await model_folders(c) if body.open_folders else None
+                else:
+                    v["model_folders"] = cur["model_folders"] if cur else None
                 if cur and cur["profile_id"]:
                     try:                                        # the new paths must still give a valid render
                         rd.check(await profile_doc(c, cur["profile_id"]), v)
@@ -309,11 +317,12 @@ def make_router(ctx: Ctx) -> APIRouter:
                 try:
                     await c.execute(
                         "INSERT INTO instances(worker_id, instance, role, platform, hosts, listen, port, paths, restart_backend, "
-                        "restart_config) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (worker_id) DO UPDATE SET "
+                        "restart_config, model_folders) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (worker_id) DO UPDATE SET "
                         "instance=excluded.instance, role=excluded.role, platform=excluded.platform, hosts=excluded.hosts, "
                         "listen=excluded.listen, port=excluded.port, paths=excluded.paths, restart_backend=excluded.restart_backend, "
-                        "restart_config=excluded.restart_config, updated_at=now()", worker_id, v["instance"], v["role"],
-                        v["platform"], v["hosts"], v["listen"], v["port"], v["paths"], v["restart_backend"], v["restart_config"])
+                        "restart_config=excluded.restart_config, model_folders=excluded.model_folders, updated_at=now()",
+                        worker_id, v["instance"], v["role"], v["platform"], v["hosts"], v["listen"], v["port"], v["paths"],
+                        v["restart_backend"], v["restart_config"], v["model_folders"])
                 except asyncpg.UniqueViolationError:
                     raise HTTPException(409, f"instance name {v['instance']!r} is taken")
                 await audit(c, who, "instance configured", v["instance"],       # restart_config holds references only

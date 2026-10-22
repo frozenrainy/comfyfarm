@@ -45,10 +45,17 @@ PRINCIPAL, NAMESPACE = "comfyfarm-builder", "comfyfarm-artifact"
 KINDS = ("core", "venv", "nodes", "frontend")
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 ARTIFACT = re.compile(r"^(core|venv|nodes|frontend|model)/([A-Za-z0-9][A-Za-z0-9._-]{0,62})$")
-# the model folders the farm fills: launcher.MODEL_FOLDERS (this file stands alone on a host)
+# the model folders the farm fills: launcher.MODEL_FOLDERS and folder_ok (this file stands alone on a host)
 MODEL_FOLDERS = ("checkpoints", "diffusion_models", "text_encoders", "vae", "loras", "clip_vision", "controlnet",
                  "upscale_models", "embeddings", "style_models", "model_patches", "audio_encoders",
-                 "latent_upscale_models")
+                 "latent_upscale_models", "background_removal", "classifiers", "detection", "frame_interpolation",
+                 "geometry_estimation", "gligen", "hypernetworks", "optical_flow", "photomaker", "vae_approx")
+FOLDER = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+RESERVED_FOLDERS = ("custom_nodes", "configs", "diffusers", "inbox")
+
+
+def folder_ok(name) -> bool:
+    return isinstance(name, str) and bool(FOLDER.match(name)) and ".." not in name and name not in RESERVED_FOLDERS
 MODEL_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+()-]{0,199}$")
 KEY = re.compile(r"^[0-9a-f]{32}$")
 FORMAT = 1
@@ -69,7 +76,7 @@ def model_key(folder: str, filename: str, sha256: str) -> str:
 
 def model_entry(folder: str, filename: str, size: int, sha256: str) -> bytes:
     """What the builder signs for a model: one file, where it goes, its size and SHA-256."""
-    if folder not in MODEL_FOLDERS or not MODEL_FILE.match(filename) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+    if not folder_ok(folder) or not MODEL_FILE.match(filename) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
         raise Refused(f"not a model entry: {folder}/{filename}")
     doc = {"format": FORMAT, "type": "model", "key": model_key(folder, filename, sha256), "folder": folder,
            "filename": filename, "size": int(size), "sha256": sha256}
@@ -78,7 +85,7 @@ def model_entry(folder: str, filename: str, size: int, sha256: str) -> bytes:
 
 def model_doc(entry: bytes, key: str | None = None) -> dict:
     doc = json.loads(entry)
-    if (doc.get("format") != FORMAT or doc.get("type") != "model" or doc.get("folder") not in MODEL_FOLDERS
+    if (doc.get("format") != FORMAT or doc.get("type") != "model" or not folder_ok(doc.get("folder"))
             or not MODEL_FILE.match(str(doc.get("filename", ""))) or not re.fullmatch(r"[0-9a-f]{64}", str(doc.get("sha256")))
             or doc.get("key") != model_key(doc["folder"], doc["filename"], doc["sha256"]) or (key and doc["key"] != key)):
         raise Refused(f"not the signed entry of model {key}")
@@ -446,6 +453,49 @@ def request(names, requests: str | None = None) -> str:
     return "asked for " + ", ".join(asked) if asked else "already asked for"
 
 
+def forget(names, requests: str | None = None) -> str:
+    """Copies of models the farm no longer gives this host (removed from its group, or from the farm): one request
+    each in the drop box — the store account removes the file and its signed entry (drop)."""
+    requests = requests or REQUESTS
+    if not os.path.isdir(requests):
+        raise Refused("copies are not set up on this host (its artifact store is mounted, or setup predates them)")
+    asked = []
+    for kind, name in parse(names):
+        if kind != "model":
+            raise Refused(f"only model copies are dropped, not {kind}/{name}")
+        try:
+            fd = os.open(os.path.join(requests, _key("drop", name)), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(dt.datetime.now(dt.timezone.utc).isoformat() + "\n")
+        asked.append(f"model/{name}")
+    return "dropping " + ", ".join(asked) if asked else "already asked to drop"
+
+
+def drop(models: str, key: str) -> bool:
+    """The store account's half: the copy its own signed entry describes (that file, of that size — another
+    revision at the same place stays), the entry, and a part left from a copy. Never anything else in the store."""
+    lst = os.path.join(models, "signed", "model", key + ".json")
+    try:
+        with open(lst, "rb") as f:
+            doc = model_doc(f.read(), key)
+    except (OSError, ValueError, Refused):
+        doc = None
+    gone = False
+    if doc:
+        p = os.path.join(models, doc["folder"], doc["filename"])
+        if os.path.isfile(p) and not os.path.islink(p) and os.path.getsize(p) == doc["size"]:
+            os.remove(p)
+            gone = True
+    for x in (lst, lst + ".sig", os.path.join(models, ".incoming", key + ".part")):
+        try:
+            os.remove(x)
+        except OSError:
+            pass
+    return gone
+
+
 def here(kind: str, name: str, art: str, models: str) -> bool:
     if kind == "model":
         return bool(models) and model_present(models, name)
@@ -523,7 +573,7 @@ def _asked(requests: str, name: str) -> tuple[str, str] | None:
     path = os.path.join(requests, name)
     kind, _, rest = name.partition(".")
     if not os.path.islink(path) and os.path.isfile(path) and ((kind in KINDS and NAME.match(rest))
-                                                              or (kind == "model" and KEY.match(rest))):
+                                                              or (kind in ("model", "drop") and KEY.match(rest))):
         return kind, rest
     try:
         os.unlink(path) if os.path.islink(path) or not os.path.isdir(path) else shutil.rmtree(path, ignore_errors=True)
@@ -554,6 +604,17 @@ def run(requests: str | None = None, status_dir: str | None = None, config: str 
                 continue
             kind, name = asked
             key = _key(kind, name)
+            if kind == "drop":                               # a copy the farm no longer gives this host
+                if models:
+                    argv = [sys.executable, os.path.join(HERE, "fetch.py"), "drop", models, name]
+                    if as_user:
+                        argv = ["runuser", "-u", as_user, "--", "env", f"HOME={home}", "PATH=/usr/bin:/bin"] + argv
+                    p = popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd="/")
+                    p.stdout.read()
+                    p.wait()
+                _done_with(requests, entry)
+                done.append(f"drop/{name}")
+                continue
             if here(kind, name, art, models) or (kind == "model" and not (models and KEY.match(name))):
                 _done_with(requests, entry)                  # here already — or a model on a host without a model store
                 continue
@@ -597,6 +658,9 @@ def main(argv=None) -> int:
             return 0
         if len(args) == 4 and args[0] == "get-model" and KEY.match(args[3]):
             get_model(args[1], args[2], args[3])
+            return 0
+        if len(args) == 3 and args[0] == "drop" and KEY.match(args[2]):
+            drop(args[1], args[2])
             return 0
     except Refused as e:
         print(f"fetch: {e}", file=sys.stderr)

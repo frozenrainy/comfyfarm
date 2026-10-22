@@ -674,7 +674,6 @@ export default {
   "no links": "링크가 없습니다",
   "no folder in the link — pick one, or start the line with it: {line}": "링크에 폴더가 없습니다 — 폴더를 고르거나 줄 앞에 붙이세요: {line}",
   "{n} model(s) asked of the builder — it downloads them one after another": "모델 {n}개를 빌더에 요청했습니다 — 하나씩 차례로 내려받습니다",
-  "Saved — the workers of {groups} keep the copy they have": "저장했습니다 — {groups}의 워커는 이미 받은 복사본을 그대로 둡니다",
   "Remove {name} from the list? It never arrived: nothing is in the store or on a worker.":
     "{name}을(를) 목록에서 지울까요? 받아지지 않은 모델이라 저장소에도 워커에도 아무것도 없습니다.",
   "(none — in the store only)": "(없음 — 저장소에만)",
@@ -720,8 +719,25 @@ export default {
   "Add {n} model(s) to groups": "모델 {n}개를 그룹에 추가", "Take {n} model(s) out of groups": "모델 {n}개를 그룹에서 빼기",
   "{n} model(s) added to groups": "모델 {n}개를 그룹에 추가했습니다", "{n} model(s) taken out of groups": "모델 {n}개를 그룹에서 뺐습니다",
   "their GPU workers get copies in the background": "그 그룹의 GPU 워커가 백그라운드로 복사본을 받습니다",
-  "the workers of those groups keep the copies they have": "그 그룹 워커는 이미 받은 복사본을 그대로 둡니다",
   "every model this scan takes in goes into these groups; none checked: no groups yet": "이번에 들여오는 모델 전부가 이 그룹에 들어갑니다. 아무것도 고르지 않으면 그룹 없이 들어옵니다",
+  // ---- model folders, deleting models (docs/design/17 phase 2) ----
+  "Folders": "폴더", "Model folders": "모델 폴더", "ComfyUI's own": "ComfyUI 기본 폴더", "This farm's (ticked: removed)": "이 팜의 폴더 (체크하면 삭제)",
+  "A new folder": "새 폴더",
+  "the name a custom node looks its models up by (lowercase letters, digits, _ . -). Workers set up since 0.1.0-dev.19 list a new folder after their next start (a rollout or a restart)":
+    "커스텀 노드가 모델을 찾는 폴더 이름 (소문자·숫자·_ . -). 0.1.0-dev.19 이후 설치한 워커는 다음 시작(롤아웃·재시작) 뒤 새 폴더를 봅니다",
+  "Saved — workers see a new folder after their next start": "저장했습니다 — 워커는 다음 시작 뒤 새 폴더를 봅니다",
+  "search models": "모델 검색", "{n} model(s)": "모델 {n}개",
+  "Delete {name} from the farm? It goes from the model store; {where}. Queued jobs that use it will fail.":
+    "{name}을(를) 팜에서 삭제할까요? 모델 저장소에서 지워지고, {where}. 이 모델을 쓰는 대기 중 작업은 실패합니다.",
+  "the copies on the workers of {groups} go too": "{groups} 그룹 워커의 복사본도 지워집니다", "no group uses it": "쓰는 그룹은 없습니다",
+  "Deleting — the workers drop their copies in the background": "삭제 중 — 워커의 복사본은 백그라운드로 지워집니다",
+  "Saved — the workers of {groups} drop their copies": "저장했습니다 — {groups} 그룹 워커의 복사본은 지워집니다",
+  "the workers of those groups drop their copies": "그 그룹 워커의 복사본은 지워집니다",
+  "removing {n}": "{n}개 지우는 중", "deleting": "삭제 중",
+  "older worker tools: no new folders, copies are not removed — Set up again (System → Workers)":
+    "이전 워커 도구: 새 폴더를 못 쓰고 복사본도 지워지지 않습니다 — 다시 설치하세요 (시스템 → 워커)",
+  "model folder added": "모델 폴더 추가", "model folder removed": "모델 폴더 삭제", "model deleted": "모델 삭제",
+  "models' groups changed": "모델 그룹 변경", "model uploaded": "모델 업로드", "model inbox scanned": "인박스 확인",
   // ---- audit actions (the router's fixed words) ----
   "comfyfarm (first start)": "comfyfarm (첫 시작)", "assign": "할당", "build requested": "빌드 요청",
   "first administrator created": "첫 관리자 생성", "instance configured": "인스턴스 설정", "instance removed": "인스턴스 삭제",

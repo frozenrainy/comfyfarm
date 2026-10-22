@@ -36,9 +36,26 @@ export function models(root, { refresh }) {
   // several models into or out of groups at once (field: an inbox of many files, each its own Groups dialog)
   const selected = new Set();
   const allBox = h("input", { type: "checkbox", title: t("Select all"), onchange: (e) => {
-    for (const m of data?.models || []) e.target.checked ? selected.add(m.id) : selected.delete(m.id);
-    syncRows(modelsT.tbody, data.models, (m) => m.id, buildModel, updateModel); renderBulk();
+    for (const m of shown()) e.target.checked ? selected.add(m.id) : selected.delete(m.id);
+    renderTable();
   } });
+  // the list by folder (field: a long list), folded folders remembered, a search over names and notes
+  const collapsed = new Set(JSON.parse(localStorage.getItem("comfyfarm.models.folded") || "[]"));
+  let query = "";
+  const search = h("input", { type: "search", class: "search", placeholder: t("search models"),
+                              oninput: (e) => { query = e.target.value.trim().toLowerCase(); renderTable(); } });
+  const shown = () => (data?.models || []).filter((m) => !query || `${m.folder}/${m.filename} ${m.note || ""}`.toLowerCase().includes(query));
+  function rowsOf() {
+    const by = new Map();
+    for (const m of shown()) { if (!by.has(m.folder)) by.set(m.folder, []); by.get(m.folder).push(m); }
+    return [...by.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([folder, ms]) => [{ kind: "folder", folder, models: ms }, ...(query || !collapsed.has(folder) ? ms : [])]);
+  }
+  const renderTable = () => {
+    syncRows(modelsT.tbody, rowsOf(), (x) => x.kind === "folder" ? `f:${x.folder}` : String(x.id),
+             (x) => x.kind === "folder" ? buildFolder() : buildModel(), (tr, x) => x.kind === "folder" ? updateFolder(tr, x) : updateModel(tr, x));
+    renderBulk();
+  };
   const modelsT = table([[allBox, "pick"], [t("Model")], [t("Source")], [t("Size")], [t("State")], [t("Groups")], [t("Note")], ["", "actions"]]);
   const bulkEl = h("div");
   const workersT = table([[t("Worker")], [t("Group")], [t("Copies")], [t("Copying")], [t("Problems")]]);
@@ -46,7 +63,8 @@ export function models(root, { refresh }) {
   root.append(
     h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Models")),
       button(t("Add models"), () => add(), { cls: "primary" }), button(t("Upload"), () => pick()),
-      button(t("Scan the inbox"), () => scan())), info, uploadsEl, inboxEl, bulkEl, modelsT.el, empty),
+      button(t("Scan the inbox"), () => scan()), button(t("Folders"), () => editFolders()), search),
+      info, uploadsEl, inboxEl, bulkEl, modelsT.el, empty),
     h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Copies on the GPU workers"))),
       h("p", { class: "muted small" }, t("Each worker gets the models its group uses, in the background — no restart. ComfyUI lists a new one when its model list is refreshed.")),
       workersT.el));
@@ -168,15 +186,55 @@ export function models(root, { refresh }) {
         t("The builder takes in what the inbox holds — the models appear below"), refresh);
   }
 
+  // ---- folders: ComfyUI's, and the farm's own (a custom node's) ------------------------------------------------
+  async function editFolders() {
+    const b = data?.builder || {};
+    const custom = b.custom_folders || [];
+    const v = await formDialog(t("Model folders"), [
+      { name: "builtin", type: "pre", label: t("ComfyUI's own"), value: (b.folders || []).filter((f) => !custom.includes(f)).join("  ") },
+      { name: "remove", type: "checkboxes", label: t("This farm's (ticked: removed)"), value: [],
+        options: custom.map((f) => ({ value: f, label: f })) },
+      { name: "add", label: t("A new folder"), placeholder: "ipadapter",
+        hint: t("the name a custom node looks its models up by (lowercase letters, digits, _ . -). Workers set up since 0.1.0-dev.19 list a new folder after their next start (a rollout or a restart)") },
+    ], t("Save"));
+    if (!v) return;
+    await act(async () => {
+      for (const f of v.remove) await api("DELETE", `/api/admin/models/folders/${encodeURIComponent(f)}`);
+      if (v.add.trim()) await api("POST", "/api/admin/models/folders", { name: v.add.trim() });
+    }, t("Saved — workers see a new folder after their next start"), refresh);
+  }
+  function buildFolder() {
+    const tr = h("tr", { class: "folder-row" });
+    tr.box = h("input", { type: "checkbox", onchange: (e) => {
+      for (const m of tr._item.models) e.target.checked ? selected.add(m.id) : selected.delete(m.id);
+      renderTable();
+    } });
+    tr.label = h("button", { type: "button", class: "link fold", onclick: () => {
+      const f = tr._item.folder;
+      collapsed.has(f) ? collapsed.delete(f) : collapsed.add(f);
+      localStorage.setItem("comfyfarm.models.folded", JSON.stringify([...collapsed]));
+      renderTable();
+    } });
+    tr.append(h("td", { class: "pick" }, tr.box), h("td", { colspan: 7 }, tr.label));
+    return tr;
+  }
+  function updateFolder(tr, x) {
+    const n = x.models.filter((m) => selected.has(m.id)).length;
+    tr.box.checked = n > 0 && n === x.models.length;
+    tr.box.indeterminate = n > 0 && n < x.models.length;
+    const total = x.models.reduce((a, m) => a + (m.size || 0), 0);
+    setText(tr.label, `${query || !collapsed.has(x.folder) ? "▾" : "▸"} ${x.folder}  ·  ${t("{n} model(s)", { n: x.models.length })}  ·  ${size(total)}`);
+  }
+
   function renderBulk() {
-    allBox.checked = !!data?.models?.length && data.models.every((m) => selected.has(m.id));
+    allBox.checked = shown().length > 0 && shown().every((m) => selected.has(m.id));
     allBox.indeterminate = selected.size > 0 && !allBox.checked;
     if (!selected.size) return bulkEl.replaceChildren();
     const ids = () => [...selected];
     const change = async (how) => {
       const v = await formDialog(how === "add" ? t("Add {n} model(s) to groups", { n: selected.size }) : t("Take {n} model(s) out of groups", { n: selected.size }),
         [{ ...groupBoxes([]), label: t("Groups"), hint: how === "add" ? t("their GPU workers get copies in the background")
-                                                                       : t("the workers of those groups keep the copies they have") }],
+                                                                       : t("the workers of those groups drop their copies") }],
         how === "add" ? t("Add") : t("Take out"));
       if (!v || !v.groups.length) return;
       act(() => api("POST", "/api/admin/models/groups", { models: ids(), [how]: v.groups.map(Number) }),
@@ -185,7 +243,7 @@ export function models(root, { refresh }) {
     };
     bulkEl.replaceChildren(h("div", { class: "bulk" }, h("strong", {}, t("{n} selected", { n: selected.size })),
       button(t("Add to groups"), () => change("add"), { cls: "primary" }), button(t("Take out of groups"), () => change("remove")),
-      button(t("Clear selection"), () => { selected.clear(); syncRows(modelsT.tbody, data.models, (m) => m.id, buildModel, updateModel); renderBulk(); })));
+      button(t("Clear selection"), () => { selected.clear(); renderTable(); })));
   }
   let inboxSig = "";
   function renderInbox() {
@@ -209,7 +267,7 @@ export function models(root, { refresh }) {
     if (!v) return;
     const dropped = m.groups.filter((g) => !v.groups.includes(String(g)));
     act(() => api("PATCH", `/api/admin/models/${m.id}`, { groups: v.groups.map(Number), note: v.note }),
-        dropped.length ? t("Saved — the workers of {groups} keep the copy they have", { groups: dropped.map(groupName).join(", ") }) : t("Saved"),
+        dropped.length ? t("Saved — the workers of {groups} drop their copies", { groups: dropped.map(groupName).join(", ") }) : t("Saved"),
         refresh);
   }
 
@@ -222,13 +280,23 @@ export function models(root, { refresh }) {
       if (confirm(t("Remove {name} from the list? It never arrived: nothing is in the store or on a worker.", { name: tr._item.filename })))
         act(() => api("DELETE", `/api/admin/models/${tr._item.id}`), t("Removed"), refresh);
     }, { cls: "danger" });
-    tr.c.actions.append(button(t("Groups"), () => edit(tr._item)), retry, remove);
+    // out of the farm (docs/design/17 phase 2): the store's file and every worker's copy; the site's models stay
+    const del = button(t("Delete"), () => {
+      const m = tr._item;
+      const where = m.groups.length ? t("the copies on the workers of {groups} go too", { groups: m.groups.map(groupName).join(", ") }) : "";
+      if (confirm(t("Delete {name} from the farm? It goes from the model store; {where}. Queued jobs that use it will fail.",
+                    { name: `${m.folder}/${m.filename}`, where: where || t("no group uses it") })))
+        act(() => api("DELETE", `/api/admin/models/${m.id}`), t("Deleting — the workers drop their copies in the background"), refresh);
+    }, { cls: "danger" });
+    tr.groupsBtn = button(t("Groups"), () => edit(tr._item));
+    tr.c.actions.append(tr.groupsBtn, retry, remove, del);
     tr._failedOnly = [retry, remove];
+    tr._del = del;
     return tr;
   }
   function updateModel(tr, m) {
     tr.pick.checked = selected.has(m.id);
-    setText(tr.c.model, `${m.folder}/${m.filename}`);
+    setText(tr.c.model, query ? `${m.folder}/${m.filename}` : m.filename);
     setText(tr.c.source, m.source === "upload" ? t("uploaded by {who}", { who: m.created_by || "?" })
       : m.source === "inbox" ? t("from the inbox") : `${m.repo} · ${m.path} @ ${m.revision ? m.revision.slice(0, 10) : m.ref}`);
     setText(tr.c.size, size(m.size));
@@ -241,6 +309,9 @@ export function models(root, { refresh }) {
     setText(tr.c.groups, m.groups.map(groupName).join(", ") || t("(none — in the store only)"));
     setText(tr.c.note, m.note ?? "");
     for (const b of tr._failedOnly) b.hidden = m.state !== "failed";
+    tr._del.hidden = !["ready", "deleting"].includes(m.state);
+    tr.groupsBtn.hidden = m.state === "deleting";
+    tr.pick.disabled = m.state === "deleting";
   }
   function buildWorker() { return namedRow(["name", "group", "copies", "copying", "problems"], { problems: "muted small" }); }
   function updateWorker(tr, w) {
@@ -252,8 +323,10 @@ export function models(root, { refresh }) {
       return;
     }
     setText(tr.c.copies, w.wanted == null ? "…" : w.off ? t("uses the store as it is") : `${w.present ?? 0} / ${w.wanted}`);
-    setText(tr.c.copying, w.copying ? `${w.copying}` + (w.total ? ` · ${size(w.bytes)} / ${size(w.total)}` : "") : "");
+    setText(tr.c.copying, [w.copying ? `${w.copying}` + (w.total ? ` · ${size(w.bytes)} / ${size(w.total)}` : "") : "",
+                           w.removing ? t("removing {n}", { n: w.removing }) : ""].filter(Boolean).join(" · "));
     const failed = Object.entries(w.failed || {}).map(([, e]) => e);
+    if (w.legacy) failed.push(t("older worker tools: no new folders, copies are not removed — Set up again (System → Workers)"));
     setText(tr.c.problems, [w.error, ...failed].filter(Boolean).join(" · "));
   }
 
@@ -278,8 +351,7 @@ export function models(root, { refresh }) {
           + (b.hf_token ? t("A Hugging Face token is set for gated models.") : t("No Hugging Face token: gated models fail until one is in the builder's hf_token file.")))]));
       }
       for (const id of [...selected]) if (!data.models.some((m) => m.id === id)) selected.delete(id);      // gone since
-      syncRows(modelsT.tbody, data.models, (m) => m.id, buildModel, updateModel);
-      renderBulk();
+      renderTable();
       empty.hidden = data.models.length > 0; modelsT.el.hidden = !data.models.length;
       syncRows(workersT.tbody, data.workers, (w) => w.id, buildWorker, updateWorker);
     },

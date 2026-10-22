@@ -32,7 +32,7 @@ REF = re.compile(r"^(?!-)[A-Za-z0-9][A-Za-z0-9._/+-]{0,120}$")
 HTTPS = re.compile(r"^https://[A-Za-z0-9][A-Za-z0-9._~:/@-]*$")
 NODE_KEYS = {"name", "repo", "commit", "ui", "requirements_file", "constraints", "archive", "archive_name"}
 # which requests each lane takes: a lookup never waits for a build, nor a build for a 30 GB download
-LANES = {"resolve": ("resolve",), "build": ("build",), "model": ("model", "model-file", "model-inbox")}
+LANES = {"resolve": ("resolve",), "build": ("build",), "model": ("model", "model-file", "model-inbox", "model-remove")}
 UPLOAD = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 HF_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 HF_PATH = re.compile(r"^(?!/)(?!.*(^|/)\.\.?(/|$))[A-Za-z0-9._ +()/-]{1,300}$")
@@ -267,6 +267,8 @@ class Builder:
                 st.update(self.model_file(rid, req, st))
             elif req.get("kind") == "model-inbox":
                 st.update(self.model_inbox(rid, st))
+            elif req.get("kind") == "model-remove":
+                st.update(self.model_remove(req))
             else:
                 raise Refused(f"unknown request kind {req.get('kind')!r}")
             st["state"] = "done"
@@ -384,7 +386,7 @@ class Builder:
             raise Refused(f"not a Hugging Face model repository: {repo!r}")
         if not isinstance(path, str) or not HF_PATH.match(path) or not isinstance(ref, str) or not REF.match(ref):
             raise Refused(f"bad file or revision: {path!r}@{ref!r}")
-        if folder not in fetch.MODEL_FOLDERS or not isinstance(filename, str) or not fetch.MODEL_FILE.match(filename):
+        if not fetch.folder_ok(folder) or not isinstance(filename, str) or not fetch.MODEL_FILE.match(filename):
             raise Refused(f"bad place for a model: {folder!r}/{filename!r}")
         if not self.allow_pickle and not (filename.lower().endswith(SAFE_MODELS) and path.lower().endswith(SAFE_MODELS)):
             raise Refused(f"{filename}: only {', '.join(SAFE_MODELS)} — other formats can run code when ComfyUI loads them "
@@ -459,7 +461,7 @@ class Builder:
         upload, folder, filename, size = req.get("upload"), req.get("folder"), req.get("filename"), req.get("size")
         if not isinstance(upload, str) or not UPLOAD.match(upload):
             raise Refused(f"not an upload: {upload!r}")
-        if folder not in fetch.MODEL_FOLDERS or not isinstance(filename, str) or not fetch.MODEL_FILE.match(filename):
+        if not fetch.folder_ok(folder) or not isinstance(filename, str) or not fetch.MODEL_FILE.match(filename):
             raise Refused(f"bad place for a model: {folder!r}/{filename!r}")
         self.safe_format(filename)
         src = os.path.join(self.models, ".uploads", upload + ".part")
@@ -487,6 +489,16 @@ class Builder:
         return {"key": key, "sha256": sha, "size": size, "revision": None, "folder": folder, "filename": filename,
                 "bytes": size, "total": size}
 
+    def model_remove(self, req: dict) -> dict:
+        """A model taken out of the farm (docs/design/17 phase 2): its file — the one its signed entry describes —
+        and the entry. Hosts drop their copies when the router tells them (fetch.py drop)."""
+        if not self.models:
+            raise Refused("this builder has no model store (COMFYFARM_MODELS)")
+        key = req.get("key")
+        if not isinstance(key, str) or not fetch.KEY.match(key):
+            raise Refused(f"not a model key: {key!r}")
+        return {"key": key, "removed": fetch.drop(self.models, key)}
+
     def model_inbox(self, rid: str, st: dict) -> dict:
         """Files an operator copied into <models>/inbox/<folder>/ (docs/design/18): each checked (a plain file, a
         proper name, the format rule, readable by everyone, not in the store already), hashed, moved into place and
@@ -495,8 +507,9 @@ class Builder:
             raise Refused("this builder has no model store (COMFYFARM_MODELS)")
         import stat as _stat
         results = []
-        for folder in fetch.MODEL_FOLDERS:
-            d = os.path.join(self.models, "inbox", folder)
+        inbox = os.path.join(self.models, "inbox")
+        for folder in sorted(n for n in os.listdir(inbox) if fetch.folder_ok(n)) if os.path.isdir(inbox) else []:
+            d = os.path.join(inbox, folder)        # the built-in folders, and any an operator made (a custom node's)
             for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
                 if name.startswith("."):
                     continue

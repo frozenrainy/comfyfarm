@@ -89,7 +89,7 @@ td.job .jt { max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-
 .s-pending, .s-unknown, .s-queued { color: var(--muted); }
 .s-paused { color: var(--info); }
 .s-dispatching, .s-running, .s-online, .s-completed, .s-ready { color: var(--ok); }
-.s-cancelling, .s-busy_unresponsive, .s-suspect, .s-maintenance, .s-blocked, .s-downloading { color: var(--amber); }
+.s-cancelling, .s-busy_unresponsive, .s-suspect, .s-maintenance, .s-blocked, .s-downloading, .s-deleting { color: var(--amber); }
 .s-failed, .s-offline { color: var(--bad); }
 .s-cancelled, .s-disabled { color: var(--muted); }
 
@@ -156,6 +156,8 @@ pre.code { font: .78rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; back
 .bulk { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .4rem 0; padding: .45rem .7rem;
         border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
 th.pick, td.pick { width: 1.6rem; text-align: center; }
+tr.folder-row td { background: var(--panel); border-top: 1px solid var(--line); }
+button.fold { background: none; border: 0; padding: .1rem 0; font: inherit; font-weight: 600; color: var(--text); cursor: pointer; }
 .s-match, .s-done, .s-succeeded { color: var(--ok); }
 .s-differs, .s-reverted, .s-interrupted, .s-aborting, .s-reverting, .s-fetching, .s-draining, .s-restarting, .s-starting, .s-verifying { color: var(--amber); }
 .s-revert_failed, .s-aborted { color: var(--bad); }

@@ -69,6 +69,11 @@ class Backend:
         knows them (a manual backend, the UI worker container, older worker tools)."""
         return None
 
+    async def forget(self, names: list[str]) -> dict | None:
+        """Drop copies of models the farm no longer gives the host (fetch.py forget); None without an agent that
+        can (worker tools before 0.1.0-dev.19)."""
+        return None
+
 
 class Manual(Backend):
     """The dashboard asks an operator to restart the instance and waits (default 30 minutes) to see it happen."""
@@ -187,6 +192,16 @@ class Ssh(Backend):
             return json.loads(out)
         except ValueError:
             raise BackendError(f"the agent's copy state is not JSON: {out[-200:]}")
+
+    async def forget(self, names):
+        if not names or not all(ARTIFACT.match(a) and a.startswith("model/") for a in names):
+            raise BackendError(f"bad model names {names!r}")
+        rc, out = await _run(self.argv("fetch-forget", ",".join(names)))
+        if rc != 0:
+            if "unknown command" in out or "not set up on this host" in out:
+                return None                             # older worker tools, or a host without copies
+            raise BackendError(out.strip()[-300:] or f"the agent answered {rc}")
+        return {"requested": True, "detail": out.strip()[-300:]}
 
 
 def _is_ip(host: str) -> bool:

@@ -74,12 +74,14 @@ def systemctl(*args: str) -> subprocess.CompletedProcess:
 
 def do(verb: str, instance: str) -> tuple[int, str]:
     """(exit code, output). restart: delivery only — the router watches the worker go down and come back."""
-    if verb in ("fetch", "fetch-status"):            # the second word is a list of artifacts here
+    if verb in ("fetch", "fetch-status", "fetch-forget"):   # the second word is a list of artifacts here
         try:
             from . import fetch as f
         except ImportError:                          # run as a copied single file next to fetch.py
             import fetch as f                        # type: ignore
         try:
+            if verb == "fetch-forget":
+                return 0, f.forget(instance)
             return (0, f.request(instance)) if verb == "fetch" else (0, json.dumps(f.status(instance)))
         except (f.Refused, OSError) as e:
             raise Refused(str(e))
@@ -116,7 +118,7 @@ def ssh_main() -> int:
     try:
         if len(words) != 2:
             raise Refused("expected: restart|status|check <instance>, build|build-status <recipe>, or "
-                          "fetch|fetch-status <kind/name,…>")
+                          "fetch|fetch-status|fetch-forget <kind/name,…>")
         rc, out = do(words[0], words[1])
     except Refused as e:
         print(f"refused: {e}", file=sys.stderr)
