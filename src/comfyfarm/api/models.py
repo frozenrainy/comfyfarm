@@ -358,7 +358,9 @@ def make_router(ctx: Ctx) -> APIRouter:
             mine = [w["id"] for w in ws if w["group_id"] == gid]
             most = max(copies[i].get("present") or 0 for i in mine)
             try:
-                await refresh(gid, prefer=[i for i in mine if (copies[i].get("present") or 0) == most])
+                if await refresh(gid, prefer=[i for i in mine if (copies[i].get("present") or 0) == most]) is None:
+                    log.warning("models: node definitions of group %s not read (no worker answered) — they are read "
+                                "again when the editor next asks and one does", gid)
             except Exception as e:                  # noqa: BLE001 — the next copy tries again; Refresh nodes does too
                 log.warning("models: node definitions of group %s not refreshed: %s", gid, type(e).__name__)
 

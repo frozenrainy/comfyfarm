@@ -128,3 +128,46 @@ async def test_without_gpu_workers_the_ui_worker_stands_in_for_node_definitions(
 async def _gid(r):
     async with r.db.conn() as conn:
         return await conn.fetchval("SELECT id FROM worker_groups WHERE name = 'g1'")
+
+
+async def test_node_definitions_that_could_not_be_read_are_read_again(dsn, fakes):
+    """Field (dev.17): a rollout put two node packs on the group's worker and ended 5 s before the health monitor saw
+    it back; the read after it found nobody online and was skipped without a word, and the editor kept the old
+    definitions. A worker named by the caller is asked even before the monitor sees it; a read that finds nobody marks
+    the snapshot stale, and the editor's next request reads it again once a worker answers."""
+    app = create_app(fast_settings(dsn))
+    async with app.router.lifespan_context(app):
+        r = app.state.router
+        me = {"X-ComfyFarm-User": "tester"}
+        old = await fakes(nodes_extra=["OldNode"])
+        gid, wid = await add_worker(r, old.url, name="gpu-1")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://farm") as c:
+            for _ in range(100):
+                async with r.db.conn() as conn:
+                    if await conn.fetchval("SELECT state FROM workers WHERE id = $1", wid) == "online":
+                        break
+                await asyncio.sleep(0.1)
+            assert "OldNode" in (await c.get("/api/object_info", headers=me)).json()
+            for t in r.tasks:                                   # the health monitor's view is set by hand from here
+                if t.get_coro().__qualname__ == "HealthMonitor.run":
+                    t.cancel()
+            new = await fakes(nodes_extra=["PackNode"])         # restarted with the new profile: two packs more
+            async with r.db.conn() as conn:
+                await conn.execute("UPDATE workers SET base_url = $2, state = 'offline' WHERE id = $1", wid, new.url)
+
+            async def stale():
+                async with r.db.conn() as conn:
+                    return await conn.fetchval("SELECT stale FROM object_info_snapshots WHERE group_id = $1", gid)
+            assert await r.refresh_snapshot(gid) is None and await stale()            # nobody online: marked
+            oi = (await c.get("/api/object_info", headers=me)).json()
+            assert "OldNode" in oi and "PackNode" not in oi                           # nobody to read it from yet
+            async with r.db.conn() as conn:
+                await conn.execute("UPDATE workers SET state = 'online' WHERE id = $1", wid)
+            oi = (await c.get("/api/object_info", headers=me)).json()                # one answers: read again
+            assert "PackNode" in oi and "OldNode" not in oi and not await stale()
+            # what a rollout does now: the worker it just saw start is asked, whatever the monitor says yet
+            newer = await fakes(nodes_extra=["NewerNode"])
+            async with r.db.conn() as conn:
+                await conn.execute("UPDATE workers SET base_url = $2, state = 'offline' WHERE id = $1", wid, newer.url)
+            assert b"NewerNode" in await r.refresh_snapshot(gid, prefer=[wid])
+            assert "NewerNode" in (await c.get("/api/object_info", headers=me)).json() and not await stale()

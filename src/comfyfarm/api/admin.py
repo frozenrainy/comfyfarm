@@ -132,10 +132,12 @@ def make_router(ctx: Ctx) -> APIRouter:
                 "(SELECT count(*) FROM workers w WHERE w.group_id = g.id AND w.deleted_at IS NULL) AS workers, "
                 "(SELECT count(*) FROM jobs j WHERE j.group_id = g.id AND j.status NOT IN ('completed','failed','cancelled')) AS active_jobs, "
                 "(SELECT count(*) FROM user_groups u WHERE u.group_id = g.id) AS users, "
-                "(SELECT fetched_at FROM object_info_snapshots s WHERE s.group_id = g.id) AS nodes_at "
+                "(SELECT fetched_at FROM object_info_snapshots s WHERE s.group_id = g.id) AS nodes_at, "
+                "(SELECT stale FROM object_info_snapshots s WHERE s.group_id = g.id) AS nodes_stale "
                 "FROM worker_groups g ORDER BY g.name")
         return [{"id": r["id"], "name": r["name"], "requirements": r["requirements"], "workers": r["workers"],
-                 "active_jobs": r["active_jobs"], "users": r["users"], "nodes_at": iso(r["nodes_at"])} for r in rows]
+                 "active_jobs": r["active_jobs"], "users": r["users"], "nodes_at": iso(r["nodes_at"]),
+                 "nodes_stale": bool(r["nodes_stale"])} for r in rows]
 
     def group_req(req):
         try:

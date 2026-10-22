@@ -127,6 +127,27 @@ def long_job(seed, blurs=3):
     return wf
 
 
+async def test_the_editor_gets_the_new_node_definitions_before_health_sees_the_workers_back(farm):
+    """Field (dev.17): the rollout ended 5 s before the health monitor saw its worker back; the read of the group's
+    node definitions after it found nobody online, and the editor kept those from before two node packs. The read now
+    asks the workers the rollout just saw start."""
+    api, r = farm["api"], farm["router"]
+    asked, real = [], r.refresh_snapshot
+
+    async def as_in_the_field(gid, prefer=None):            # the monitor has not seen them back yet
+        async with r.db.conn() as c:
+            await c.execute("UPDATE workers SET state = 'offline' WHERE group_id = $1", gid)
+        asked.append((gid, sorted(prefer or [])))
+        return await real(gid, prefer=prefer)
+    r.refresh_snapshot = as_in_the_field
+    rid = await start(api, farm["p2"], [farm["hosts"]["w1"].wid])
+    assert (await wait_rollout(api, rid))["status"] == "succeeded"
+    assert asked == [(farm["gid"], [farm["hosts"]["w1"].wid])]
+    async with r.db.conn() as c:
+        snap = await c.fetchrow("SELECT source, stale FROM object_info_snapshots WHERE group_id = $1", farm["gid"])
+    assert snap is not None and snap["source"] == "w1" and not snap["stale"]
+
+
 async def test_restart_waits_for_the_running_job(farm):
     api, hosts = farm["api"], farm["hosts"]
     pid = (await api.post("/api/prompt", json={"prompt": long_job(3), "comfyfarm_group": farm["gid"]}, headers=H)).json()["prompt_id"]

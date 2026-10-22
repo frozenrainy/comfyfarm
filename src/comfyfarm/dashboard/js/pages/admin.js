@@ -203,7 +203,8 @@ function groups(root, { refresh }) {
   function update(tr, g) {
     setText(tr.c.name, g.name); setText(tr.c.req, reqText(g.requirements));
     setText(tr.c.workers, g.workers); setText(tr.c.users, g.users); setText(tr.c.jobs, g.active_jobs);
-    setText(tr.c.nodes, g.nodes_at ? t("fetched {time}", { time: when(g.nodes_at) }) : t("not fetched yet"));
+    setText(tr.c.nodes, (g.nodes_at ? t("fetched {time}", { time: when(g.nodes_at) }) : t("not fetched yet"))
+      + (g.nodes_stale ? " — " + t("out of date: read again when a worker of the group answers (or Refresh nodes)") : ""));
   }
   return { async refresh() { syncRows(tb.tbody, await api("GET", "/api/admin/groups"), (g) => g.id, build, update); } };
 }

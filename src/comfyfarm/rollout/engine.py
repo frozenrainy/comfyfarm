@@ -237,18 +237,22 @@ class Engine:
                 status = "aborted" if aborting else "failed" if bad else "succeeded"
                 await c.execute("UPDATE rollouts SET status = $2, finished_at = now() WHERE id = $1", rid, status)
                 await audit(c, actor, f"rollout {status}", f"rollout #{rid}")
-                groups = [r["group_id"] for r in await c.fetch(
-                    "SELECT DISTINCT w.group_id FROM rollout_steps s JOIN workers w ON w.id = s.worker_id "
-                    "WHERE s.rollout_id = $1 AND s.status = 'done' AND w.group_id IS NOT NULL", rid)]
+                done = await c.fetch("SELECT w.id, w.group_id, w.kind FROM rollout_steps s JOIN workers w ON w.id = s.worker_id "
+                                     "WHERE s.rollout_id = $1 AND s.status = 'done' ORDER BY s.id", rid)
+                groups = list(dict.fromkeys(r["group_id"] for r in done if r["group_id"] is not None))
                 # the UI worker's node definitions stand in for groups without GPU workers: they changed with it
-                if await c.fetchval("SELECT EXISTS (SELECT 1 FROM rollout_steps s JOIN workers w ON w.id = s.worker_id "
-                                    "WHERE s.rollout_id = $1 AND s.status = 'done' AND w.kind = 'ui')", rid):
+                if any(r["kind"] == "ui" for r in done):
                     groups += [r["group_id"] for r in await c.fetch(
                         "SELECT group_id FROM object_info_snapshots WHERE source LIKE 'ui:%'") if r["group_id"] not in groups]
         refresh = getattr(self.r, "refresh_snapshot", None)       # set by the API module
-        for gid in groups if refresh else []:  # node definitions may have changed: refresh once, after the rollout (D-20)
+        # node definitions may have changed: read once, after the rollout (D-20), from the workers it just saw start —
+        # the health monitor may not have seen them back yet
+        verified = [r["id"] for r in done]
+        for gid in groups if refresh else []:
             try:
-                await refresh(gid)
+                if await refresh(gid, prefer=verified) is None:
+                    log.warning("rollout #%s: the node definitions of group %s could not be read (no worker of it "
+                                "answered) — they are read again when the editor next asks and one does", rid, gid)
             except Exception as e:
                 log.warning("object_info refresh after rollout failed: %s", type(e).__name__)
         log.info("rollout #%s %s", rid, status)

@@ -113,6 +113,7 @@ export default {
   "Runs on": "실행 조건", "Unfinished jobs": "끝나지 않은 작업", "Node list": "노드 목록",
   "New group": "새 그룹", "New worker group": "새 워커 그룹", "Group created": "그룹을 만들었습니다",
   "Refresh nodes": "노드 목록 새로 고침", "Node list refreshed": "노드 목록을 새로 읽었습니다",
+  "out of date: read again when a worker of the group answers (or Refresh nodes)": "오래됨: 그룹 워커가 응답하면 다시 읽습니다 (또는 노드 목록 새로 고침)",
   "Delete group {name}?": "{name} 그룹을 삭제할까요?",
   "fetched {time}": "{time} 읽음", "not fetched yet": "아직 읽지 않음",
   "A group can only be deleted when it has no workers and no unfinished jobs. Refresh the node list after installing or updating custom nodes on its workers.":

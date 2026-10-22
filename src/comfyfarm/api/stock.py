@@ -5,7 +5,9 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import asyncio
 import random
+import time
 import uuid
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -231,7 +233,7 @@ def make_router(ctx) -> APIRouter:
         who = identity(x_comfyfarm_user)
         async with router.db.conn() as c:
             g = await group_for(c, who, x_comfyfarm_group)
-            snap = g and await c.fetchrow("SELECT data, source FROM object_info_snapshots WHERE group_id = $1", g["id"])
+            snap = g and await c.fetchrow("SELECT data, source, stale FROM object_info_snapshots WHERE group_id = $1", g["id"])
             # definitions taken from the UI worker stand in until a GPU worker of the group can give its own
             stand_in = bool(snap) and (snap["source"] or "").startswith(UI_SOURCE)
             gpu_up = bool(g) and await c.fetchval("SELECT EXISTS (SELECT 1 FROM workers WHERE group_id = $1 AND enabled AND "
@@ -241,8 +243,13 @@ def make_router(ctx) -> APIRouter:
             if data is None:
                 raise HTTPException(503, "no worker group available to you, and no UI worker answered")
             return Response(data[1], media_type="application/json")
-        if snap is None or (stand_in and gpu_up):
-            snap_data = await refresh_snapshot(g["id"])
+        # out of date (its definitions changed and could not be read then): read again once a worker answers — at
+        # most once a minute, so a worker whose /object_info hangs does not hold up every editor that opens
+        due = bool(snap) and snap["stale"] and gpu_up and time.monotonic() - stale_tried.get(g["id"], -1e9) > 60
+        if due:
+            stale_tried[g["id"]] = time.monotonic()
+        if snap is None or (stand_in and gpu_up) or due:
+            snap_data = await refresh_once(g["id"])
             if snap_data is not None:
                 return Response(snap_data, media_type="application/json")
             if snap is None:
@@ -266,13 +273,14 @@ def make_router(ctx) -> APIRouter:
             log.warning("object_info from %s failed: %s", w["name"], type(e).__name__)
             return None
 
-    async def ui_object_info() -> tuple[str, bytes, int] | None:
+    async def ui_object_info(prefer: list[int] | None = None) -> tuple[str, bytes, int] | None:
         """The UI worker's own definitions. It runs the same node sets as the GPU workers (their CPU side), so a farm
         whose GPU workers are not there yet still opens workflows and shows its node packs. A pack that imports only
-        with a GPU is missing from them until a GPU worker answers."""
+        with a GPU is missing from them until a GPU worker answers. `prefer`: asked even before the health monitor
+        sees them online (a rollout just saw them start)."""
         async with router.db.conn() as c:
             ws = await c.fetch("SELECT name, base_url FROM workers WHERE kind = 'ui' AND enabled AND deleted_at IS NULL "
-                               "AND state = 'online' ORDER BY id")
+                               "AND (state = 'online' OR id = ANY($1::bigint[])) ORDER BY id", list(prefer or []))
         for w in ws:
             got = await fetch_object_info(w)
             if got:
@@ -280,13 +288,18 @@ def make_router(ctx) -> APIRouter:
         return None
 
     async def refresh_snapshot(group_id: int, prefer: list[int] | None = None) -> bytes | None:
-        """Fetch /object_info from an online worker of the group (idle first, up to 3; the `prefer`red ones before the
-        others — those that have a model the others are still copying); with none, from the UI worker, kept as a
-        stand-in until a GPU worker of the group answers. On failure the existing snapshot stays — a 502 here would
-        leave the frontend with an empty canvas (D-20)."""
+        """Fetch /object_info from an online worker of the group (idle first, up to 3); with none, from the UI worker,
+        kept as a stand-in until a GPU worker of the group answers. `prefer`red workers come first and are asked even
+        before the health monitor sees them online: a rollout that just saw them start the new profile (field, dev.17:
+        it ended 5 s before the monitor saw the worker back, nobody was asked, and the editor kept the definitions from
+        before two node packs), or those that have a model the others are still copying. On failure the existing
+        snapshot stays — a 502 here would leave the frontend with an empty canvas (D-20) — marked stale: read again
+        on the editor's next request once a worker answers."""
+        prefer = list(prefer or [])
         async with router.db.conn() as c:
             ws = await c.fetch("SELECT id, name, base_url, current_job_id IS NULL AS idle FROM workers WHERE group_id = $1 "
-                               "AND enabled AND deleted_at IS NULL AND NOT maintenance AND state = 'online'", group_id)
+                               "AND enabled AND deleted_at IS NULL AND NOT maintenance "
+                               "AND (state = 'online' OR id = ANY($2::bigint[]))", group_id, prefer)
             had = await c.fetchval("SELECT source FROM object_info_snapshots WHERE group_id = $1", group_id)
         idle = [w for w in ws if w["idle"]]; busy = [w for w in ws if not w["idle"]]
         random.shuffle(idle); random.shuffle(busy)
@@ -301,17 +314,31 @@ def make_router(ctx) -> APIRouter:
         # the UI worker only stands in where nothing better was ever had: GPU workers that are there but failed, or
         # a real snapshot whose workers are away for now, keep what the group had (stale-if-error)
         if got is None and not ws and (had is None or had.startswith(UI_SOURCE)):
-            if ui := await ui_object_info():
+            if ui := await ui_object_info(prefer):
                 source, got = UI_SOURCE + ui[0], ui[1:]
         if got is None:
+            if had is not None:
+                async with router.db.conn() as c:
+                    await c.execute("UPDATE object_info_snapshots SET stale = true WHERE group_id = $1", group_id)
             return None
         data, n = got
         async with router.db.conn() as c:
             await c.execute("INSERT INTO object_info_snapshots(group_id, data, node_count, source, fetched_at) "
                             "VALUES ($1, $2, $3, $4, now()) ON CONFLICT (group_id) DO UPDATE SET data = excluded.data, "
-                            "node_count = excluded.node_count, source = excluded.source, fetched_at = now()",
+                            "node_count = excluded.node_count, source = excluded.source, fetched_at = now(), stale = false",
                             group_id, gzip.compress(data), n, source)
         return data
+
+    stale_tried: dict[int, float] = {}
+    inflight: dict[int, asyncio.Future] = {}
+
+    async def refresh_once(group_id: int) -> bytes | None:
+        """One read per group at a time: editors opening together wait for the same one."""
+        f = inflight.get(group_id)
+        if f is None:
+            f = inflight[group_id] = asyncio.ensure_future(refresh_snapshot(group_id))
+            f.add_done_callback(lambda _f: inflight.pop(group_id, None))
+        return await asyncio.shield(f)
 
     router.refresh_snapshot = refresh_snapshot
     return api
