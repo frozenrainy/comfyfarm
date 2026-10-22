@@ -47,7 +47,7 @@ export default {
     root.append(h("section", {},
       h("div", { class: "section-head" }, h("h2", {}, t("Queue")), summary),
       h("div", { class: "filters" },
-        searchBox(admin ? t("search id, note, owner") : t("search id or note"), set("q")),
+        searchBox(admin ? t("search title, id, note, owner") : t("search title, id or note"), set("q")),
         h("select", { onchange: (e) => set("status")(e.target.value) }, ...STATUS.map(([v, l]) => h("option", { value: v }, t(l)))),
         groupSel.el, scope),
       tableHolder, empty,

@@ -16,19 +16,32 @@ function showResult(td, j) {
   td._key = key;
   td.replaceChildren();
   if (!f) { if (j.outputs) td.append(t("{n} file(s)", { n: j.outputs })); return; }
-  const image = f.mediaType === "images" && !/\.(mp4|webm|mov|gif)$/i.test(f.filename);
+  const video = /\.(mp4|webm|mov|mkv)$/i.test(f.filename);
+  const image = !video && (f.mediaType === "images" || /\.(png|jpe?g|webp|gif)$/i.test(f.filename));
   td.append(h("a", { href: viewUrl(f), target: "_blank", rel: "noopener", title: f.filename },
-    image ? h("img", { class: "thumb", src: viewUrl(f, "&preview=webp;60"), alt: f.filename, loading: "lazy" })
-          : `▶ ${f.filename}`));
+    image ? h("img", { class: "thumb", src: viewUrl(f, /\.gif$/i.test(f.filename) ? "" : "&preview=webp;60"), alt: f.filename, loading: "lazy" })
+    : video ? h("video", { class: "thumb", src: viewUrl(f) + "#t=0.1", muted: true, preload: "metadata" })   // its first frame
+    : `▶ ${f.filename}`));
   if (j.outputs > 1) td.append(h("span", { class: "muted" }, ` +${j.outputs - 1}`));
+}
+
+// What a person knows a job by: the title of its run (typed next to Run, else its workflow's tab name) and what the
+// workflow says about itself (where it saves, the start of its prompt); the id when there is neither.
+function showTitle(td, j) {
+  const key = `${j.title}|${j.hint}`;
+  if (td._key === key) return;
+  td._key = key;
+  td.replaceChildren(h("div", { class: "jt" }, j.title || j.hint || `#${j.prompt_id.slice(0, 8)}`),
+                     j.title && j.hint ? h("div", { class: "muted small jt" }, j.hint) : "");
+  td.title = [j.title, j.hint, j.prompt_id].filter(Boolean).join("\n");
 }
 
 // opts: { owner: show owner column, reorder: admin reorder buttons, refresh, list: () => current items }
 export function queueTable(opts) {
-  const cols = ["place", "status", ...(opts.owner ? ["owner"] : []), "group", "worker", "progress", "time", "note", "actions"];
-  const head = { place: "#", status: t("Status"), owner: t("Owner"), group: t("Group"), worker: t("Worker"), progress: t("Progress"),
+  const cols = ["place", "status", "job", ...(opts.owner ? ["owner"] : []), "group", "worker", "progress", "time", "note", "actions"];
+  const head = { place: "#", status: t("Status"), job: t("Job"), owner: t("Owner"), group: t("Group"), worker: t("Worker"), progress: t("Progress"),
                  time: t("Waiting / running"), note: t("Note"), actions: "" };
-  const cls = { place: "num", time: "num", actions: "actions" };
+  const cls = { place: "num", job: "job", time: "num", actions: "actions" };
   const tbl = table(cols.map((c) => [head[c], cls[c]]));
 
   function move(tr, dir) {
@@ -66,6 +79,7 @@ export function queueTable(opts) {
     if (queued && j.runnable === false) setPill(c.status, "blocked", `${t(j.status)} · ${t("blocked")}`);
     else setPill(c.status, j.status);
     c.status.title = queued && j.runnable === false ? t("No worker in a group you may use can run this job (requirements or permissions).") : "";
+    showTitle(c.job, j);
     if (c.owner) setText(c.owner, j.owner);
     setText(c.group, groupLabel(j));
     setText(c.worker, j.worker || "");
@@ -81,11 +95,11 @@ export function queueTable(opts) {
 }
 
 export function historyTable(opts) {
-  const cols = ["finished", "status", "result", ...(opts.owner ? ["owner"] : []), "group", "worker", "run", "error", "note",
+  const cols = ["finished", "status", "result", "job", ...(opts.owner ? ["owner"] : []), "group", "worker", "run", "error", "note",
                 "actions"];
-  const head = { finished: t("Finished"), status: t("Status"), result: t("Result"), owner: t("Owner"), group: t("Group"),
+  const head = { finished: t("Finished"), status: t("Status"), result: t("Result"), job: t("Job"), owner: t("Owner"), group: t("Group"),
                  worker: t("Worker"), run: t("Run time"), error: t("Error"), note: t("Note"), actions: "" };
-  const cls = { finished: "num", result: "result", run: "num", error: "err", actions: "actions" };
+  const cls = { finished: "num", result: "result", job: "job", run: "num", error: "err", actions: "actions" };
   const tbl = table(cols.map((c) => [head[c], cls[c]]));
   function build() {
     const tr = namedRow(cols, cls);
@@ -102,6 +116,7 @@ export function historyTable(opts) {
     c.finished.title = j.finished_at ? new Date(j.finished_at).toLocaleString(locale()) : "";
     setPill(c.status, j.status);
     showResult(c.result, j);
+    showTitle(c.job, j);
     if (c.owner) setText(c.owner, j.owner);
     setText(c.group, groupLabel(j));
     setText(c.worker, j.worker || "");

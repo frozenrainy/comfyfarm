@@ -31,7 +31,7 @@ export default {
     root.append(h("section", {},
       h("div", { class: "section-head" }, h("h2", {}, t("History")), button(t("Refresh"), () => refresh())),
       h("div", { class: "filters" },
-        searchBox(admin ? t("search id, note, error, owner") : t("search id, note or error"), set("q")),
+        searchBox(admin ? t("search title, id, note, error, owner") : t("search title, id, note or error"), set("q")),
         h("select", { onchange: (e) => set("status")(e.target.value) }, ...STATUS.map(([v, l]) => h("option", { value: v }, t(l)))),
         groupSel.el, h("span", { class: "dates" }, from, " – ", to), scope),
       holder, empty, h("div", { class: "pager" }, prev, pageInfo, next)));

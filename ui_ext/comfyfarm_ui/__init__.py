@@ -3,7 +3,8 @@
 
 Adds, through the official frontend extension API only:
   - a "Group: …" button next to Run (action bar); node definitions and submissions follow the chosen worker group,
-    remembered per browser (localStorage)
+    remembered per browser (localStorage); with it, a title for the runs of the open workflow (else its tab's name)
+  - "My queue" next to it: the user's jobs by title, their state, and what the finished ones made
   - retry-safe submit: one prompt_id per click, retried with the same id on 503 / network errors (no duplicates)
   - inside the dashboard's Workflow tab: a same-origin message to the ComfyFarm shell after each submit
 """

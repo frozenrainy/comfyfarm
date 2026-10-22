@@ -46,7 +46,7 @@ RUNNABLE = """EXISTS (SELECT 1 FROM worker_groups g JOIN workers w ON w.group_id
                  AND comfyfarm_satisfies(w.capabilities, j.requirements))"""
 
 JOB_COLS = ("j.id, j.prompt_id, j.status, j.priority, j.group_id, j.owner, j.note, j.progress, j.error, j.created_at, "
-            "j.dispatched_at, j.started_at, j.finished_at, j.retry_of, w.name AS worker, g.name AS group_name")
+            "j.dispatched_at, j.started_at, j.finished_at, j.retry_of, j.title, j.hint, w.name AS worker, g.name AS group_name")
 JOB_FROM = "FROM jobs j LEFT JOIN workers w ON w.id = j.worker_id LEFT JOIN worker_groups g ON g.id = j.group_id"
 
 
@@ -54,7 +54,7 @@ def job_doc(r, place=None) -> dict:
     d = {"key": r["id"], "prompt_id": str(r["prompt_id"]), "status": r["status"], "group_id": r["group_id"],
          "group": r["group_name"], "owner": r["owner"], "note": r["note"], "worker": r["worker"],
          "created_at": iso(r["created_at"]), "started_at": iso(r["started_at"] or r["dispatched_at"]),
-         "finished_at": iso(r["finished_at"]), "retry_of": r["retry_of"]}
+         "finished_at": iso(r["finished_at"]), "retry_of": r["retry_of"], "title": r["title"], "hint": r["hint"]}
     if r["status"] in ACTIVE:
         d["progress"] = r["progress"]
         d["place"] = place
@@ -78,6 +78,7 @@ def search_clause(q: str | None, args: list, admin: bool) -> str:
     n = len(args)
     owner = f" OR lower(j.owner) LIKE '%' || ${n} || '%'" if admin else ""
     return (f" AND (j.prompt_id::text LIKE ${n} || '%' OR lower(coalesce(j.note, '')) LIKE '%' || ${n} || '%'"
+            f" OR lower(coalesce(j.title, '') || ' ' || coalesce(j.hint, '')) LIKE '%' || ${n} || '%'"
             f" OR lower(coalesce(j.error->>'message', '')) LIKE '%' || ${n} || '%'{owner})")
 
 
@@ -122,7 +123,27 @@ def make_router(ctx: Ctx) -> APIRouter:
             out[r["id"]] = seen[r["group_id"]]
         return out
 
+    async def own_jobs(c, who: str, recent: int) -> tuple[list[dict], list[dict]]:
+        """The caller's unfinished jobs (with their place in line) and the last `recent` finished ones (with the first
+        file each saved): the dashboard's and the editor's "My queue"."""
+        line = await places(c)
+        mine = await c.fetch(f"SELECT {JOB_COLS}, {RUNNABLE} AS runnable {JOB_FROM} WHERE j.owner = $1 AND j.deleted_at IS NULL "
+                             "AND j.status IN ('pending','paused','dispatching','running','cancelling') "
+                             "ORDER BY j.status IN ('pending','paused'), j.priority DESC, j.id", who)
+        done = await c.fetch(f"SELECT {JOB_COLS}, j.outputs {JOB_FROM} WHERE j.owner = $1 AND j.deleted_at IS NULL "
+                             "AND j.status IN ('completed','failed','cancelled') "
+                             "ORDER BY j.finished_at DESC NULLS LAST, j.id DESC LIMIT $2", who, recent)
+        return [job_doc(r, line.get(r["id"])) for r in mine], [job_doc(r) for r in done]
+
     # ---- dashboard (personal) -----------------------------------------------------------------------------------
+    @api.get("/api/farm/mine")
+    async def my_queue(x_comfyfarm_user: str | None = Header(default=None), recent: int = 8):
+        """The editor's "My queue" (the extension, next to Run): titles, state, progress, the last results."""
+        who = ctx.identity(x_comfyfarm_user)
+        async with db.conn() as c:
+            queue, done = await own_jobs(c, who, min(max(recent, 0), 30))
+        return {"queue": queue, "recent": done}
+
     @api.get("/api/farm/dashboard")
     async def dashboard(x_comfyfarm_user: str | None = Header(default=None), days: int = 7, tz: str | None = None):
         who = ctx.identity(x_comfyfarm_user)
@@ -134,18 +155,12 @@ def make_router(ctx: Ctx) -> APIRouter:
                                    "count(w.id) FILTER (WHERE w.deleted_at IS NULL AND w.enabled AND w.state = 'online') AS online "
                                    "FROM worker_groups g LEFT JOIN workers w ON w.group_id = g.id "
                                    "WHERE $1::bigint[] IS NULL OR g.id = ANY($1) GROUP BY g.id ORDER BY g.name", allowed)
-            line = await places(c)
-            mine = await c.fetch(f"SELECT {JOB_COLS}, {RUNNABLE} AS runnable {JOB_FROM} WHERE j.owner = $1 AND j.deleted_at IS NULL "
-                                 "AND j.status IN ('pending','paused','dispatching','running','cancelling') "
-                                 "ORDER BY j.status IN ('pending','paused'), j.priority DESC, j.id", who)
-            recent = await c.fetch(f"SELECT {JOB_COLS} {JOB_FROM} WHERE j.owner = $1 AND j.deleted_at IS NULL "
-                                   "AND j.status IN ('completed','failed','cancelled') "
-                                   f"ORDER BY j.finished_at DESC NULLS LAST, j.id DESC LIMIT {RECENT_ON_DASHBOARD}", who)
+            queue, recent = await own_jobs(c, who, RECENT_ON_DASHBOARD)
             mystats = await statsvc.compute(c, since, until, zone, owner=who)
         return {"groups": [{"id": g["id"], "name": g["name"], "workers": g["workers"], "online": g["online"],
                             "health": health["groups"].get(str(g["id"]))} for g in groups],
-                "queue": [job_doc(r, line.get(r["id"])) for r in mine],
-                "recent": [job_doc(r) for r in recent],
+                "queue": queue,
+                "recent": recent,
                 "stats": {k: mystats[k] for k in ("since", "until", "total", "groups", "daily")}}
 
     @api.get("/api/farm/summary")

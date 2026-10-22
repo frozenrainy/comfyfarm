@@ -72,8 +72,8 @@ export default {
   // ---- queue / history ----
   "all unfinished": "끝나지 않은 전체", "all": "전체", "all groups": "모든 그룹", "all users": "모든 사용자",
   "No matching jobs.": "조건에 맞는 작업이 없습니다.",
-  "search id or note": "ID 또는 메모 검색", "search id, note, owner": "ID, 메모, 소유자 검색",
-  "search id, note or error": "ID, 메모, 오류 검색", "search id, note, error, owner": "ID, 메모, 오류, 소유자 검색",
+  "search title, id or note": "제목, ID, 메모 검색", "search title, id, note, owner": "제목, ID, 메모, 소유자 검색",
+  "search title, id, note or error": "제목, ID, 메모, 오류 검색", "search title, id, note, error, owner": "제목, ID, 메모, 오류, 소유자 검색",
   "farm: {queued} waiting · {running} running": "팜 전체: 대기 {queued} · 실행 {running}",
   "⤒ run next · ↑↓ move past the neighbour shown · ⤓ to the end. One order is shared by all groups.":
     "⤒ 다음 차례로 · ↑↓ 보이는 이웃과 순서 바꾸기 · ⤓ 맨 뒤로. 순서는 모든 그룹이 함께 씁니다.",

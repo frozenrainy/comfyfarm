@@ -66,10 +66,60 @@ async def transition(conn, job_id: int, to: str, frm: tuple[str, ...], reason: s
     return True
 
 
+TITLE_MAX, HINT_MAX = 100, 160
+TEXT_KEYS = ("text", "prompt", "positive_prompt", "positive", "text_g", "string", "value")
+
+
+def clean_title(s) -> str | None:
+    """A title as typed: one line, no control characters, at most TITLE_MAX characters; empty = none."""
+    if not isinstance(s, str):
+        return None
+    s = " ".join("".join(ch if ch.isprintable() else " " for ch in s).split())
+    return s[:TITLE_MAX] or None
+
+
+def job_hint(prompt: dict) -> str | None:
+    """What a workflow says about itself, for a person to tell queued jobs apart: where it saves (the first
+    filename_prefix) and the start of its prompt — the text the sampler's `positive` leads to, else the first text of
+    a prompt node. Read from the API prompt only; nothing of it decides anything."""
+    if not isinstance(prompt, dict):
+        return None
+    nodes = {str(k): v for k, v in prompt.items() if isinstance(v, dict)}
+    order = sorted(nodes, key=lambda k: (0, int(k)) if k.isdigit() else (1, k))
+
+    def text_of(nid: str, depth: int = 4) -> str | None:
+        n = nodes.get(nid)
+        if n is None or depth < 0:
+            return None
+        ins = n.get("inputs") or {}
+        for k in TEXT_KEYS:
+            if isinstance(ins.get(k), str) and ins[k].strip():
+                return ins[k]
+        for k in ("conditioning", "conditioning_1", "positive", "text", "prompt", "string"):       # through combiners
+            v = ins.get(k)
+            if isinstance(v, list) and v and (got := text_of(str(v[0]), depth - 1)):
+                return got
+        return None
+
+    prefix = next((nodes[k]["inputs"]["filename_prefix"].strip() for k in order
+                   if isinstance((nodes[k].get("inputs") or {}).get("filename_prefix"), str)
+                   and nodes[k]["inputs"]["filename_prefix"].strip()), None)
+    text = next((got for k in order if isinstance(v := (nodes[k].get("inputs") or {}).get("positive"), list) and v
+                 and (got := text_of(str(v[0])))), None)
+    if text is None:
+        text = next((got for k in order if any(w in str(nodes[k].get("class_type", "")) for w in ("TextEncode", "Prompt"))
+                     and (got := text_of(k, 0))), None)
+    if text is not None:
+        text = " ".join(text.split())
+        text = text if len(text) <= 60 else text[:59].rstrip() + "…"
+    hint = " · ".join(x for x in (prefix, text) if x)
+    return hint[:HINT_MAX] or None
+
+
 async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | None = None, group_id: int | None = None,
                  idempotency_key: str | None = None, browser_client_id: str | None = None, front: bool = False,
                  output_hint: str | None = None, requirements: dict | None = None,
-                 allowed_groups: list[int] | None = None, permissions=None) -> tuple[dict, bool]:
+                 allowed_groups: list[int] | None = None, permissions=None, title: str | None = None) -> tuple[dict, bool]:
     """Insert a pending job. Returns (job, created). Unknown group ids degrade to 'no group' (D-22).
     `permissions(conn)` → the owner's groups, read inside the inserting transaction (supersedes `allowed_groups`):
     a submit spends seconds validating, and a revocation in that time must not be missed (D-34)."""
@@ -94,9 +144,9 @@ async def submit(db: Database, *, owner: str, prompt: dict, extra_data: dict | N
             prio = await queue_end(c, front)
             row = await c.fetchrow(
                 "INSERT INTO jobs(prompt_id, priority, group_id, owner, idempotency_key, browser_client_id, output_hint, requirements, "
-                "allowed_groups) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (prompt_id) DO NOTHING RETURNING *",
+                "allowed_groups, title, hint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (prompt_id) DO NOTHING RETURNING *",
                 uuid.UUID(prompt_id), prio, group_id, owner, uuid.UUID(key) if key else None, browser_client_id, output_hint,
-                requirements, allowed_groups)
+                requirements, allowed_groups, clean_title(title), job_hint(prompt))
             if row is None:                                    # concurrent submit with the same key
                 existing = await c.fetchrow("SELECT * FROM jobs WHERE prompt_id = $1", uuid.UUID(prompt_id))
                 if existing["owner"] != owner:
@@ -213,9 +263,10 @@ async def retry(db: Database, job_id: int) -> dict | None:
                 raise NotPermitted(why)                      # as /prompt would: nobody could ever take the copy
             prio = await queue_end(c, False)
             row = await c.fetchrow(
-                "INSERT INTO jobs(prompt_id, priority, group_id, owner, output_hint, requirements, retry_of, allowed_groups) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
-                uuid.uuid4(), prio, old["group_id"], old["owner"], old["output_hint"], old["requirements"], old["id"], allowed)
+                "INSERT INTO jobs(prompt_id, priority, group_id, owner, output_hint, requirements, retry_of, allowed_groups, "
+                "title, hint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
+                uuid.uuid4(), prio, old["group_id"], old["owner"], old["output_hint"], old["requirements"], old["id"], allowed,
+                old["title"], old["hint"])
             await c.execute("INSERT INTO job_payloads(job_id, prompt, extra_data) VALUES ($1, $2, $3)",
                             row["id"], old["prompt"], old["extra_data"] or {})
             await c.execute("INSERT INTO job_events(job_id, to_status, reason) VALUES ($1, 'pending', $2)",

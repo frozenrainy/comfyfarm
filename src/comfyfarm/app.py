@@ -125,6 +125,7 @@ class PromptIn(BaseModel):                 # stock ComfyUI /prompt body + option
     front: bool = False
     comfyfarm_group: int | None = None
     comfyfarm_requirements: dict = {}
+    comfyfarm_title: str | None = None     # what the user calls this run (the extension: typed, else the tab's name)
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -201,7 +202,7 @@ def create_app(settings: Settings) -> FastAPI:
                                                 group_id=group_id, idempotency_key=body.prompt_id,
                                                 browser_client_id=body.client_id, front=body.front,
                                                 requirements=body.comfyfarm_requirements,
-                                                permissions=lambda c: ctx.allowed(c, owner))
+                                                permissions=lambda c: ctx.allowed(c, owner), title=body.comfyfarm_title)
         except jobsvc.NotPermitted as e:              # revoked while the workflow was being validated
             return not_permitted(str(e))
         except jobsvc.Conflict:
