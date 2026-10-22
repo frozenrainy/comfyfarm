@@ -721,7 +721,7 @@ export default {
   "their GPU workers get copies in the background": "그 그룹의 GPU 워커가 백그라운드로 복사본을 받습니다",
   "every model this scan takes in goes into these groups; none checked: no groups yet": "이번에 들여오는 모델 전부가 이 그룹에 들어갑니다. 아무것도 고르지 않으면 그룹 없이 들어옵니다",
   // ---- model folders, deleting models (docs/design/17 phase 2) ----
-  "Folders": "폴더", "Model folders": "모델 폴더", "ComfyUI's own": "ComfyUI 기본 폴더", "This farm's (ticked: removed)": "이 팜의 폴더 (체크하면 삭제)",
+  "Folders": "폴더", "Model folders": "모델 폴더", "ComfyUI's own: {folders}": "ComfyUI 기본 폴더: {folders}", "This farm's (ticked: removed)": "이 팜의 폴더 (체크하면 삭제)",
   "A new folder": "새 폴더",
   "the name a custom node looks its models up by (lowercase letters, digits, _ . -). Workers set up since 0.1.0-dev.19 list a new folder after their next start (a rollout or a restart)":
     "커스텀 노드가 모델을 찾는 폴더 이름 (소문자·숫자·_ . -). 0.1.0-dev.19 이후 설치한 워커는 다음 시작(롤아웃·재시작) 뒤 새 폴더를 봅니다",

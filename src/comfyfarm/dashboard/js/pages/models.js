@@ -191,9 +191,9 @@ export function models(root, { refresh }) {
     const b = data?.builder || {};
     const custom = b.custom_folders || [];
     const v = await formDialog(t("Model folders"), [
-      { name: "builtin", type: "pre", label: t("ComfyUI's own"), value: (b.folders || []).filter((f) => !custom.includes(f)).join("  ") },
       { name: "remove", type: "checkboxes", label: t("This farm's (ticked: removed)"), value: [],
-        options: custom.map((f) => ({ value: f, label: f })) },
+        options: custom.map((f) => ({ value: f, label: f })),
+        hint: t("ComfyUI's own: {folders}", { folders: (b.folders || []).filter((f) => !custom.includes(f)).join(", ") }) },
       { name: "add", label: t("A new folder"), placeholder: "ipadapter",
         hint: t("the name a custom node looks its models up by (lowercase letters, digits, _ . -). Workers set up since 0.1.0-dev.19 list a new folder after their next start (a rollout or a restart)") },
     ], t("Save"));
