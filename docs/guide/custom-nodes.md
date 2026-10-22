@@ -13,6 +13,16 @@ every worker of a group must run exactly the same nodes. Worked example at the e
 3. *Build* (your kind of GPU, both halves, with the node packs) → *From a recipe* → roll the UI profile out, then the
    group's. A pack that fails to import stops that worker's step and is named (§4).
 
+**A pack that is in no repository** (a studio's own tools, a pack handed over as a zip):
+- *Node packs → Upload an archive* takes a `.zip`, `.tar.gz`, `.tgz` or `.tar` of up to 2 GiB. GitHub's
+  *Download ZIP* works as it is: its single top-level directory is taken as the pack.
+- The pack is pinned to the archive's SHA-256, as a git pack is pinned to its commit. *Update* takes its next version as
+  another archive; the name and the settings stay.
+- The builder unpacks it when it builds, and only regular files and directories come out: absolute paths, `..`,
+  links and devices refuse the archive, and `.git` is left out ([design 18](../design/18-uploads.md)).
+- Archives skip the builder's allowed sources, so they need its own switch: `COMFYFARM_BUILD_NODE_ARCHIVES=1`. The
+  easy deployment has it on; turn it off with an empty value in `.env`. The strict deployment has it off.
+
 The pack's requirements, one OpenCV, submodules and the rest are handled by the build (rollouts.md §1, *Custom nodes in
 a recipe*). Read §1, §5–§7 below anyway: what a node does with routes, previews, settings and server paths is the same
 however it was installed. The rest of this page is the way without the builder.

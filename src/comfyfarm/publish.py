@@ -326,6 +326,8 @@ def find_dir(name: str, given: str | None) -> str:
 REPO = re.compile(r"^(https://[A-Za-z0-9][A-Za-z0-9._~:/@-]*|/[A-Za-z0-9._][A-Za-z0-9._/-]*)$")   # https, or a local path
 RELEASE = re.compile(r"^(v?[0-9][A-Za-z0-9._-]*|[0-9a-f]{40})$")                                     # a tag or a commit
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
+UNPACKED_MAX, ENTRIES_MAX = 4 << 30, 100_000            # an archive pack that unpacks to more is refused (design 18)
 INDEX = re.compile(r"^https://[A-Za-z0-9][A-Za-z0-9._~:/@%-]*$")
 
 
@@ -366,8 +368,12 @@ def check_recipe(r: dict) -> dict:
         if bad := [why for k, x in (v.get("env") or {}).items() if (why := env_problem(str(k), x))]:
             raise Refused(f"{who}: {role} environment the launcher refuses: {'; '.join(bad)}")
     for n in r.get("nodes", []):
-        if (not isinstance(n, dict) or not NAME.match(str(n.get("name", ""))) or not REPO.match(str(n.get("repo", "")))
-                or not COMMIT.match(str(n.get("commit", "")))):
+        archive = isinstance(n, dict) and "archive" in n
+        if archive and (not NAME.match(str(n.get("name", ""))) or not os.path.isabs(str(n.get("archive", "")))
+                        or not SHA256.match(str(n.get("archive_sha256", ""))) or "repo" in n or "commit" in n):
+            raise Refused(f"{who}: an archive node needs name, the archive's absolute path and its archive_sha256")
+        if not archive and (not isinstance(n, dict) or not NAME.match(str(n.get("name", ""))) or not REPO.match(str(n.get("repo", "")))
+                            or not COMMIT.match(str(n.get("commit", "")))):
             raise Refused(f"{who}: a node needs name, repo (https://… or a local path) and a full commit (no branches: "
                           "a recipe is pinned)")
         if not all(isinstance(x, str) and "\n" not in x and not x.startswith("-") for x in n.get("requirements", [])):
@@ -436,6 +442,70 @@ def fetch(repo: str, ref: str, dest: str, submodules: dict | None = None) -> tup
         shutil.copytree(src, dest, symlinks=True, ignore=shutil.ignore_patterns(".git"))
     shutil.rmtree(src)
     return dest, commit
+
+
+def unpack(archive: str, sha256: str, dest: str) -> str:
+    """A node pack from an archive (docs/design/18): the file must have the SHA-256 the pack is pinned to; zip or tar
+    (gzip or not), told by its first bytes. Only regular files and directories come out — absolute paths, `..`, links
+    and devices refuse the archive, .git is left out — and at most UNPACKED_MAX bytes in ENTRIES_MAX entries. A single
+    top-level directory is the pack (GitHub's "Download ZIP")."""
+    import tarfile
+    import zipfile
+    h = hashlib.sha256()
+    with open(archive, "rb") as f:
+        head = f.read(262)
+        f.seek(0)
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != sha256:
+        raise Refused(f"{os.path.basename(archive)} is not the archive the pack is pinned to (SHA-256 {h.hexdigest()[:12]}…, "
+                      f"pinned {sha256[:12]}…)")
+
+    def clean(name: str) -> str | None:
+        parts = [p for p in name.replace("\\", "/").split("/") if p not in ("", ".")]
+        if name.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", name) or ".." in parts:
+            raise Refused(f"the archive names a path outside itself: {name!r}")
+        return None if not parts or ".git" in parts else "/".join(parts)
+
+    entries = []                                   # (path, is_dir, size, read) with read() -> bytes for files
+    if head.startswith(b"PK\x03\x04"):
+        z = zipfile.ZipFile(archive)
+        for i in z.infolist():
+            mode = (i.external_attr >> 16) & 0o170000
+            if mode and mode not in (0o100000, 0o040000):
+                raise Refused(f"the archive holds a link or a special file: {i.filename!r} — only files and directories")
+            if (p := clean(i.filename)) is not None:
+                entries.append((p, i.is_dir(), i.file_size, (lambda i=i: z.open(i))))
+    elif head.startswith(b"\x1f\x8b") or head[257:262] == b"ustar":
+        t = tarfile.open(archive, "r:*")
+        for m in t.getmembers():
+            if not (m.isfile() or m.isdir()):
+                raise Refused(f"the archive holds a link or a special file: {m.name!r} — only files and directories")
+            if (p := clean(m.name)) is not None:
+                entries.append((p, m.isdir(), m.size, (lambda m=m: t.extractfile(m))))
+    else:
+        raise Refused(f"{os.path.basename(archive)} is not a zip or tar archive")
+    if len(entries) > ENTRIES_MAX or sum(e[2] for e in entries) > UNPACKED_MAX:
+        raise Refused(f"the archive unpacks to more than {ENTRIES_MAX} entries or {UNPACKED_MAX >> 30} GiB")
+    files = [e for e in entries if not e[1]]
+    if not files:
+        raise Refused("the archive holds no files")
+    tops = {e[0].split("/", 1)[0] for e in entries}
+    strip = next(iter(tops)) + "/" if len(tops) == 1 and all("/" in e[0] or e[1] for e in entries) else ""
+    os.makedirs(dest)
+    for path, is_dir, size, read in entries:
+        rel = path[len(strip):] if strip and path.startswith(strip) else (path if not strip else "")
+        if not rel:
+            continue
+        out = os.path.join(dest, rel)
+        if is_dir:
+            os.makedirs(out, exist_ok=True)
+            continue
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with read() as src, open(out, "wb") as f:
+            shutil.copyfileobj(src, f, 1 << 20)
+        os.chmod(out, 0o644)
+    return dest
 
 
 def node_requirements(n: dict, tree: str) -> tuple[list[str], list[str]]:
@@ -635,8 +705,12 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
         fetched, commits, subs, reqs = {}, {}, {}, {}
         for n in recipe.get("nodes", []):
             subs[n["name"]] = {}
-            fetched[n["name"]], commits[n["name"]] = fetch(n["repo"], n["commit"], os.path.join(work, "node-" + n["name"]),
-                                                           subs[n["name"]])
+            if "archive" in n:                     # an uploaded archive, pinned by its SHA-256 (design 18)
+                fetched[n["name"]] = unpack(n["archive"], n["archive_sha256"], os.path.join(work, "node-" + n["name"]))
+                commits[n["name"]] = "archive:" + n["archive_sha256"]
+            else:
+                fetched[n["name"]], commits[n["name"]] = fetch(n["repo"], n["commit"], os.path.join(work, "node-" + n["name"]),
+                                                               subs[n["name"]])
             reqs[n["name"]], notes = node_requirements(n, fetched[n["name"]])
             for note in notes:
                 log(note)
@@ -680,8 +754,10 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
             else:
                 nodes = next_name(art, "nodes", prefix)
                 publish_tree(art, "nodes", nodes, stage, recipe=recipe["recipe"],
-                             sources={n["name"]: {"repo": n["repo"], "commit": commits[n["name"]],
-                                                  **({"submodules": subs[n["name"]]} if subs[n["name"]] else {})}
+                             sources={n["name"]: ({"archive": n["archive_sha256"], "file": n.get("archive_name") or
+                                                   os.path.basename(n["archive"])} if "archive" in n else
+                                                  {"repo": n["repo"], "commit": commits[n["name"]],
+                                                   **({"submodules": subs[n["name"]]} if subs[n["name"]] else {})})
                                       for n in nodes_for(recipe, role)})
                 log(f"nodes/{nodes}: published")
             v = recipe[role]

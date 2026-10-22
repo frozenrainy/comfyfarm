@@ -63,6 +63,29 @@ The editor shows the new model once it reloads its model lists: press `R`, or re
 the model runs only on workers that have it. Until every worker of a group has the copy, the group's workers differ,
 as *System → Workers* shows.
 
+## Your own files
+
+**Upload** (*System → Models → Upload*):
+- Pick one file or several. Each gets a folder (the last one used is offered). Then pick the groups and *Upload all*.
+- A file goes up in 16 MiB pieces. If the connection breaks, it goes on where it stopped. If the page was closed, the
+  upload is listed as stopped: *Go on* and pick the same file again. An upload not finished within a day is dropped.
+- The router keeps the pieces in `<model store>/.uploads/`. The builder then copies the file into place while hashing
+  it, checks the format rule and signs it. The copy in the store is the builder's own, and the upload is removed.
+- Big files make the store's disk busy twice, for the upload and for the builder's copy. For those, use the inbox.
+
+**The inbox**, for big files or a control plane without internet nearby:
+1. On the control-plane host, as root, copy the files into `<model store>/inbox/<folder>/`, for example
+   `/srv/comfyfarm/model-store/inbox/loras/`. The builder makes the folders.
+2. *Scan the inbox*.
+
+The builder moves each file into the store, without copying, so any size is instant. It then hashes and signs it.
+The models appear in the list without groups. A file that does not pass stays in the inbox, and the dashboard says
+why:
+- a wrong name;
+- a format that can run code;
+- not readable by everyone (`chmod 644`);
+- a file of that name is in the store already.
+
 ## Gated models and tokens
 
 Some repositories need you to accept their terms first (`… is gated or private`):
@@ -93,8 +116,7 @@ node pack sources, it is the builder's setting, and the dashboard cannot change 
 
 - `COMFYFARM_HF_ENDPOINT` (`.env`) points the builder at a Hugging Face mirror that serves the same API and `resolve`
   URLs.
-- A control plane without internet cannot add models from the dashboard yet. Copy the files into the GPU workers'
-  *Models directory* yourself. Files carried into the store and signed there come with phase 2 of the design.
+- A control plane without internet: carry the files in and put them in the inbox (above).
 
 ## Not yet (phase 2)
 

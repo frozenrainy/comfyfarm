@@ -107,6 +107,7 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
 | `COMFYFARM_SHARED` | `/srv/comfyfarm/shared` | `input`, `output`, `user` below it — the storage GPU workers use too, at the same path |
 | `COMFYFARM_UID` | `47800` | the workers' service account uid (*Set up a worker*): the shared storage belongs to it |
 | `COMFYFARM_BUILD_NODE_SOURCES` | `https://github.com/` | where node packs picked in the dashboard may come from; empty = none |
+| `COMFYFARM_BUILD_NODE_ARCHIVES` | `1` | node packs uploaded as archives ([custom-nodes.md](custom-nodes.md)); empty = none |
 | `COMFYFARM_FIRST_RECIPE` | `rocm-gfx1201` | whose UI part the first start builds — the same in every recipe, so this is not a GPU choice |
 | `COMFYFARM_DEFAULT_GROUP` | (none) | the group whose nodes a user sees before picking one |
 

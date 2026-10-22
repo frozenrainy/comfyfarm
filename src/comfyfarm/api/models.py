@@ -83,9 +83,12 @@ def check_model(m: ModelIn, formats: list[str] | None) -> dict:
 
 
 def row_out(r, groups: list[int]) -> dict:
-    return {k: r[k] for k in ("id", "folder", "filename", "repo", "path", "ref", "revision", "size", "sha256", "key",
+    return {k: r[k] for k in ("id", "folder", "filename", "source", "repo", "path", "ref", "revision", "size", "sha256", "key",
                               "state", "bytes", "error", "note", "created_by")} | {
         "created_at": r["created_at"].isoformat(), "groups": groups}
+
+
+INBOX = "model_inbox"                   # settings key: the last scan of the inbox the builder was asked for
 
 
 def make_router(ctx: Ctx) -> APIRouter:
@@ -94,6 +97,7 @@ def make_router(ctx: Ctx) -> APIRouter:
     copies: dict[int, dict] = {}            # worker id → what its host said last (the dashboard's per-worker status)
     asked: dict[tuple[int, str], float] = {}  # (worker id, key) → when its copy was last asked for
     wake = asyncio.Event()                  # a model added, ready or given to a group: ask the hosts now
+    router.models_wake = wake               # uploads (api/uploads.py) wake it too
 
     def policy() -> dict | None:
         return read_policy(s.builds_dir)
@@ -129,7 +133,11 @@ def make_router(ctx: Ctx) -> APIRouter:
         by_model: dict[int, list[int]] = {}
         for x in links:
             by_model.setdefault(x["model_id"], []).append(x["group_id"])
-        return {"builder": {"configured": bool(s.builds_dir), "up": bool(p and p["up"]), "models": bool(p and p.get("models")),
+        async with db.conn() as c:
+            inbox = await inbox_state(c)
+        return {"inbox": inbox, "uploads": bool(s.models_dir and os.access(os.path.join(s.models_dir, ".uploads"), os.W_OK)),
+                "builder": {"configured": bool(s.builds_dir), "up": bool(p and p["up"]), "models": bool(p and p.get("models")),
+                            "inbox": (p or {}).get("inbox"), "archives": bool(p and p.get("node_archives")),
                             "formats": (p or {}).get("model_formats"), "hf_token": bool(p and p.get("hf_token")),
                             "store": bool(s.models_dir), "folders": list(fetch.MODEL_FOLDERS)},
                 "models": [row_out(r, sorted(by_model.get(r["id"], []))) for r in rows],
@@ -214,8 +222,16 @@ def make_router(ctx: Ctx) -> APIRouter:
                     raise HTTPException(404, "no such model")
                 if r["state"] != "failed":
                     raise HTTPException(409, f"it is {r['state']}, not failed")
-                rid = write_builder_request(s.builds_dir, {"kind": "model", **{k: r[k] for k in (
-                    "repo", "path", "ref", "folder", "filename")}, "by": who})
+                if r["source"] == "inbox":
+                    raise HTTPException(409, "a file from the inbox: put it there again and scan the inbox")
+                if r["source"] == "upload":
+                    if not os.path.isfile(os.path.join(s.models_dir or "", ".uploads", f"{r['upload']}.part")):
+                        raise HTTPException(409, "the uploaded file is gone — remove this one and upload it again")
+                    req = {"kind": "model-file", "upload": str(r["upload"]), "folder": r["folder"], "filename": r["filename"],
+                           "size": r["size"]}
+                else:
+                    req = {"kind": "model", **{k: r[k] for k in ("repo", "path", "ref", "folder", "filename")}}
+                rid = write_builder_request(s.builds_dir, {**req, "by": who})
                 await c.execute("UPDATE models SET state = 'queued', error = NULL, request = $2 WHERE id = $1", model_id, rid)
                 await audit(c, who, "model retried", f"{r['folder']}/{r['filename']}", request=rid)
         wake.set()
@@ -228,7 +244,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         who = ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
             async with c.transaction():
-                r = await c.fetchrow("SELECT folder, filename, state FROM models WHERE id = $1 FOR UPDATE", model_id)
+                r = await c.fetchrow("SELECT folder, filename, state, upload FROM models WHERE id = $1 FOR UPDATE", model_id)
                 if r is None:
                     raise HTTPException(404, "no such model")
                 if r["state"] != "failed":
@@ -236,7 +252,60 @@ def make_router(ctx: Ctx) -> APIRouter:
                                              "(take it out of its groups to stop new copies)")
                 await c.execute("DELETE FROM models WHERE id = $1", model_id)
                 await audit(c, who, "model removed", f"{r['folder']}/{r['filename']}")
+        if r["upload"] and s.models_dir:                     # its upload, kept for a Retry until now
+            try:
+                os.remove(os.path.join(s.models_dir, ".uploads", f"{r['upload']}.part"))
+            except OSError:
+                pass
         return {"deleted": True}
+
+    # ---- the inbox (docs/design/18): files an operator copied into <model store>/inbox/<folder>/ --------------------
+    @api.post("/api/admin/models/inbox")
+    async def scan_inbox(x_comfyfarm_user: str | None = Header(default=None)):
+        """Ask the builder to take in what the inbox holds; the models it took appear in the list (no groups yet)."""
+        who = ctx.admin(x_comfyfarm_user)
+        need_builder()
+        async with db.conn() as c:
+            cur = await c.fetchval("SELECT value FROM settings WHERE key = $1", INBOX)
+            if cur and (st := builder_status(s.builds_dir, cur.get("request", ""))) and st.get("state") in ("queued", "running"):
+                raise HTTPException(409, "the builder is scanning the inbox already")
+            rid = write_builder_request(s.builds_dir, {"kind": "model-inbox", "by": who})
+            await c.execute("INSERT INTO settings(key, value, updated_by) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE "
+                            "SET value = excluded.value, updated_by = excluded.updated_by, updated_at = now()",
+                            INBOX, {"request": rid, "by": who, "registered": False}, who)
+            await audit(c, who, "model inbox scanned", None, request=rid)
+        wake.set()
+        return {"id": rid}
+
+    async def inbox_state(c) -> dict | None:
+        cur = await c.fetchval("SELECT value FROM settings WHERE key = $1", INBOX)
+        if not cur or not s.builds_dir:
+            return None
+        st = builder_status(s.builds_dir, cur.get("request", "")) or {"state": "failed", "error": "the builder lost the scan"}
+        return {"request": cur.get("request"), "state": st.get("state"), "error": st.get("error"),
+                "results": st.get("results") or [], "model": st.get("model"), "finished": st.get("finished")}
+
+    async def register_inbox() -> bool:
+        """A finished scan: the models it took in, into the list (ready, no groups) — once."""
+        async with db.conn() as c:
+            cur = await c.fetchval("SELECT value FROM settings WHERE key = $1", INBOX)
+            if not cur or cur.get("registered") or not s.builds_dir:
+                return False
+            st = builder_status(s.builds_dir, cur.get("request", ""))
+            if not st or st.get("state") not in ("done", "failed"):
+                return False
+            got = False
+            async with c.transaction():
+                for x in st.get("results") or []:
+                    if x.get("key") and not x.get("error"):
+                        got = True
+                        await c.execute(
+                            "INSERT INTO models(folder, filename, source, size, sha256, key, state, bytes, created_by) "
+                            "VALUES ($1,$2,'inbox',$3,$4,$5,'ready',$3,$6) ON CONFLICT (folder, filename) DO NOTHING",
+                            x["folder"], x["filename"], x.get("size"), x.get("sha256"), x["key"], cur.get("by"))
+                await c.execute("UPDATE settings SET value = value || jsonb_build_object('registered', true) WHERE key = $1",
+                                INBOX)
+            return got
 
     # ---- the hosts' (fetch.py get-model) ------------------------------------------------------------------------
     def signed_entry(key: str) -> tuple[bytes, bytes]:
@@ -369,7 +438,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         while True:
             try:
                 copying = any(x.get("copying") for x in copies.values())      # followed closely while copies come
-                if (await follow_builder() or wake.is_set()
+                if (await follow_builder() or await register_inbox() or wake.is_set()
                         or time.monotonic() - last_copies >= (TICK if copying else COPIES_EVERY)):
                     wake.clear()
                     last_copies = time.monotonic()
@@ -387,4 +456,5 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     router.background.append(model_loop)
     router.models_step = (follow_builder, follow_copies, copies)        # for tests
+    router.models_register_inbox = register_inbox
     return api

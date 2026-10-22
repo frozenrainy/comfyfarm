@@ -68,10 +68,14 @@ class PackPatch(BaseModel):
 def check_pack(p: dict) -> dict:
     if not publish.NAME.match(p["name"]) or p["name"] in ("comfyfarm_worker", "comfyfarm_ui"):
         raise HTTPException(400, "name: letters, digits and . _ - (the pack's directory under custom_nodes)")
-    if not HTTPS.match(p["repo"]) or ".." in p["repo"]:
-        raise HTTPException(400, "repo: an https:// git URL")
-    if not COMMIT.match(p["commit"]):
-        raise HTTPException(400, "commit: the full 40-character commit (a pack is pinned)")
+    if p.get("archive"):                     # an uploaded archive (docs/design/18): pinned by its SHA-256, no repository
+        if p.get("repo") or p.get("commit"):
+            raise HTTPException(400, "an archive pack has no repository or commit — upload a new archive to change it")
+    else:
+        if not HTTPS.match(p.get("repo") or "") or ".." in p["repo"]:
+            raise HTTPException(400, "repo: an https:// git URL")
+        if not COMMIT.match(p.get("commit") or ""):
+            raise HTTPException(400, "commit: the full 40-character commit (a pack is pinned)")
     if p.get("requirements_file") and not all(publish.REQ_FILE.match(f.strip()) for f in p["requirements_file"].split(",")):
         raise HTTPException(400, "requirements_file: .txt files inside the pack, comma-separated")
     for x in p.get("constraints") or []:
@@ -197,7 +201,8 @@ def make_router(ctx: Ctx) -> APIRouter:
         p = policy()
         return {"configured": bool(s.builds_dir), "up": bool(p and p["up"]), "recipes": (p or {}).get("recipes", []),
                 "about": (p or {}).get("about", {}),
-                "node_sources": (p or {}).get("node_sources", []), "artifacts": bool(s.artifacts_dir),
+                "node_sources": (p or {}).get("node_sources", []), "node_archives": bool((p or {}).get("node_archives")),
+                "artifacts": bool(s.artifacts_dir),
                 "signing": bool((p or {}).get("signing_key")), "first_start": dict(first)}
 
     @api.get("/api/admin/getting-started")
@@ -237,15 +242,19 @@ def make_router(ctx: Ctx) -> APIRouter:
         if body.packs:
             async with db.conn() as c:
                 for r in await c.fetch("SELECT * FROM node_packs ORDER BY name"):
-                    n = {"name": r["name"], "repo": r["repo"], "commit": r["commit"], "ui": r["ui"]}
+                    n = ({"name": r["name"], "archive": r["archive"], "archive_name": r["archive_name"], "ui": r["ui"]}
+                         if r["archive"] else {"name": r["name"], "repo": r["repo"], "commit": r["commit"], "ui": r["ui"]})
                     if r["requirements_file"]:
                         n["requirements_file"] = r["requirements_file"]
                     if r["constraints"]:
                         n["constraints"] = list(r["constraints"])
                     nodes.append(n)
-            if nodes and not p.get("node_sources"):
+            if any("repo" in n for n in nodes) and not p.get("node_sources"):
                 raise HTTPException(400, "the builder takes no node packs from the dashboard (its COMFYFARM_BUILD_NODE_SOURCES "
                                          "is empty) — build without them, or ask whoever runs it")
+            if any("archive" in n for n in nodes) and not p.get("node_archives"):
+                raise HTTPException(400, "the builder takes no node pack archives (its COMFYFARM_BUILD_NODE_ARCHIVES is off) — "
+                                         "build without them, or ask whoever runs it")
         rid = write_request({"kind": "build", "recipe": body.recipe, "roles": body.roles, "nodes": nodes, "by": who})
         async with db.conn() as c:
             await audit(c, who, "build requested", body.recipe, request=rid, roles=body.roles, packs=len(nodes))
@@ -292,7 +301,8 @@ def make_router(ctx: Ctx) -> APIRouter:
         async with db.conn() as c:
             rows = await c.fetch("SELECT * FROM node_packs ORDER BY name")
         return [{k: (list(r[k]) if k == "constraints" and r[k] is not None else r[k]) for k in
-                 ("id", "name", "repo", "commit", "ref", "ui", "requirements_file", "constraints", "note", "added_by")}
+                 ("id", "name", "repo", "commit", "ref", "archive", "archive_name", "ui", "requirements_file", "constraints",
+                  "note", "added_by")}
                 | {"updated_at": r["updated_at"].isoformat()} for r in rows]
 
     @api.post("/api/admin/node-packs/resolve")
@@ -333,7 +343,8 @@ def make_router(ctx: Ctx) -> APIRouter:
                 cur = await c.fetchrow("SELECT * FROM node_packs WHERE id = $1 FOR UPDATE", pack_id)
                 if cur is None:
                     raise HTTPException(404, "no such node pack")
-                merged = {k: cur[k] for k in ("name", "repo", "commit", "ref", "ui", "requirements_file", "constraints", "note")}
+                merged = {k: cur[k] for k in ("name", "repo", "commit", "ref", "archive", "ui", "requirements_file", "constraints",
+                                              "note")}
                 merged["constraints"] = list(merged["constraints"] or [])
                 merged.update({k: v for k, v in body.model_dump().items() if v is not None})
                 p = check_pack(merged)

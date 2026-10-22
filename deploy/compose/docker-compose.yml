@@ -66,6 +66,7 @@ services:
       - ${COMFYFARM_KEYS_DIR:-./keys}:/keys                          # agent key, known_hosts, token files (owned by uid 10001)
       - ${COMFYFARM_ARTIFACTS_MOUNT:-./no-artifacts}:${COMFYFARM_ARTIFACTS_MOUNT:-/no-artifacts}:ro   # the store, at its path
       - ${COMFYFARM_MODELS_MOUNT:-./no-models}:${COMFYFARM_MODELS_MOUNT:-/no-models}:ro   # the model store: GPU hosts copy from here
+      - ${COMFYFARM_MODELS_MOUNT:-./no-models}/.uploads:${COMFYFARM_MODELS_MOUNT:-/no-models}/.uploads   # uploaded models (docs/design/18)
       - builds:/builds
       - ${COMFYFARM_BACKUP_DIR:-./backups}:/backups                    # comfyfarm backup /backups (owned by uid 10001)
       - ${COMFYFARM_USER_DIR:-./no-user-dir}:/userdata:ro              # the UI worker's user directory (backup --user-dir)
@@ -128,6 +129,8 @@ services:
       COMFYFARM_HF_TOKEN_FILE: /var/lib/comfyfarm-builder/hf_token
       COMFYFARM_HF_ENDPOINT: ${COMFYFARM_HF_ENDPOINT:-}                  # a mirror; empty = huggingface.co
       COMFYFARM_MODELS_ALLOW_PICKLE: ${COMFYFARM_MODELS_ALLOW_PICKLE:-}  # 1 = .ckpt/.pt/.bin too (they can run code)
+      # node packs uploaded as archives (docs/design/18): off here unless set to 1
+      COMFYFARM_BUILD_NODE_ARCHIVES: ${COMFYFARM_BUILD_NODE_ARCHIVES:-}
     volumes:
       - builds:/builds
       - builder-home:/var/lib/comfyfarm-builder

@@ -36,9 +36,9 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
   router do it over ssh), read the host check, add the worker ([design 14](docs/design/14-worker-setup.md)).
 - Node packs from the dashboard: add a repository, build, roll out — requirements resolved together, one OpenCV,
   submodules, pinned commits, from the sources the operator allows ([design 15](docs/design/15-control-plane-builds.md)).
-- Models from the dashboard: paste Hugging Face links — downloaded once on the control plane, pinned, checked and
-  signed, copied to the GPU workers of the groups that use them in the background; no pickles by default
-  ([models](docs/guide/models.md)).
+- Models from the dashboard: paste Hugging Face links, or upload your own files (resumable) or drop them in an inbox —
+  checked and signed once on the control plane, copied to the GPU workers of the groups that use them in the
+  background; no pickles by default ([models](docs/guide/models.md)). Node packs from git or as uploaded archives.
 - Postgres ledger on a single box. High availability (two routers, Postgres replication) is designed, not built yet
   ([architecture](docs/design/01-architecture.md) C).
 

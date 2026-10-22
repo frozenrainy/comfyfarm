@@ -257,14 +257,16 @@ def give_to_service(paths: list[str], owner: tuple[int, int] = SERVICE_OWNER) ->
 BUILDER_OWNER = (10002, 10002)              # the builder service: owns the artifact store (deploy/easy/compose.yaml)
 
 
-def take_dir(path: str, owner: tuple[int, int]) -> str:
+def take_dir(path: str, owner: tuple[int, int], ours: tuple[str, ...] = ()) -> str:
     """Give a directory to an account when it is new (empty — Docker made it for a bind mount) or already that
-    account's. A directory holding someone else's files is left alone: never another owner's data."""
+    account's. A directory holding someone else's files is left alone: never another owner's data. `ours`: empty
+    subdirectories the farm makes itself (a nested bind mount's, made by Docker before this runs) do not count."""
     os.makedirs(path, exist_ok=True)
     st = os.stat(path)
     if (st.st_uid, st.st_gid) == owner:
         return f"{path}: uid {owner[0]}'s"
-    if os.listdir(path):
+    if [n for n in os.listdir(path) if not (n in ours and os.path.isdir(os.path.join(path, n))
+                                            and not os.listdir(os.path.join(path, n)))]:
         return (f"{path}: LEFT ALONE — it holds files and belongs to uid {st.st_uid}, not {owner[0]}; "
                 f"if it is meant for this farm: chown -R {owner[0]}:{owner[1]} {path}")
     give_to_service([path], owner)
@@ -278,7 +280,8 @@ def prepare_compose(keys: str, builds: str | None, ui_token: str | None, art: st
     the request/status directories, the UI worker's agent token, and who owns the store and the shared storage."""
     said = []
     if builds:
-        for sub, owner in (("requests", SERVICE_OWNER), ("status", BUILDER_OWNER)):
+        # archives: node pack archives the router files for the builder to unpack (docs/design/18)
+        for sub, owner in (("requests", SERVICE_OWNER), ("status", BUILDER_OWNER), ("archives", SERVICE_OWNER)):
             path = os.path.join(builds, sub)
             os.makedirs(path, exist_ok=True)
             os.chmod(path, 0o755)                          # each side reads the other's, writes only its own
@@ -296,7 +299,14 @@ def prepare_compose(keys: str, builds: str | None, ui_token: str | None, art: st
         os.chmod(ui_token, 0o755)
     for path, owner in ((art, BUILDER_OWNER), (models, BUILDER_OWNER), (builder_home, BUILDER_OWNER), (ui_home, farm_owner)):
         if path:
-            said.append(take_dir(path, owner))
+            said.append(take_dir(path, owner, (".uploads", "inbox") if path == models else ()))
+    if models:
+        # the router's uploads, until the builder has them (docs/design/18), and the inbox an operator copies into
+        for sub, owner in ((".uploads", SERVICE_OWNER), ("inbox", BUILDER_OWNER)):
+            path = os.path.join(models, sub)
+            os.makedirs(path, exist_ok=True)
+            os.chmod(path, 0o755)
+            os.chown(path, *owner)
     if shared:
         os.makedirs(shared, exist_ok=True)
         for sub in ("input", "output", "user"):

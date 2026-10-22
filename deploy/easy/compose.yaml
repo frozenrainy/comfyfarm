@@ -22,6 +22,7 @@
 #   COMFYFARM_UID              the workers' service account uid (default 47800): shared storage belongs to it
 #   COMFYFARM_BUILD_NODE_SOURCES  where node packs picked in the dashboard may come from (default https://github.com/;
 #                              empty = none) — the builder's setting: the router cannot change it
+#   COMFYFARM_BUILD_NODE_ARCHIVES  node packs uploaded as archives (default 1; empty = off) — the builder's setting
 #   COMFYFARM_HF_ENDPOINT, COMFYFARM_MODELS_ALLOW_PICKLE  models: a Hugging Face mirror; formats that can run code
 #                              (docs/guide/models.md) — the builder's settings, as the node pack sources
 #   COMFYFARM_FIRST_RECIPE     the recipe whose UI half the first start builds (default rocm-gfx1201; the UI half is the
@@ -108,6 +109,7 @@ services:
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builds:/builds
       - ${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:${COMFYFARM_ARTIFACTS_MOUNT:-/srv/comfyfarm/art}:ro
       - ${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}:${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}:ro   # GPU hosts copy models from here
+      - ${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}/.uploads:${COMFYFARM_MODELS_MOUNT:-/srv/comfyfarm/model-store}/.uploads     # uploaded models, until the builder has them (docs/design/18)
       - ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}/user:/userdata:ro   # the users' workflows: comfyfarm backup --user-dir /userdata
     networks: [db, front]
 
@@ -146,6 +148,8 @@ services:
       COMFYFARM_HF_TOKEN_FILE: /var/lib/comfyfarm-builder/hf_token
       COMFYFARM_HF_ENDPOINT: ${COMFYFARM_HF_ENDPOINT:-}                  # a mirror; empty = huggingface.co
       COMFYFARM_MODELS_ALLOW_PICKLE: ${COMFYFARM_MODELS_ALLOW_PICKLE:-}  # 1 = .ckpt/.pt/.bin too (they can run code)
+      # node packs uploaded as archives (docs/design/18): on here, as all of GitHub is; empty turns them off
+      COMFYFARM_BUILD_NODE_ARCHIVES: ${COMFYFARM_BUILD_NODE_ARCHIVES-1}
     volumes:
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builds:/builds
       - ${COMFYFARM_DATA:-/srv/comfyfarm/data}/builder-home:/var/lib/comfyfarm-builder

@@ -1,7 +1,8 @@
 // Rollout tab (docs/design/07): how each worker is launched (instance), what it should run (profile), and rolling a
 // profile out one worker at a time — drain, restart, wait for the badge, verify, revert that worker on failure.
-import { act, api, button, formDialog, h, namedRow, pill, qs, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
+import { act, api, bar, button, formDialog, h, namedRow, pill, qs, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
 import { checkDetail, checkHost } from "./setup.js";
+import { bytes, pickFiles, uploadFile } from "../upload.js";
 
 const ACTIVE = ["running", "aborting", "interrupted"];
 const PATHS = [["art", "Artifact store <ART>"], ["local", "Local root <LOCAL>"], ["models", "Models directory"],
@@ -24,7 +25,8 @@ export function rollout(root, { refresh }) {
   const banner = h("div");
   const firstStart = h("div"), buildInfo = h("div");
   let builds = [];
-  const packInfo = h("p", { class: "muted small" });
+  const packInfo = h("p", { class: "muted small" }), packUpload = h("div");
+  const ARCHIVES = ".zip,.tar.gz,.tgz,.tar";
   const active = h("div");
   const instT = table([[t("Worker")], [t("Instance")], [t("Profile")], [t("Badge")], [t("Rev")], [t("Running")], [t("Restart via")], ["", "actions"]]);
   const profT = table([[t("Profile")], [t("Core")], [t("Venv")], [t("Nodes")], [t("Flags")], [t(t("Assigned")), "num"], [t("Note")], ["", "actions"]]);
@@ -77,7 +79,8 @@ export function rollout(root, { refresh }) {
                           button(t("New profile"), () => editProfile(null))),
       h("p", { class: "muted small" }, t("A profile in use cannot be changed — copy it and roll the copy out.")), profT.el),
     h("section", {}, head(t("Node packs"), button(t("Build"), () => buildOnPlane(), { cls: "primary" }),
-                          button(t("Add node pack"), () => addPack())), packInfo, packT.el),
+                          button(t("Add node pack"), () => addPack()), button(t("Upload an archive"), () => uploadPack())),
+      packInfo, packUpload, packT.el),
     h("section", {}, head(t("Audit log")), auditT.el, h("div", { class: "pager" }, auditPrev, auditInfo, auditNext)));
 
   // ---- instances ---------------------------------------------------------------------------------------------
@@ -359,7 +362,40 @@ export function rollout(root, { refresh }) {
         requirements_file: v.requirements_file.trim() || null, constraints: words(v.constraints), note: v.note.trim() || null });
     }, t("Node pack added — Build to put it into the artifact store"), refresh);
   }
+  // ---- node packs from archives (docs/design/18) ----------------------------------------------------------------
+  async function sendArchive(file, meta) {
+    const show = (n) => packUpload.replaceChildren(h("div", { class: "callout" }, h("strong", {}, file.name), " ",
+      bar(n / file.size), " ", h("span", { class: "muted small" }, `${bytes(n)} / ${bytes(file.size)}`)));
+    try {
+      return await act(() => uploadFile(file, "nodepack", meta, show),
+                       t("{name} is in — Build to put it into the artifact store", { name: file.name }), refresh);
+    } finally {
+      packUpload.replaceChildren();
+    }
+  }
+  async function uploadPack() {
+    if (!builder?.up) return toast(t("the builder is not running (docker compose ps builder)"), true);
+    if (!builder.node_archives) return toast(t("this farm's builder takes no node pack archives (its COMFYFARM_BUILD_NODE_ARCHIVES is off)"), true);
+    const [file] = await pickFiles({ accept: ARCHIVES });
+    if (!file) return;
+    const guess = file.name.replace(/\.(zip|tar\.gz|tgz|tar)$/i, "").replace(/-(main|master)$/i, "").replace(/[^A-Za-z0-9._-]/g, "-");
+    const v = await formDialog(t("Node pack from {file}", { file: file.name }), [
+      { name: "name", label: t("Name (its directory under custom_nodes)"), value: guess, required: true },
+      { name: "ui", type: "checkbox", value: true, label: t("UI worker"), text: t("Also on the UI worker"), hint: PACK_TIP },
+      { name: "requirements_file", label: t("Requirements file (empty: requirements.txt, else pyproject.toml)"), placeholder: "requirements.txt" },
+      { name: "constraints", label: t("Constraints (optional, comma-separated)"), placeholder: "kornia<0.8" },
+      { name: "note", label: t("Note") },
+    ], t("Upload"), { wide: true });
+    if (!v) return;
+    sendArchive(file, { name: v.name.trim(), ui: !!v.ui, requirements_file: v.requirements_file.trim() || null,
+                        constraints: words(v.constraints), note: v.note.trim() || null });
+  }
   async function updatePack(p) {
+    if (p.archive) {                          // an archive pack: its new version is another archive
+      const [file] = await pickFiles({ accept: ARCHIVES });
+      if (file) sendArchive(file, { pack_id: p.id });
+      return;
+    }
     await act(async () => {
       const commit = await resolve(p.repo, p.ref || "");
       if (commit === p.commit) return "same";
@@ -406,15 +442,16 @@ export function rollout(root, { refresh }) {
   }
   function buildPack() {
     const tr = namedRow(["name", "repo", "commit", "ui", "note", "actions"], { actions: "actions" });
-    tr.c.actions.append(button(t("Update"), () => updatePack(tr._item), { title: t("look up the newest commit of its branch or tag") }),
+    tr.c.actions.append(button(t("Update"), () => updatePack(tr._item), { title: t("a git pack: the newest commit of its branch or tag; an archive pack: upload its new version") }),
       button(t("Edit"), () => editPack(tr._item)),
       button(t("Remove"), () => { if (confirm(t("Remove node pack {name}? Profiles built with it keep it until you build again.", tr._item))) act(() => api("DELETE", `/api/admin/node-packs/${tr._item.id}`), t("Removed"), refresh); },
              { cls: "danger" }));
     return tr;
   }
   function updatePackRow(tr, p) {
-    setText(tr.c.name, p.name); setText(tr.c.repo, p.repo.replace(/^https:\/\//, ""));
-    setText(tr.c.commit, p.commit.slice(0, 12) + (p.ref ? ` (${p.ref})` : ""));
+    setText(tr.c.name, p.name);
+    setText(tr.c.repo, p.archive ? t("archive: {file}", { file: p.archive_name || "?" }) : p.repo.replace(/^https:\/\//, ""));
+    setText(tr.c.commit, p.archive ? `sha256 ${p.archive.slice(0, 12)}` : p.commit.slice(0, 12) + (p.ref ? ` (${p.ref})` : ""));
     setText(tr.c.ui, p.ui ? t("yes") : t("no — GPU only")); setText(tr.c.note, p.note ?? "");
   }
   function renderBuilds(list) {

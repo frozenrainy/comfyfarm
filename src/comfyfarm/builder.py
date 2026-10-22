@@ -30,7 +30,10 @@ from . import fetch, publish
 REQUEST = re.compile(r"^[0-9]{10,20}-[0-9a-f]{8}$")
 REF = re.compile(r"^(?!-)[A-Za-z0-9][A-Za-z0-9._/+-]{0,120}$")
 HTTPS = re.compile(r"^https://[A-Za-z0-9][A-Za-z0-9._~:/@-]*$")
-NODE_KEYS = {"name", "repo", "commit", "ui", "requirements_file", "constraints"}
+NODE_KEYS = {"name", "repo", "commit", "ui", "requirements_file", "constraints", "archive", "archive_name"}
+# which requests each lane takes: a lookup never waits for a build, nor a build for a 30 GB download
+LANES = {"resolve": ("resolve",), "build": ("build",), "model": ("model", "model-file", "model-inbox")}
+UPLOAD = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 HF_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 HF_PATH = re.compile(r"^(?!/)(?!.*(^|/)\.\.?(/|$))[A-Za-z0-9._ +()/-]{1,300}$")
 SAFE_MODELS = (".safetensors", ".sft", ".gguf")     # load as data; .ckpt/.pt/.pth/.bin can run code (docs/design/17)
@@ -65,8 +68,9 @@ class Builder:
     def __init__(self, requests: str, status: str, art: str, share: str, uv: str | None, node_sources: list[str],
                  platform_tag: str | None = None, runner=subprocess.run, key: str | None = None,
                  models: str | None = None, hf_endpoint: str = "https://huggingface.co", hf_token_file: str | None = None,
-                 allow_pickle: bool = False):
+                 allow_pickle: bool = False, node_archives: bool = False):
         self.requests, self.status, self.art, self.share, self.uv = requests, status, art, share, uv
+        self.node_archives = node_archives       # node packs from uploaded archives (docs/design/18): the operator's switch
         self.models = models                     # the farm's model store (docs/design/17); None: no models here
         self.hf_endpoint, self.hf_token_file, self.allow_pickle = hf_endpoint.rstrip("/"), hf_token_file, allow_pickle
         self.node_sources = [s for s in node_sources if s]
@@ -87,12 +91,25 @@ class Builder:
     def check_nodes(self, nodes) -> list[dict]:
         if not isinstance(nodes, list) or len(nodes) > MAX_NODES:
             raise Refused(f"nodes: a list of at most {MAX_NODES} node packs")
-        if nodes and not self.node_sources:
-            raise Refused("node packs from the dashboard are off for this farm (COMFYFARM_BUILD_NODE_SOURCES is empty)")
         out = []
+        archives = os.path.join(os.path.dirname(self.requests), "archives")
         for n in nodes:
             if not isinstance(n, dict) or set(n) - NODE_KEYS:
                 raise Refused(f"node pack: only {', '.join(sorted(NODE_KEYS))}")
+            if "archive" in n:                # uploaded (design 18): by its SHA-256, from the router's archives
+                if not self.node_archives:
+                    raise Refused("node pack archives are off for this farm (the builder's COMFYFARM_BUILD_NODE_ARCHIVES)")
+                sha = n.get("archive")
+                if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+                    raise Refused(f"node pack {n.get('name')!r}: archive is its SHA-256")
+                path = next((p for ext in ("zip", "tar.gz", "tar")
+                             if os.path.isfile(p := os.path.join(archives, f"{sha}.{ext}"))), None)
+                if path is None:
+                    raise Refused(f"node pack {n.get('name')!r}: its archive {sha[:12]}… is not in {archives}")
+                out.append({**n, "archive": path, "archive_sha256": sha})    # checked against the SHA-256 when unpacked
+                continue
+            if not self.node_sources:
+                raise Refused("node packs from the dashboard are off for this farm (COMFYFARM_BUILD_NODE_SOURCES is empty)")
             if not self.allowed_source(n.get("repo")):
                 raise Refused(f"node pack {n.get('name')!r}: {n.get('repo')!r} is not under the allowed sources "
                               f"({', '.join(self.node_sources)})")
@@ -112,6 +129,7 @@ class Builder:
     def policy(self) -> dict:
         return {"recipes": self.recipes(), "about": self.about(), "node_sources": self.node_sources,
                 "platform": self.platform, "signing_key": self.public_key(), "models": bool(self.models),
+                "node_archives": self.node_archives, "inbox": os.path.join(self.models, "inbox") if self.models else None,
                 "model_formats": None if self.allow_pickle else list(SAFE_MODELS),
                 "hf_token": bool(self.hf_token_file and os.path.isfile(self.hf_token_file)),
                 "alive": now(), "pid": os.getpid()}
@@ -194,6 +212,9 @@ class Builder:
 
     # ---- the work ----------------------------------------------------------------------------------------------
     def pending(self, kind: str) -> list[str]:
+        """The requests of a lane (LANES[kind]) not taken yet, oldest first. One of a kind no lane takes is failed
+        here rather than left queued for ever."""
+        kinds, every = LANES.get(kind, (kind,)), {k for ks in LANES.values() for k in ks}
         out = []
         for n in sorted(os.listdir(self.requests)):
             rid = n[:-5]
@@ -201,8 +222,13 @@ class Builder:
                 continue
             try:
                 with open(os.path.join(self.requests, n)) as f:
-                    if json.loads(f.read(MAX_REQUEST)).get("kind") == kind:
-                        out.append(rid)
+                    asked = json.loads(f.read(MAX_REQUEST)).get("kind")
+                asked = asked if isinstance(asked, str) else None
+                if asked in kinds:
+                    out.append(rid)
+                elif asked not in every and kind == "build":
+                    write_json(os.path.join(self.status, rid + ".json"), {"id": rid, "state": "failed", "kind": str(asked)[:40],
+                                                                         "error": f"unknown request kind {str(asked)[:40]!r}"})
             except (OSError, ValueError, AttributeError):
                 write_json(os.path.join(self.status, rid + ".json"), {"id": rid, "state": "failed", "error": "unreadable request"})
         return out
@@ -225,7 +251,7 @@ class Builder:
             st["kind"] = req.get("kind")
             if st["kind"] == "build":                    # the dashboard says what is building while it runs
                 st["recipe"] = str(req.get("recipe"))[:100]
-            if st["kind"] == "model":
+            if st["kind"] in ("model", "model-file"):
                 st["model"] = f"{req.get('folder')}/{req.get('filename')}"[:300]
             write_json(os.path.join(self.status, rid + ".json"), st)
             say(f"{rid}: {req.get('kind')} " + (f"{req.get('recipe')} ({','.join(req.get('roles') or publish.ROLES)}, "
@@ -237,6 +263,10 @@ class Builder:
                 st.update(self.build(rid, req))
             elif req.get("kind") == "model":
                 st.update(self.model(rid, req, st))
+            elif req.get("kind") == "model-file":
+                st.update(self.model_file(rid, req, st))
+            elif req.get("kind") == "model-inbox":
+                st.update(self.model_inbox(rid, st))
             else:
                 raise Refused(f"unknown request kind {req.get('kind')!r}")
             st["state"] = "done"
@@ -390,13 +420,21 @@ class Builder:
             raise Refused(f"downloading {repo}/{path} broke off: {type(e).__name__}: {e} — Retry goes on from there")
         except fetch.Refused as e:
             raise Refused(str(e))
-        entry = fetch.model_entry(folder, filename, hf["size"], sha)
+        key = self.place_model(part, folder, filename, hf["size"], sha)
+        return {"key": key, "sha256": sha, "size": hf["size"], "revision": hf["commit"], "folder": folder,
+                "filename": filename, "bytes": hf["size"], "total": hf["size"]}
+
+    def place_model(self, src: str, folder: str, filename: str, size: int, sha: str, own: bool = True) -> str:
+        """A checked file into <models>/<folder>/<filename> and its signed entry beside the others. `own`: the
+        builder's copy, made read-only; a file from the inbox is the operator's and stays as it is (moved)."""
+        entry = fetch.model_entry(folder, filename, size, sha)
         doc = fetch.model_doc(entry)
         dest_dir = os.path.join(self.models, folder)
         os.makedirs(dest_dir, exist_ok=True)
-        os.chmod(part, 0o444)
+        if own:
+            os.chmod(src, 0o444)
         fetch.forget_others(self.models, doc)
-        os.replace(part, os.path.join(dest_dir, filename))
+        os.replace(src, os.path.join(dest_dir, filename))
         lst = os.path.join(self.models, "signed", "model", doc["key"] + ".json")
         os.makedirs(os.path.dirname(lst), exist_ok=True)
         with open(lst + ".tmp", "wb") as f:
@@ -406,8 +444,85 @@ class Builder:
         if self.key and os.path.exists(self.key):
             fetch.sign(lst, self.key)
             os.chmod(lst + ".sig", 0o644)
-        return {"key": doc["key"], "sha256": sha, "size": hf["size"], "revision": hf["commit"], "folder": folder,
-                "filename": filename, "bytes": hf["size"], "total": hf["size"]}
+        return doc["key"]
+
+    def safe_format(self, filename: str) -> None:
+        if not self.allow_pickle and not filename.lower().endswith(SAFE_MODELS):
+            raise Refused(f"{filename}: only {', '.join(SAFE_MODELS)} — other formats can run code when ComfyUI loads them "
+                          "(the builder's COMFYFARM_MODELS_ALLOW_PICKLE=1 allows them)")
+
+    def model_file(self, rid: str, req: dict, st: dict) -> dict:
+        """An uploaded model (docs/design/18): the router's part file, copied into place while it is hashed — the
+        file in the store is the builder's, the router cannot change it once it is signed."""
+        if not self.models:
+            raise Refused("this builder has no model store (COMFYFARM_MODELS)")
+        upload, folder, filename, size = req.get("upload"), req.get("folder"), req.get("filename"), req.get("size")
+        if not isinstance(upload, str) or not UPLOAD.match(upload):
+            raise Refused(f"not an upload: {upload!r}")
+        if folder not in fetch.MODEL_FOLDERS or not isinstance(filename, str) or not fetch.MODEL_FILE.match(filename):
+            raise Refused(f"bad place for a model: {folder!r}/{filename!r}")
+        self.safe_format(filename)
+        src = os.path.join(self.models, ".uploads", upload + ".part")
+        if os.path.islink(src) or not os.path.isfile(src):
+            raise Refused(f"the upload of {filename} is not there any more — upload it again")
+        if not isinstance(size, int) or os.path.getsize(src) != size:
+            raise Refused(f"the upload of {filename} has {os.path.getsize(src)} bytes, not {size}")
+        incoming = os.path.join(self.models, ".incoming")
+        os.makedirs(incoming, exist_ok=True)
+        tmp = os.path.join(incoming, f"upload-{upload}.copy")
+        h, n, last = hashlib.sha256(), 0, 0.0
+        with open(src, "rb") as f, open(tmp, "wb") as out:
+            for chunk in iter(lambda: f.read(fetch.CHUNK), b""):
+                h.update(chunk)
+                out.write(chunk)
+                n += len(chunk)
+                if time.monotonic() - last >= 2.0:
+                    last = time.monotonic()
+                    write_json(os.path.join(self.status, rid + ".json"), {**st, "bytes": n, "total": size})
+        if n != size:
+            os.remove(tmp)
+            raise Refused(f"the upload of {filename} changed while it was copied")
+        sha = h.hexdigest()
+        key = self.place_model(tmp, folder, filename, size, sha)
+        return {"key": key, "sha256": sha, "size": size, "revision": None, "folder": folder, "filename": filename,
+                "bytes": size, "total": size}
+
+    def model_inbox(self, rid: str, st: dict) -> dict:
+        """Files an operator copied into <models>/inbox/<folder>/ (docs/design/18): each checked (a plain file, a
+        proper name, the format rule, readable by everyone, not in the store already), hashed, moved into place and
+        signed. One that does not pass stays in the inbox and says why."""
+        if not self.models:
+            raise Refused("this builder has no model store (COMFYFARM_MODELS)")
+        import stat as _stat
+        results = []
+        for folder in fetch.MODEL_FOLDERS:
+            d = os.path.join(self.models, "inbox", folder)
+            for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+                if name.startswith("."):
+                    continue
+                p, r = os.path.join(d, name), {"folder": folder, "filename": name}
+                try:
+                    info = os.lstat(p)
+                    if not _stat.S_ISREG(info.st_mode):
+                        raise Refused("not a plain file (a link or a directory)")
+                    if not fetch.MODEL_FILE.match(name):
+                        raise Refused("file name: letters, digits, spaces and . _ + ( ) -")
+                    self.safe_format(name)
+                    if not info.st_mode & 0o004:
+                        raise Refused("not readable by everyone — chmod 644 it (GPU hosts and the router read it)")
+                    if os.path.lexists(os.path.join(self.models, folder, name)):
+                        raise Refused("a file of that name is in the store already — rename this one")
+                    write_json(os.path.join(self.status, rid + ".json"), {**st, "model": f"{folder}/{name}"})
+                    h = hashlib.sha256()
+                    with open(p, "rb") as f:
+                        for chunk in iter(lambda: f.read(fetch.CHUNK), b""):
+                            h.update(chunk)
+                    r.update(sha256=h.hexdigest(), size=info.st_size,
+                             key=self.place_model(p, folder, name, info.st_size, h.hexdigest(), own=False))
+                except (Refused, OSError, fetch.Refused) as e:
+                    r["error"] = str(e)
+                results.append(r)
+        return {"results": results}
 
     # ---- the loop ----------------------------------------------------------------------------------------------
     def recover(self) -> None:
@@ -438,9 +553,8 @@ class Builder:
                 for rid in self.pending(kind):
                     self.handle(rid)
                 time.sleep(poll)
-        threading.Thread(target=lane, args=("resolve",), daemon=True).start()     # a lookup never waits for a build
-        threading.Thread(target=lane, args=("build",), daemon=True).start()
-        threading.Thread(target=lane, args=("model",), daemon=True).start()       # nor a build for a 30 GB download
+        for kind in LANES:
+            threading.Thread(target=lane, args=(kind,), daemon=True).start()
         while True:
             write_json(os.path.join(self.status, "policy.json"), self.policy())
             time.sleep(HEARTBEAT)
@@ -473,12 +587,20 @@ def main(argv=None) -> int:
     models = a.models if a.models and os.path.isdir(a.models) and os.access(a.models, os.W_OK) else None
     if a.models and not models:
         print(f"comfyfarm builder: {a.models} is not a writable directory — no models from the dashboard", flush=True)
+    archives = os.environ.get("COMFYFARM_BUILD_NODE_ARCHIVES") == "1"
     b = Builder(a.requests, a.status, a.art, a.share, a.uv if os.path.exists(a.uv) else None, sources, plat, key=key,
                 models=models, hf_endpoint=os.environ.get("COMFYFARM_HF_ENDPOINT") or "https://huggingface.co",
                 hf_token_file=os.environ.get("COMFYFARM_HF_TOKEN_FILE") or None,
-                allow_pickle=os.environ.get("COMFYFARM_MODELS_ALLOW_PICKLE") == "1")
+                allow_pickle=os.environ.get("COMFYFARM_MODELS_ALLOW_PICKLE") == "1", node_archives=archives)
+    for folder in fetch.MODEL_FOLDERS if models else ():      # the inbox an operator copies files into (design 18)
+        try:
+            os.makedirs(os.path.join(models, "inbox", folder), exist_ok=True)
+        except OSError as e:
+            print(f"comfyfarm builder: no inbox: {e}", flush=True)
+            break
     print(f"comfyfarm builder: store {a.art}, recipes {', '.join(b.recipes()) or 'none'}, dashboard node packs "
-          + (f"from {', '.join(sources)}" if sources else "off") + f", models {models or 'off'}", flush=True)
+          + (f"from {', '.join(sources)}" if sources else "off") + (" and archives" if archives else "")
+          + f", models {models or 'off'}", flush=True)
     b.serve()
     return 0
 

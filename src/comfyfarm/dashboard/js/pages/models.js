@@ -1,6 +1,7 @@
 // System → Models (docs/design/17): models from Hugging Face, downloaded and signed by the builder into the control
 // plane's model store, and copied to the GPU workers of the groups that use them.
-import { act, api, button, formDialog, h, namedRow, pill, setText, syncRows, t, table, toast } from "../core.js";
+import { act, api, bar, button, formDialog, h, namedRow, pill, setText, syncRows, t, table, toast } from "../core.js";
+import { bytes, pickFiles, uploadFile } from "../upload.js";
 
 const size = (n) => n == null ? "—" : n >= 2 ** 30 ? `${(n / 2 ** 30).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 2 ** 20))} MB`;
 
@@ -25,15 +26,20 @@ export function parseLines(text, folder, folders) {
   return { models: out, unknown };
 }
 
+// files picked for upload in this page (kept across refreshes): {file, folder, state, received, error, cancel}
+const staged = [];
+
 export function models(root, { refresh }) {
-  let data = null, groups = [];
+  let data = null, groups = [], server = [];
   const info = h("div");
+  const uploadsEl = h("div"), inboxEl = h("div");
   const modelsT = table([[t("Model")], [t("Source")], [t("Size")], [t("State")], [t("Groups")], [t("Note")], ["", "actions"]]);
   const workersT = table([[t("Worker")], [t("Group")], [t("Copies")], [t("Copying")], [t("Problems")]]);
   const empty = h("p", { class: "empty muted" }, t("No models yet. Add Hugging Face links — the builder downloads them, GPU workers get copies."));
   root.append(
     h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Models")),
-      button(t("Add models"), () => add(), { cls: "primary" })), info, modelsT.el, empty),
+      button(t("Add models"), () => add(), { cls: "primary" }), button(t("Upload"), () => pick()),
+      button(t("Scan the inbox"), () => scan())), info, uploadsEl, inboxEl, modelsT.el, empty),
     h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Copies on the GPU workers"))),
       h("p", { class: "muted small" }, t("Each worker gets the models its group uses, in the background — no restart. ComfyUI lists a new one when its model list is refreshed.")),
       workersT.el));
@@ -70,6 +76,101 @@ export function models(root, { refresh }) {
       if (r) return;
     }
   }
+  // ---- uploads (docs/design/18): the operator's own files, in chunks, resumable ----------------------------------
+  const accept = () => (data?.builder?.formats || []).join(",");
+  let batchGroups = null;
+  async function pick() {
+    const b = data?.builder;
+    if (!b?.up || !b.models) return toast(t("the builder is not running, or has no model store (docs/guide/models.md)"), true);
+    if (!data.uploads) return toast(t("the router cannot write the model store's .uploads directory (docs/guide/models.md)"), true);
+    const files = await pickFiles({ multiple: true, accept: accept() });
+    const last = localStorage.getItem("comfyfarm.uploadFolder") || "loras";
+    for (const file of files) staged.push({ file, folder: last, state: "staged", received: 0 });
+    renderUploads();
+  }
+  async function startAll() {
+    localStorage.setItem("comfyfarm.uploadFolder", staged.find((x) => x.state === "staged")?.folder || "loras");
+    for (const x of staged.filter((y) => y.state === "staged" || y.state === "failed")) {
+      x.state = "uploading"; x.error = null; renderUploads();
+      try {
+        await uploadFile(x.file, "model", { folder: x.folder, groups: (batchGroups || []).map(Number) },
+                         (n) => { x.received = n; renderUploads(); }, x.resume || null, () => x.state === "cancelled");
+        x.state = "done";
+      } catch (e) {
+        if (x.state !== "cancelled") { x.state = "failed"; x.error = e.message; }
+      }
+      renderUploads();
+    }
+    refresh();
+  }
+  async function resume(u) {
+    const [file] = await pickFiles({ accept: accept() });
+    if (!file) return;
+    if (file.name !== u.filename || file.size !== u.size) return toast(t("not the same file: {name}, {size} bytes", { name: u.filename, size: u.size }), true);
+    staged.push({ file, folder: u.meta.folder, state: "staged", received: u.received, resume: { ...u, chunk: 16 << 20 } });
+    renderUploads();
+    startAll();
+  }
+  let uploadsSig = "";
+  function renderUploads() {
+    const sig = JSON.stringify([staged.map((x) => [x.file.name, x.folder, x.state, x.received, x.error]),
+                                server.map((u) => [u.id, u.received]), (batchGroups || []).join()]);
+    if (sig === uploadsSig) return;
+    uploadsSig = sig;
+    const folders = data?.builder?.folders || [];
+    const rows = staged.map((x, i) => h("tr", {},
+      h("td", {}, x.file.name), h("td", { class: "num nowrap" }, bytes(x.file.size)),
+      h("td", {}, x.state === "staged"
+        ? h("select", { onchange: (e) => { x.folder = e.target.value; } }, ...folders.map((f) => h("option", { value: f, selected: f === x.folder }, f)))
+        : x.folder),
+      h("td", { class: "nowrap" }, x.state === "uploading" ? bar(x.received / x.file.size) : pill(x.state === "staged" ? "pending" : x.state === "done" ? "ready" : x.state, t(x.state)),
+        x.error ? h("div", { class: "muted small" }, x.error) : ""),
+      h("td", { class: "actions" }, x.state === "uploading"
+        ? button(t("Cancel"), () => { x.state = "cancelled"; renderUploads(); })
+        : x.state !== "done" ? button("✕", () => { staged.splice(i, 1); renderUploads(); }, { title: t("Remove from the list") }) : "")));
+    const mine = new Set(staged.filter((x) => x.resume).map((x) => x.resume.id));
+    const left = server.filter((u) => u.kind === "model" && u.state === "uploading" && !mine.has(u.id)
+                                       && !staged.some((x) => x.state === "uploading" && x.file.name === u.filename));
+    const rest = left.map((u) => h("tr", {},
+      h("td", {}, u.filename), h("td", { class: "num nowrap" }, bytes(u.size)), h("td", {}, u.meta.folder || ""),
+      h("td", { class: "nowrap" }, t("{done} of {total} arrived — stopped", { done: bytes(u.received), total: bytes(u.size) })),
+      h("td", { class: "actions" }, button(t("Go on"), () => resume(u), { title: t("pick the same file again") }),
+        button(t("Cancel"), () => act(() => api("DELETE", `/api/admin/uploads/${u.id}`), t("Cancelled"), refresh), { cls: "danger" }))));
+    if (!rows.length && !rest.length) return uploadsEl.replaceChildren();
+    const waiting = staged.some((x) => x.state === "staged" || x.state === "failed");
+    uploadsEl.replaceChildren(h("div", { class: "callout" },
+      h("strong", {}, t("Uploads")), " ",
+      h("span", { class: "muted small" }, t("each file goes up in pieces; a broken connection goes on where it stopped")),
+      h("table", {}, h("tbody", {}, ...rows, ...rest)),
+      waiting ? h("div", { class: "checks" }, h("span", { class: "muted" }, t("Groups that use them") + ": "),
+        ...groups.map((g) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: (batchGroups || []).includes(String(g.id)),
+          onchange: (e) => { batchGroups = [...new Set([...(batchGroups || []).filter((v) => v !== String(g.id)), ...(e.target.checked ? [String(g.id)] : [])])]; } }),
+          ` ${g.name}`))) : "",
+      waiting ? h("div", { class: "dialog-actions" }, button(t("Clear"), () => { for (let i = staged.length - 1; i >= 0; i--) if (staged[i].state !== "uploading") staged.splice(i, 1); renderUploads(); }),
+        button(t("Upload all"), () => startAll(), { cls: "primary" })) : ""));
+  }
+
+  // ---- the inbox ---------------------------------------------------------------------------------------------
+  async function scan() {
+    if (!data?.builder?.inbox) return toast(t("the builder has no model store (COMFYFARM_MODELS, docs/guide/models.md)"), true);
+    act(() => api("POST", "/api/admin/models/inbox"), t("The builder takes in what the inbox holds — the models appear below"), refresh);
+  }
+  let inboxSig = "";
+  function renderInbox() {
+    const x = data?.inbox, path = data?.builder?.inbox;
+    const sig = JSON.stringify([x, path]);
+    if (sig === inboxSig) return;
+    inboxSig = sig;
+    const how = path ? h("p", { class: "muted small" }, t("Inbox: files copied (as root) into {path}/<folder>/ on the control-plane host, then Scan the inbox.", { path })) : "";
+    if (!x) return inboxEl.replaceChildren(how);
+    const bad = (x.results || []).filter((r) => r.error), ok = (x.results || []).filter((r) => !r.error);
+    inboxEl.replaceChildren(how, h("p", { class: "small" },
+      x.state === "done" ? t("Last scan: {n} taken in", { n: ok.length }) + (bad.length ? " · " + t("{n} left in the inbox", { n: bad.length }) : "")
+      : x.state === "failed" ? t("Last scan failed: {error}", { error: x.error || "" })
+      : t("Scanning the inbox…") + (x.model ? ` ${x.model}` : "")),
+      ...bad.map((r) => h("div", { class: "muted small" }, `${r.folder}/${r.filename}: ${r.error}`)));
+  }
+
   async function edit(m) {
     const v = await formDialog(`${m.folder}/${m.filename}`, [groupBoxes(m.groups), { name: "note", label: t("Note"), value: m.note ?? "" }],
                                t("Save"));
@@ -93,7 +194,8 @@ export function models(root, { refresh }) {
   }
   function updateModel(tr, m) {
     setText(tr.c.model, `${m.folder}/${m.filename}`);
-    setText(tr.c.source, `${m.repo} · ${m.path} @ ${m.revision ? m.revision.slice(0, 10) : m.ref}`);
+    setText(tr.c.source, m.source === "upload" ? t("uploaded by {who}", { who: m.created_by || "?" })
+      : m.source === "inbox" ? t("from the inbox") : `${m.repo} · ${m.path} @ ${m.revision ? m.revision.slice(0, 10) : m.ref}`);
     setText(tr.c.size, size(m.size));
     const label = m.state === "downloading" && m.size ? `${t("downloading")} ${Math.floor((100 * m.bytes) / m.size)}%` : t(m.state);
     const sig = `${m.state}|${label}|${m.error ?? ""}`;
@@ -123,7 +225,10 @@ export function models(root, { refresh }) {
   return {
     poll: 3000,
     async refresh() {
-      [data, groups] = await Promise.all([api("GET", "/api/admin/models"), api("GET", "/api/admin/groups")]);
+      [data, groups, server] = await Promise.all([api("GET", "/api/admin/models"), api("GET", "/api/admin/groups"),
+                                                  api("GET", "/api/admin/uploads").catch(() => [])]);
+      renderUploads();
+      renderInbox();
       const b = data.builder;
       const why = !b.configured ? t("no control-plane builder here: models from the dashboard need the compose deployment's builder")
         : !b.up ? t("the builder is not running (docker compose ps builder; its log says why)")

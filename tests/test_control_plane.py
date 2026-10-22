@@ -61,7 +61,7 @@ def test_the_builder_builds_installed_recipes_with_packs_from_allowed_sources_on
                      ({"recipe": "rocm-x", "roles": ["gpu", "root"]}, "roles"),
                      ({"recipe": "rocm-x", "nodes": [{**good, "repo": "https://evil.example/x"}]}, "not under the allowed"),
                      ({"recipe": "rocm-x", "nodes": [{**good, "repo": "https://github.com/../x"}]}, "not under the allowed"),
-                     ({"recipe": "rocm-x", "nodes": [{**good, "post_install": "curl | sh"}]}, "only commit"),
+                     ({"recipe": "rocm-x", "nodes": [{**good, "post_install": "curl | sh"}]}, "node pack: only"),
                      ({"recipe": "rocm-x", "nodes": "all"}, "a list")]:
         st = b.handle(ask(tmp, {"kind": "build", **bad}))
         assert st["state"] == "failed" and why in st["error"], (bad, st)
