@@ -274,7 +274,7 @@ def make_router(ctx: Ctx) -> APIRouter:
             # explicit instance columns: `i.*` would bring a NULL worker_id for workers without an instance
             rows = await c.fetch("SELECT w.id AS worker_id, w.name AS worker, w.state, w.enabled, w.maintenance, w.capabilities, "
                                  "g.name AS group_name, i.instance, i.role, i.platform, i.hosts, i.listen, i.port, i.paths, "
-                                 "i.restart_backend, i.restart_config, i.profile_id, p.name AS profile_name FROM workers w "
+                                 "i.restart_backend, i.restart_config, i.profile_id, i.model_folders, p.name AS profile_name FROM workers w "
                                  "LEFT JOIN worker_groups g ON g.id = w.group_id LEFT JOIN instances i ON i.worker_id = w.id "
                                  "LEFT JOIN profiles p ON p.id = i.profile_id WHERE w.deleted_at IS NULL ORDER BY w.name")
             profiles = {r["id"]: r for r in await c.fetch("SELECT * FROM profiles")}
@@ -285,8 +285,10 @@ def make_router(ctx: Ctx) -> APIRouter:
                  "enabled": r["enabled"], "maintenance": r["maintenance"], "comfyui": caps.get("comfyui"),
                  "backend": caps.get("backend"), "instance": None}
             if r["instance"]:
+                # every column the render reads (model_folders: field, dev.19 — without it the badge compared the
+                # worker with the legacy folders and said `differs` for every host set up since)
                 inst = {k: r[k] for k in ("instance", "role", "platform", "hosts", "listen", "port", "paths",
-                                          "restart_backend", "restart_config", "profile_id")}
+                                          "restart_backend", "restart_config", "profile_id", "model_folders")}
                 render = rd.build(dict(profiles[r["profile_id"]]), inst) if r["profile_id"] else None
                 d.update(instance=inst, profile=r["profile_name"], rev=render["rev"] if render else None,
                          badge=rd.badge(render, caps.get("argv")))

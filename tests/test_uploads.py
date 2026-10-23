@@ -407,3 +407,25 @@ async def test_a_farm_adds_model_folders_of_its_own(farm):
     assert (await c.delete("/api/admin/models/folders/ipadapter", headers=H)).status_code == 200
     async with r.db.conn() as x:
         assert "ipadapter" not in await x.fetchval("SELECT model_folders FROM instances WHERE worker_id = $1", new)
+
+
+async def test_a_worker_running_the_farms_folders_is_shown_as_matching(farm):
+    """Field (dev.19): a worker set up again and restarted ran the render with the farm's folders, and the dashboard
+    said `differs` — the instance list built the render without the instance's model folders."""
+    from comfyfarm.rollout import render as rd
+    c, r = farm["c"], farm["r"]
+    _, wid = await add_worker(r, "http://192.0.2.21:8188", group="video", name="gpu-1")
+    put = await c.put(f"/api/admin/instances/{wid}", headers=H, json={
+        "instance": "gpu-1", "hosts": ["127.0.0.1"], "port": 8188, "restart_backend": "manual", "open_folders": True,
+        "paths": {"art": "/a", "local": "/l", "models": "/m", "input": "/s/i", "output": "/s/o", "user": "/s/u",
+                  "temp": "/t", "model_store": "/srv/ms"}})
+    assert put.status_code == 200, put.text
+    async with r.db.conn() as x:
+        pid = await x.fetchval("INSERT INTO profiles(name, core, venv) VALUES ('p', 'c', 'v') RETURNING id")
+        await x.execute("UPDATE instances SET profile_id = $2 WHERE worker_id = $1", wid, pid)
+        inst = dict(await x.fetchrow("SELECT * FROM instances WHERE worker_id = $1", wid))
+        prof = dict(await x.fetchrow("SELECT * FROM profiles WHERE id = $1", pid))
+        running = rd.build(prof, inst)                                   # what the launcher started it with
+        await x.execute("UPDATE workers SET capabilities = $2 WHERE id = $1", wid, {"argv": running["argv"][1:]})
+    got = next(i for i in (await c.get("/api/admin/instances", headers=H)).json() if i["worker_id"] == wid)
+    assert (got["badge"], got["rev"]) == ("match", running["rev"])
