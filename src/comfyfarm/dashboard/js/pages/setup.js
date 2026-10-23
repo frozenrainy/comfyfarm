@@ -22,6 +22,32 @@ function checkTable(rows) {
     h("td", { class: "nowrap" }, t(r.name)), h("td", { class: "muted small" }, checkDetail(r))))));
 }
 
+// Copy to the clipboard. navigator.clipboard exists in secure contexts only (HTTPS, localhost): at http://<address>
+// the selection is copied the old way, and when even that is refused the text is selected for the user to copy.
+export async function copyText(text, el = null) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return toast(t("Copied"));
+    }
+  } catch { /* refused: the old way below */ }
+  const ta = h("textarea", { readonly: true, style: "position:fixed;top:-1000px;opacity:0" });
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  if (ok) return toast(t("Copied"));
+  if (el) {                                                 // select it on the page: Ctrl+C / ⌘C
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+  }
+  toast(t("The browser does not let the page copy here (plain http): the command is selected — press Ctrl+C"), true);
+}
+
 // Step 1: what the host should become. Defaults: the last setup's answers (a farm's hosts look alike).
 // Hover text for every field of the setup form (what it is, what it must match).
 const TIPS = {
@@ -235,7 +261,7 @@ function runSetup(made, refresh) {
   const finish = h("button", { type: "button", class: "primary", hidden: true, onclick: () => addWorker() },
                    made.again ? t("Update the worker") : t("Add the worker"));
   const cmd = h("pre", { class: "code wrap" }, made.command ?? t("(the host has reported — no need to run the script again)"));
-  const copy = button(t("Copy"), () => navigator.clipboard?.writeText(made.command).then(() => toast(t("Copied")), () => {}));
+  const copy = button(t("Copy"), () => copyText(made.command, cmd));
   copy.hidden = !made.command;
   const user = h("input", { autocomplete: "off", placeholder: "admin" });
   const pw = h("input", { type: "password", autocomplete: "new-password" });

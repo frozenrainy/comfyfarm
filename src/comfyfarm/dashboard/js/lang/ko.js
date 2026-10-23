@@ -738,6 +738,8 @@ export default {
     "이전 워커 도구: 새 폴더를 못 쓰고 복사본도 지워지지 않습니다 — 다시 설치하세요 (시스템 → 워커)",
   "model folder added": "모델 폴더 추가", "model folder removed": "모델 폴더 삭제", "model deleted": "모델 삭제",
   "models' groups changed": "모델 그룹 변경", "model uploaded": "모델 업로드", "model inbox scanned": "인박스 확인",
+  "The browser does not let the page copy here (plain http): the command is selected — press Ctrl+C":
+    "이 브라우저는 여기서(평문 http) 페이지의 복사를 허용하지 않습니다: 명령을 선택해 두었으니 Ctrl+C를 누르세요",
   // ---- audit actions (the router's fixed words) ----
   "comfyfarm (first start)": "comfyfarm (첫 시작)", "assign": "할당", "build requested": "빌드 요청",
   "first administrator created": "첫 관리자 생성", "instance configured": "인스턴스 설정", "instance removed": "인스턴스 삭제",

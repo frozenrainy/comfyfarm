@@ -11,6 +11,17 @@ const ATTEMPT_TIMEOUT_MS = 20000;                          // stock fetch has no
 let groups = [];
 let submitting = false;
 
+// A v4 UUID for each submission. crypto.randomUUID exists in secure contexts only (HTTPS, localhost): a farm opened
+// at http://<address> has crypto.getRandomValues but not it (field, dev.19: the first Run failed with a TypeError).
+function uuid4() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;                             // version 4
+  b[8] = (b[8] & 0x3f) | 0x80;                             // RFC 4122 variant
+  const x = [...b].map((v) => v.toString(16).padStart(2, "0")).join("");
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+}
+
 function storedGroup() {
   try {
     const g = JSON.parse(localStorage.getItem(GROUP_KEY) || "null");
@@ -77,7 +88,7 @@ api.fetchApi = async function (route, options = {}) {
 
   if (submitting) throw new Error("ComfyFarm: a submission is still being retried");
   const body = JSON.parse(options.body);
-  body.prompt_id = body.prompt_id || crypto.randomUUID();
+  body.prompt_id = body.prompt_id || uuid4();
   if (g) body.comfyfarm_group = g.id;
   const title = runTitle();
   if (title) body.comfyfarm_title = title;
