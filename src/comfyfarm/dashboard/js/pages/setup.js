@@ -1,6 +1,6 @@
 // Worker setup (docs/design/14): describe the host → run the setup script on it (the operator, or the router over ssh —
 // the operator chooses, D-41) → read the host check → add the worker, configure its instance, assign, start.
-import { act, api, button, formDialog, h, pill, setText, t, toast } from "../core.js";
+import { act, api, button, copyText, formDialog, h, pill, setText, t, toast } from "../core.js";
 import { locale } from "../i18n.js";
 
 const GPUS = [["amd", "AMD (ROCm)"], ["nvidia", "NVIDIA (CUDA)"], ["any", "Any / not sure"], ["none", "None (CPU only)"]];
@@ -24,29 +24,6 @@ function checkTable(rows) {
 
 // Copy to the clipboard. navigator.clipboard exists in secure contexts only (HTTPS, localhost): at http://<address>
 // the selection is copied the old way, and when even that is refused the text is selected for the user to copy.
-export async function copyText(text, el = null) {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return toast(t("Copied"));
-    }
-  } catch { /* refused: the old way below */ }
-  const ta = h("textarea", { readonly: true, style: "position:fixed;top:-1000px;opacity:0" });
-  ta.value = text;
-  document.body.append(ta);
-  ta.select();
-  let ok = false;
-  try { ok = document.execCommand("copy"); } catch { ok = false; }
-  ta.remove();
-  if (ok) return toast(t("Copied"));
-  if (el) {                                                 // select it on the page: Ctrl+C / ⌘C
-    const r = document.createRange();
-    r.selectNodeContents(el);
-    getSelection().removeAllRanges();
-    getSelection().addRange(r);
-  }
-  toast(t("The browser does not let the page copy here (plain http): the command is selected — press Ctrl+C"), true);
-}
 
 // Step 1: what the host should become. Defaults: the last setup's answers (a farm's hosts look alike).
 // Hover text for every field of the setup form (what it is, what it must match).

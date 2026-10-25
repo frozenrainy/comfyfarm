@@ -1,14 +1,14 @@
 // Dashboard: only what the signed-in user needs — their jobs and place in line, the groups they may use, their own
 // usage, their last 10 jobs.
 import { TZ, api, button, dailyChart, h, pill, qs, statCards, t } from "../core.js";
-import { groupCards, historyTable, queueTable } from "../jobs.js";
+import { groupCards, jobsTable } from "../jobs.js";
 
 export default {
   poll: 2000,
   mount(root, { refresh }) {
     let data = null, days = Number(localStorage.getItem("comfyfarm.dash.days")) || 7;
-    const mine = queueTable({ owner: false, reorder: false, refresh, list: () => data?.queue ?? [] });
-    const recent = historyTable({ owner: false, refresh });
+    const mine = jobsTable({ owner: false, reorder: false, refresh, list: () => data?.queue ?? [] });
+    const recent = jobsTable({ owner: false, reorder: false, refresh, list: () => [] });
     const groups = h("div", { class: "cards" });
     const empty = h("p", { class: "empty muted" }, t("Nothing queued. Submit from ComfyUI."));
     const recentEmpty = h("p", { class: "empty muted" }, t("No finished jobs yet."));
@@ -56,7 +56,7 @@ export default {
       h("section", {}, h("h2", {}, t("My jobs")), mine.el, empty),
       h("section", {}, h("h2", {}, t("My groups")), groups),
       h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("My usage")), h("div", { class: "segs" }, ...segs)), usage),
-      h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Recent")), h("a", { href: "#/history" }, t("All history →"))),
+      h("section", {}, h("div", { class: "section-head" }, h("h2", {}, t("Recent")), h("a", { href: "#/jobs?status=finished" }, t("All finished jobs →"))),
         recent.el, recentEmpty));
     let usageSig = "";
     return {

@@ -85,10 +85,25 @@ td.num { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: ri
 td.actions { white-space: nowrap; text-align: right; }
 td.actions button + button { margin-left: .25rem; }
 td.nowrap { white-space: nowrap; }
-td.err { color: var(--bad); max-width: 28rem; overflow-wrap: anywhere; }
-td.result { white-space: nowrap; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
+td.result { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 img.thumb, video.thumb { height: 2.5rem; max-width: 5rem; object-fit: cover; border-radius: 3px; vertical-align: middle; display: inline-block; }
 td.job .jt { max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }   /* td max-width: ignored */
+/* the job table: columns of fixed width (colgroup), a long title or name is cut with … and never folds the row */
+table.jobs { table-layout: fixed; min-width: 960px; }
+table.jobs td.job .jt { max-width: none; }
+table.jobs td.clip { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.jobs td.time { font-size: .9rem; }
+table.jobs td.progress { white-space: nowrap; }
+table.jobs .bar { width: 70px; }
+button.link { border: 0; background: none; padding: 0 .1rem; color: var(--accent); font-size: inherit; cursor: pointer; vertical-align: middle; }
+button.link:hover { text-decoration: underline; }
+button.err { border: 0; background: none; padding: 0 .2rem; color: var(--bad); font-size: .95rem; cursor: pointer; vertical-align: middle; }
+button.err:hover { color: var(--bad); filter: brightness(1.2); }
+.files { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: .7rem; max-height: 65vh; overflow: auto; }
+.files a.file { display: flex; flex-direction: column; gap: .25rem; color: var(--text); min-width: 0; }
+.files .thumb.big { height: 7rem; max-width: 100%; width: 100%; object-fit: contain; background: var(--panel-2); border: 1px solid var(--line); }
+.files .filename { display: block; height: 7rem; padding: .5rem; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--line); border-radius: 3px; }
+.files .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .empty { margin: .4rem .2rem; }
 
 .pill { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .8rem; border: 1px solid currentColor; white-space: nowrap; }

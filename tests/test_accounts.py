@@ -225,7 +225,7 @@ async def test_history_shows_the_first_saved_file(farm):
                          {"filename": "shot_00002_.png", "subfolder": "ann", "type": "output"}]}})
     await finished_job(r, "ann", "failed", finished_ago_h=2, run_s=5, wait_s=1, error={"message": "boom"})
     done, failed = (await ok(await c.get("/api/farm/history", headers=H("ann"))))["jobs"]
-    assert done["outputs"] == 3
+    assert done["outputs"] == 2                      # files: the caption is an output, not a file
     assert done["preview"] == {"filename": "shot_00001_.png", "subfolder": "ann", "type": "output", "mediaType": "images"}
     assert failed["outputs"] == 0 and "preview" not in failed
 

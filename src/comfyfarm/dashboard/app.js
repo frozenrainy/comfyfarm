@@ -3,12 +3,12 @@
 import { $, api, applyTheme, setText, state } from "./js/core.js";
 import { locale, setLang, t, translateStatic } from "./js/i18n.js";
 import dashboard from "./js/pages/dashboard.js";
-import queue from "./js/pages/queue.js";
-import history from "./js/pages/history.js";
+import jobs from "./js/pages/jobs.js";
 import settings from "./js/pages/settings.js";
 import admin from "./js/pages/admin.js";
 
-const PAGES = { "": dashboard, queue, history, settings, admin };
+const PAGES = { "": dashboard, jobs, settings, admin };
+const MOVED = { queue: "#/jobs", history: "#/jobs?status=finished" };     // the two pages the Jobs page replaced (dev.21)
 const POLL_HIDDEN = 15000, BADGE_EVERY = 5000;
 let current = null, timer = null, lastOk = null, generation = 0, frame = null;
 
@@ -82,6 +82,7 @@ window.addEventListener("message", (e) => {
 function route() {
   const [path, query] = location.hash.replace(/^#\/?/, "").split("?");
   const [name, sub] = path.split("/");
+  if (name in MOVED) { location.replace(MOVED[name]); return; }       // old bookmarks; hashchange routes again
   generation++;
   clearTimeout(timer);
   current?.unmount?.();

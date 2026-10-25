@@ -43,6 +43,10 @@ export default {
   // ---- job tables ----
   "Status": "상태", "Owner": "소유자", "Group": "그룹", "Worker": "워커", "Progress": "진행",
   "Waiting / running": "대기 / 실행 시간", "Finished": "종료", "Run time": "실행 시간", "Error": "오류", "Result": "결과", "{n} file(s)": "파일 {n}개",
+  "Progress / run time": "진행 / 소요", "Time": "시간", "Group / worker": "그룹 / 워커", "waiting {t}": "대기 {t}", "All {n} files": "파일 {n}개 모두 보기",
+  "Show the error": "오류 보기", "all jobs": "모든 작업", "all finished": "끝난 작업 전체", "Finished from": "완료 시작일", "Finished until": "완료 종료일",
+  "All finished jobs →": "끝난 작업 전체 →",
+  "about {t} left": "약 {t} 남음", "preparing…": "준비 중…", "no word for {t}": "{t}째 신호 없음",
   "(any)": "(아무 그룹)",
   "Run next": "다음 차례로", "Move up": "위로", "Move down": "아래로", "Move to the end": "맨 뒤로",
   "Pause": "일시정지", "Resume": "재개", "Keep it in the queue but skip it": "대기열에 두되 건너뜁니다",

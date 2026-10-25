@@ -181,6 +181,32 @@ export function button(label, onclick, opts = {}) {
   return h("button", { type: "button", onclick, title: opts.title, class: opts.cls }, label);
 }
 
+// To the clipboard — also on a farm opened at http://<address>, where navigator.clipboard is missing (dev.20): the
+// old execCommand way, and failing that the text is selected (el) for Ctrl+C.
+export async function copyText(text, el = null) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return toast(t("Copied"));
+    }
+  } catch { /* refused: the old way below */ }
+  const ta = h("textarea", { readonly: true, style: "position:fixed;top:-1000px;opacity:0" });
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  if (ok) return toast(t("Copied"));
+  if (el) {                                                 // select it on the page: Ctrl+C / ⌘C
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    getSelection().removeAllRanges();
+    getSelection().addRange(r);
+  }
+  toast(t("The browser does not let the page copy here (plain http): the command is selected — press Ctrl+C"), true);
+}
+
 // ---- dialogs ---------------------------------------------------------------------------------------------------
 // fields: [{name, label, type: text|password|number|checkbox|checkboxes|select, value, options:[{value,label}], hint}]
 export function formDialog(title, fields, submitLabel = t("Save"), { wide = false, noSubmit = false, errors = {} } = {}) {

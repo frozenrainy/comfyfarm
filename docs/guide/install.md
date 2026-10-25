@@ -50,7 +50,7 @@ Dashboard page, for administrators) shows where you are.
 5. **Artists**: *System → Users → New user* — every group is ticked. They open `http://<this server>:8080`.
 6. **Check**: `docker compose exec router comfyfarm doctor`, and one workflow as an artist. ComfyUI's own first
    workflow names models you may not have: open *Templates*, take a basic image generation one, and pick your
-   checkpoint in its loader. The image shows in ComfyUI's queue and in the dashboard's *History*.
+   checkpoint in its loader. The image shows in ComfyUI's queue and in the dashboard's *Jobs*.
 
 More GPU machines: §3, *Adding a GPU machine*. A different kind of GPU: a second group, and a build with its recipe.
 

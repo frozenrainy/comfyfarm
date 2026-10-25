@@ -78,6 +78,29 @@ def clean_title(s) -> str | None:
     return s[:TITLE_MAX] or None
 
 
+def job_plan(prompt: dict) -> dict[str, float]:
+    """How much of a job's time each node is expected to take, in sampler steps: a sampler counts its `steps`, a VAE
+    encode/decode a couple, anything else next to nothing. Node count made a 20-node video workflow sit at 5 % through
+    its one KSampler; the browser weighs ComfyUI's per-node progress by this and reads an ETA off the sampler's pace.
+    A guess from the API prompt — a second run of the same workflow is still the better clock (design 05)."""
+    plan: dict[str, float] = {}
+    if not isinstance(prompt, dict):
+        return plan
+    for nid, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        cls = str(node.get("class_type", "")).lower()
+        ins = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        steps = ins.get("steps")
+        if "sampler" in cls:
+            plan[str(nid)] = float(steps) if isinstance(steps, (int, float)) and not isinstance(steps, bool) and steps > 0 else 20.0
+        elif "vae" in cls and ("decode" in cls or "encode" in cls):
+            plan[str(nid)] = 2.0
+        else:
+            plan[str(nid)] = 0.1
+    return plan
+
+
 def job_hint(prompt: dict) -> str | None:
     """What a workflow says about itself, for a person to tell queued jobs apart: where it saves (the first
     filename_prefix) and the start of its prompt — the text the sampler's `positive` leads to, else the first text of

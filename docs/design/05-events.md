@@ -34,7 +34,14 @@ recv(event)
 - Relay tasks are held in a set (no GC of running tasks) and serialised per browser socket by a lock, so text and binary
   frames keep their order.
 - Progress shown to the user is per node (`progress_state`), not a single percentage guessed from sampler node names —
-  two-stage samplers made the old 0–100 % bar run twice.
+  two-stage samplers made the old 0–100 % bar run twice. The nodes are **weighed** (dev.21): the router reads a plan
+  off the API prompt (`core.jobs.job_plan` — a sampler counts its `steps`, a VAE encode/decode 2, anything else 0.1)
+  and sends it with running jobs; the browser (`dashboard/js/progress.js`) sums finished and partial weights. Counting
+  nodes alike put a 20-node video workflow at 5 % through its one KSampler. The ETA is the steps left at the pace of
+  the sampler at work (two of its reports) — never `elapsed × (1 − p) / p`, which the minutes of model loading before
+  the first step blow up — and a row with no report for 20 s says so rather than show a stale number. Not solved:
+  loops that run the same nodes N times (a finished node going back to running lowers the bar); the next step is the
+  per-node times of the same workflow's earlier runs, a better clock than any guess from the prompt.
 
 ## Browser WebSocket
 

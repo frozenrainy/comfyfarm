@@ -47,6 +47,23 @@ def outputs_count(outputs) -> tuple[int, int, dict | None]:
     return n, p, first
 
 
+def outputs_files(outputs) -> list[dict]:
+    """Every file a job saved, in node order, from a stock /history outputs dict: what the dashboard shows behind
+    "+N" next to the first one. Entries without a file name (text outputs, numbers) are not files."""
+    files = []
+    for node_id, node_out in (outputs or {}).items():
+        if not isinstance(node_out, dict):
+            continue
+        for kind, items in node_out.items():
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if isinstance(it, dict) and it.get("filename"):
+                    files.append({"filename": it["filename"], "subfolder": it.get("subfolder", ""), "type": it.get("type", "output"),
+                                  "mediaType": it.get("mediaType", kind), "node": str(node_id)})
+    return files
+
+
 def make_router(ctx) -> APIRouter:
     api = APIRouter()
     router, identity = ctx.router, ctx.identity

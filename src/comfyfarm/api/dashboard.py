@@ -16,7 +16,7 @@ from ..core import jobs as jobsvc
 from ..core import stats as statsvc
 from ..health.dispatch import snapshot
 from .context import Ctx
-from .stock import outputs_count
+from .stock import outputs_count, outputs_files
 
 RECENT_ON_DASHBOARD = 10
 QUEUE_LIMIT = 1000
@@ -63,8 +63,9 @@ def job_doc(r, place=None) -> dict:
         d["error"] = (r["error"] or {}).get("message") if r["status"] == "failed" else None
     if "runnable" in r.keys():
         d["runnable"] = r["runnable"]
-    if "outputs" in r.keys():           # history: how many files, and the first one to show
-        d["outputs"], _, first = outputs_count(r["outputs"])
+    if "outputs" in r.keys():           # history: how many files (the same count the files call lists), the first to show
+        _, _, first = outputs_count(r["outputs"])
+        d["outputs"] = len(outputs_files(r["outputs"]))
         if first and first.get("filename"):
             d["preview"] = {k: first.get(k, "") for k in ("filename", "subfolder", "type", "mediaType")}
     return d
@@ -123,6 +124,18 @@ def make_router(ctx: Ctx) -> APIRouter:
             out[r["id"]] = seen[r["group_id"]]
         return out
 
+    async def with_plans(c, docs: list[dict]) -> list[dict]:
+        """Running jobs carry their plan (core.jobs.job_plan): what the browser weighs the per-node progress by. Read
+        from the payloads of the running ones only — a queue page lists many more waiting jobs than running ones."""
+        running = [d["key"] for d in docs if d["status"] == "running"]
+        if running:
+            plans = {r["job_id"]: jobsvc.job_plan(r["prompt"]) for r in
+                     await c.fetch("SELECT job_id, prompt FROM job_payloads WHERE job_id = ANY($1::bigint[])", running)}
+            for d in docs:
+                if d["key"] in plans:
+                    d["plan"] = plans[d["key"]]
+        return docs
+
     async def own_jobs(c, who: str, recent: int) -> tuple[list[dict], list[dict]]:
         """The caller's unfinished jobs (with their place in line) and the last `recent` finished ones (with the first
         file each saved): the dashboard's and the editor's "My queue"."""
@@ -133,7 +146,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         done = await c.fetch(f"SELECT {JOB_COLS}, j.outputs {JOB_FROM} WHERE j.owner = $1 AND j.deleted_at IS NULL "
                              "AND j.status IN ('completed','failed','cancelled') "
                              "ORDER BY j.finished_at DESC NULLS LAST, j.id DESC LIMIT $2", who, recent)
-        return [job_doc(r, line.get(r["id"])) for r in mine], [job_doc(r) for r in done]
+        return await with_plans(c, [job_doc(r, line.get(r["id"])) for r in mine]), [job_doc(r) for r in done]
 
     # ---- dashboard (personal) -----------------------------------------------------------------------------------
     @api.get("/api/farm/mine")
@@ -205,7 +218,8 @@ def make_router(ctx: Ctx) -> APIRouter:
             totals = await c.fetchrow("SELECT count(*) FILTER (WHERE status IN ('pending','paused')) AS queued, "
                                       "count(*) FILTER (WHERE status IN ('dispatching','running','cancelling')) AS running "
                                       "FROM jobs WHERE deleted_at IS NULL")
-        return {"scope": "all" if everyone else "mine", "jobs": [job_doc(r, line.get(r["id"])) for r in rows],
+            docs = await with_plans(c, [job_doc(r, line.get(r["id"])) for r in rows])
+        return {"scope": "all" if everyone else "mine", "jobs": docs,
                 "farm": {"queued": totals["queued"], "running": totals["running"]}}
 
     # ---- history page -------------------------------------------------------------------------------------------
@@ -241,6 +255,13 @@ def make_router(ctx: Ctx) -> APIRouter:
                                  f"ORDER BY j.finished_at DESC NULLS LAST, j.id DESC OFFSET {offset} LIMIT {limit}", *args)
         return {"scope": "all" if everyone else "mine", "total": total, "offset": offset, "limit": limit,
                 "jobs": [job_doc(r) for r in rows]}
+
+    @api.get("/api/farm/jobs/{prompt_id}/files")
+    async def job_files(prompt_id: str, x_comfyfarm_user: str | None = Header(default=None)):
+        """Every file a finished job saved (the lists carry only the first and a count): the owner's, or any for an
+        admin. The gateway serves each through /api/view."""
+        _, _, r = await acting(prompt_id, x_comfyfarm_user)
+        return {"prompt_id": str(r["prompt_id"]), "files": outputs_files(r["outputs"])}
 
     # ---- queue operations ---------------------------------------------------------------------------------------
     @api.post("/api/farm/jobs/{prompt_id}/pause")

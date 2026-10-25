@@ -250,6 +250,27 @@ async def test_notes(farm_api):
     assert w["note"] == "fan noisy" and "no group: receives no jobs" in w["warnings"]
 
 
+async def test_every_file_of_a_job_behind_the_first(farm_api):
+    """The lists show the first file and "+N"; the files call lists them all — to the owner or an admin only."""
+    r, c = farm_api
+    a = await post_prompt(c, "alice", 1)
+    outputs = {"9": {"images": [{"filename": "a_00001_.png", "subfolder": "", "type": "output"},
+                                {"filename": "a_00002_.png", "subfolder": "shots", "type": "output"}],
+                     "text": ["not a file"]},
+               "12": {"gifs": [{"filename": "a.mp4", "subfolder": "", "type": "output", "format": "video/h264-mp4"}]},
+               "13": {"audio": [{"filename": "a.flac", "type": "output"}]}}
+    await sql(r, "UPDATE jobs SET status = 'completed', finished_at = now(), started_at = now(), outputs = $2 "
+                 "WHERE prompt_id = $1", uuid.UUID(a), outputs)
+    row = (await c.get("/api/farm/history", headers=H("alice"))).json()["jobs"][0]
+    assert row["outputs"] == 4 and row["preview"]["filename"] == "a_00001_.png"
+    files = (await c.get(f"/api/farm/jobs/{a}/files", headers=H("alice"))).json()["files"]
+    assert [f["filename"] for f in files] == ["a_00001_.png", "a_00002_.png", "a.mp4", "a.flac"]
+    assert files[1]["subfolder"] == "shots" and files[2]["mediaType"] == "gifs" and files[3]["type"] == "output" and files[0]["node"] == "9"
+    assert (await c.get(f"/api/farm/jobs/{a}/files", headers=H("bob"))).status_code == 404          # not a hint that it exists
+    assert len((await c.get(f"/api/farm/jobs/{a}/files", headers=H("admin"))).json()["files"]) == 4
+    assert (await c.get(f"/api/farm/jobs/{uuid.uuid4()}/files", headers=H("admin"))).status_code == 404
+
+
 async def test_admin_cancel_and_retry_copies(farm_api):
     r, c = farm_api
     a = await post_prompt(c, "alice", 7)
