@@ -4,7 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import uuid
+from datetime import timedelta
 
 from ..db import Database
 from . import access
@@ -330,21 +332,25 @@ async def move(db: Database, job_id: int, *, to: str | None = None, before: int 
                                 "AS v(id, p) WHERE j.id = v.id", [x[0] for x in changed], [x[1] for x in changed])
 
 
-async def retry(db: Database, job_id: int) -> dict | None:
+async def retry(db: Database, job_id: int, *, reason: str | None = None, front: bool = False,
+                only_once: bool = False) -> dict | None:
     """A user retry is a **new job** (new prompt_id) copied from a finished one and appended to the queue
     (docs/design/03). Same owner, group and requirements; NotPermitted if the owner may no longer use them. Comfy.org credentials were never stored (D-29), so API nodes
-    in a retried workflow fail visibly instead of running with someone else's key."""
+    in a retried workflow fail visibly instead of running with someone else's key. `only_once`: nothing if the job
+    has been retried already (an automatic retry must not race a person's, or another router's)."""
     async with db.conn() as c:
         async with c.transaction():
             old = await c.fetchrow("SELECT j.*, p.prompt, p.extra_data FROM jobs j JOIN job_payloads p ON p.job_id = j.id "
-                                   "WHERE j.id = $1 AND j.status = ANY($2::job_status[])", job_id, list(TERMINAL))
+                                   "WHERE j.id = $1 AND j.status = ANY($2::job_status[]) FOR UPDATE OF j", job_id, list(TERMINAL))
             if old is None:
+                return None
+            if only_once and await c.fetchval("SELECT EXISTS (SELECT 1 FROM jobs WHERE retry_of = $1)", job_id):
                 return None
             await access.lock_owner(c, old["owner"])
             allowed = await access.owner_allowed(c, old["owner"], old["allowed_groups"])   # today's permissions
             if why := access.refusal(allowed, old["group_id"], who="the job's owner"):
                 raise NotPermitted(why)                      # as /prompt would: nobody could ever take the copy
-            prio = await queue_end(c, False)
+            prio = await queue_end(c, front)
             row = await c.fetchrow(
                 "INSERT INTO jobs(prompt_id, priority, group_id, owner, output_hint, requirements, retry_of, allowed_groups, "
                 "title, hint) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
@@ -353,9 +359,59 @@ async def retry(db: Database, job_id: int) -> dict | None:
             await c.execute("INSERT INTO job_payloads(job_id, prompt, extra_data) VALUES ($1, $2, $3)",
                             row["id"], old["prompt"], old["extra_data"] or {})
             await c.execute("INSERT INTO job_events(job_id, to_status, reason) VALUES ($1, 'pending', $2)",
-                            row["id"], f"retry of job {old['id']}")
+                            row["id"], reason or f"retry of job {old['id']}")
             await c.execute("NOTIFY comfyfarm_wake")
     return dict(row)
+
+
+# A GPU fault that has nothing to do with the job (field, dev.21–22: an R9700 under ROCm 7.2 faulted moving model
+# weights between RAM and VRAM — at the start of a job after hours idle, or between two parts of a long one). The
+# CUDA/HIP context of that process is lost; the next one runs the same job fine.
+GPU_FAULT = re.compile(r"illegal memory access was encountered|hipErrorIllegalAddress", re.I)
+AUTO_RETRY = "automatic retry of job {id} after a GPU fault"
+AUTO_WINDOW = timedelta(minutes=10)      # failures older than this (before an upgrade, say) are a person's to retry
+
+
+def gpu_fault(error) -> bool:
+    return bool(error) and bool(GPU_FAULT.search(json.dumps(error)))
+
+
+async def retry_gpu_faults(db: Database, limit: int) -> list[int]:
+    """D-44: a job failed by a GPU fault is queued again, at the front, as a new job — at most `limit` times along
+    one chain of automatic retries, never when a person (or another router) retried it already. D-06 keeps a job that
+    broke its worker out of the queue for good; this fault is the GPU's, not the workflow's, and a retry that faults
+    again stops the chain. Returns the new jobs' ids."""
+    if limit <= 0:
+        return []
+    async with db.conn() as c:
+        rows = await c.fetch("SELECT j.id, j.error FROM jobs j WHERE j.status = 'failed' AND j.deleted_at IS NULL "
+                             "AND j.finished_at > now() - $1::interval AND j.error IS NOT NULL "
+                             "AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.retry_of = j.id)", AUTO_WINDOW)
+        todo = []
+        for r in rows:
+            if not gpu_fault(r["error"]):
+                continue
+            depth, cur = 0, r["id"]                  # automatic retries already in this chain
+            while depth <= limit:
+                parent = await c.fetchrow(
+                    "SELECT j.retry_of, (SELECT reason FROM job_events e WHERE e.job_id = j.id ORDER BY e.id LIMIT 1) AS why "
+                    "FROM jobs j WHERE j.id = $1", cur)
+                if parent is None or parent["retry_of"] is None or not str(parent["why"] or "").startswith("automatic retry"):
+                    break
+                depth, cur = depth + 1, parent["retry_of"]
+            if depth < limit:
+                todo.append(r["id"])
+    made = []
+    for jid in todo:
+        try:
+            row = await retry(db, jid, reason=AUTO_RETRY.format(id=jid), front=True, only_once=True)
+        except NotPermitted as e:
+            log.info("job %s: no automatic retry after its GPU fault — %s", jid, e)
+            continue
+        if row is not None:
+            log.warning("job %s failed with a GPU fault: queued again as job %s (at the front)", jid, row["id"])
+            made.append(row["id"])
+    return made
 
 
 NOTE_MAX = 500

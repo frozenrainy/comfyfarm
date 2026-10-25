@@ -22,8 +22,12 @@ the next single failure exceed the threshold immediately). Thresholds use elapse
 
 - `dead` (or `broken`) for ≥ 15 s → `offline`: no new jobs; running jobs are left to reconcile/lost-job judgement.
   A broken worker's reason is kept as `capabilities.broken_as` and shown among its warnings. From extension 0.9 the
-  worker restarts itself: a watchdog thread exits the process (code 75) once the executor it saw is gone, and the
-  service manager (`Restart=on-failure`) starts ComfyUI again; the jobs that waited in its queue go back in line (D-43).
+  worker restarts itself: a watchdog thread exits the process (code 75) once the executor it saw is gone — from 0.10
+  also when the GPU context reports an error on two looks in a row (an illegal address is sticky: every later call in
+  the process fails) — and the service manager (`Restart=on-failure`) starts ComfyUI again; the jobs that waited in its
+  queue go back in line (D-43), the one that faulted is queued again once (D-44).
+- A worker whose extension is older than the router's (`bundled_extension`, read from its share directory) is told to
+  Build and roll out: upgrading the router changes nothing on a worker until then (field, dev.22).
 - `busy` for ≥ 90 s → `busy_unresponsive`: no new jobs; shown amber, not red.
 - Recovery is immediate on the next success.
 

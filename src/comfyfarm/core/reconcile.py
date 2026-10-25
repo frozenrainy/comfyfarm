@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..adapter.comfy import DISPATCH_DEADLINE, ComfyAdapter, JobState, NoAnswer
 from ..db import Busy, BusyLog, Database
-from .jobs import error_doc, transition
+from .jobs import error_doc, retry_gpu_faults, transition
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -66,6 +66,13 @@ class Reconciler:
         if changed and self.wake:
             self.wake.set()
         await self.collect_outputs()
+        try:
+            if await retry_gpu_faults(self.db, self.s.retry_gpu_faults) and self.wake:     # D-44
+                self.wake.set()
+        except Busy:
+            raise
+        except Exception:
+            log.exception("automatic retry after a GPU fault failed")
 
     async def collect_outputs(self):
         """Real outputs of recently completed jobs (history synthesis, display paths D-10, /api/view routing). The

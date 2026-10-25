@@ -51,6 +51,8 @@ def settings_from_env(env=None) -> Settings:
                       ("PUBLIC_ROUTER", "public_router"), ("MODELS_DIR", "models_dir")):
         if env.get(ENV_PREFIX + key):
             kw[attr] = env[ENV_PREFIX + key]
+    if env.get("COMFYFARM_RETRY_GPU_FAULTS", "").strip().isdigit():
+        kw["retry_gpu_faults"] = int(env["COMFYFARM_RETRY_GPU_FAULTS"])
     if env.get("COMFYFARM_DEV_ADMINS"):
         kw["dev_admins"] = tuple(x.strip() for x in env["COMFYFARM_DEV_ADMINS"].split(",") if x.strip())
     return Settings(**kw)

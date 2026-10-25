@@ -73,9 +73,9 @@ class Job:
 class FakeWorker:
     def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16,
                  validate_endpoint: bool = True, secured: bool | None = None, models: dict | None = None,
-                 nodes_extra: list[str] | None = None, extension: str = "0.3-fake"):
+                 nodes_extra: list[str] | None = None, extension: str | None = None):
         # secured: None = no extension (/comfyfarm/info 404); True/False = the extension's allow-list state
-        # extension: its version; from "0.9" it answers GET /comfyfarm/health (executor thread, device)
+        # extension: its version (default: the one this router ships); from "0.9" it answers GET /comfyfarm/health
         self.version, self.backend, self.ws_fix, self.vram_gb = version, backend, ws_fix, vram_gb
         self.argv = ["main.py", "--listen", "0.0.0.0"]          # system.argv (sys.argv without the interpreter, P15)
         self.object_info_ok = True                             # False: /object_info answers 500 (a broken upgrade)
@@ -118,8 +118,12 @@ class FakeWorker:
         for p in ("", "/api"):
             r.add_get(p + "/models", self.get_models)
             r.add_get(p + "/models/{folder}", self.get_models_folder)
+        if extension is None:
+            from ..api.admin import bundled_extension
+            extension = bundled_extension() or "0.9"
         self.extension = extension
         self.gpu_fault: str | None = None     # set: the device is broken — /system_stats answers 500 (as ComfyUI does)
+        self.error_message = "fake execution error"     # mode "error": what the failing node says
         if secured is not None:
             r.add_get("/comfyfarm/info", self.info)
             if tuple(int(x) for x in extension.split("-")[0].split(".")) >= (0, 9):
@@ -432,7 +436,7 @@ class FakeWorker:
             if interrupted and interrupted[0] == "error":
                 job.status = "failed"
                 ev = {"prompt_id": job.prompt_id, "node_id": interrupted[1], "node_type": interrupted[2], "executed": executed,
-                      "exception_message": "fake execution error", "exception_type": "RuntimeError", "traceback": [], "timestamp": ts()}
+                      "exception_message": self.error_message, "exception_type": "RuntimeError", "traceback": [], "timestamp": ts()}
                 job.messages.append(["execution_error", ev])
                 await self.send("execution_error", ev, cid)
             elif interrupted:

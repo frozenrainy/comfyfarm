@@ -19,7 +19,7 @@ from aiohttp import web
 from . import watchdog
 from .allow import from_env, make_middleware
 
-EXT_VERSION = "0.9"
+EXT_VERSION = "0.10"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")

@@ -1,6 +1,8 @@
 """System administration (admin only): worker groups, workers, user accounts, statistics."""
 from __future__ import annotations
 
+import functools
+import os
 import re
 
 import asyncpg
@@ -83,6 +85,36 @@ def device_name(name) -> str | None:
     if not isinstance(name, str):
         return None
     return re.sub(r"\s*:\s*(native|cudaMallocAsync)\s*$", "", re.sub(r"^(cuda|xpu|mps|npu):\d+\s+", "", name)).strip() or name
+
+
+def _version(v) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(x) for x in str(v).split("-")[0].split("."))
+    except ValueError:
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def bundled_extension() -> str | None:
+    """The comfyfarm_worker version this router ships (its share directory): what a Build puts into a node set."""
+    try:
+        from ..core.hostsetup import share_dir
+        with open(os.path.join(share_dir(), "worker_ext", "comfyfarm_worker", "__init__.py")) as f:
+            m = re.search(r'^EXT_VERSION = "([0-9.]+)"', f.read(), re.M)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def extension_warnings(caps: dict) -> list[str]:
+    """A worker runs the extension its node set was built with: upgrading the router changes nothing on it until a
+    Build and a rollout (field, dev.22: the upgrade was done, the executor watchdog never reached the worker)."""
+    ext, here = caps.get("extension") or {}, bundled_extension()
+    have, want = _version(ext.get("extension")), _version(here)
+    if not ext.get("installed") or have is None or want is None or have >= want:
+        return []
+    return [f"worker extension {ext.get('extension')} is older than this router's {here}: Build, then roll out a "
+            "profile made from the new build"]
 
 
 def security_warnings(caps: dict) -> list[str]:
@@ -238,7 +270,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 why = caps.get("broken_as") or "it cannot run jobs"
                 warn.append(f"answers but cannot run jobs ({why}): no job is sent to it. From extension 0.9 it restarts "
                             "itself; an older one needs a restart (Rollout, or the service on its host)")
-            warn += security_warnings(caps)
+            warn += security_warnings(caps) + extension_warnings(caps)
             warn += consistency.warnings(rep.get(r["group_id"], {}).get("workers", {}).get(r["id"]))
             devs = [d for d in caps.get("devices") or [] if isinstance(d, dict) and d.get("type") != "cpu"]
             vram = max((d.get("vram_total") or 0 for d in devs), default=0)          # a CPU's "vram" is the host's RAM

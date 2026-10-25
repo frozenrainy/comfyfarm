@@ -16,6 +16,7 @@ class Settings:
     absent_settle: float = 5.0             # D-05: "absent" counts only this long after the POST ended
     worker_lost_after: float = 600.0       # D-06b: worker offline this long → its jobs fail
     max_connect_attempts: int = 5          # connect failures before a job fails as unreachable
+    retry_gpu_faults: int = 1              # D-44: a job failed by a GPU fault is queued again this often (0: never)
     preview_method: str | None = "auto"    # P16: sent as extra_data.preview_method
     dev_identity: str | None = None        # M1 only: trust X-ComfyFarm-User (loopback deployments)
     dev_admins: tuple[str, ...] = ("admin",)   # M1 only: users treated as admins under dev identity

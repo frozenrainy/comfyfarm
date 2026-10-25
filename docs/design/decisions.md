@@ -275,3 +275,14 @@ sat in the dead process's queue until the restart, then was "lost"). → After t
 `pending` ("the worker restarted before running it"). One that started stays D-06. The residual risk: a job that ran
 start to end while the router heard nothing (event stream down, reconcile between polls) and then lost its record —
 it runs a second time.
+
+**D-44 A job failed by a GPU fault is queued again, once.** *(field, dev.22)* — On an R9700 under ROCm 7.2 the GPU's
+copy engine faulted three times in two days ("illegal memory access", a `MAPPING_ERROR` page fault on a host address)
+while ComfyUI moved model weights between RAM and VRAM — at a part boundary of a long video, or as a job started after
+hours idle; never in a sampler step. The workflow is not what fails, and the process's GPU context is lost for good
+(the watchdog restarts it, 0.10). D-06 keeps a job that broke its worker out of the queue; this one would run fine on
+a fresh process. → The reconciler copies a job whose error names that fault (`core.jobs.GPU_FAULT`) into a new job at
+the front of the queue (`retry_of`, reason "automatic retry of job N after a GPU fault"), at most
+`COMFYFARM_RETRY_GPU_FAULTS` times (default 1) along one chain of automatic retries, only within 10 minutes of the
+failure, and never when it was retried already. A retry that faults again stops the chain: a second fault in a row
+is more likely the job's own than bad luck.

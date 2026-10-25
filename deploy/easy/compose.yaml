@@ -27,6 +27,8 @@
 #                              (docs/guide/models.md) — the builder's settings, as the node pack sources
 #   COMFYFARM_FIRST_RECIPE     the recipe whose UI half the first start builds (default rocm-gfx1201; the UI half is the
 #                              same in every recipe)
+#   COMFYFARM_RETRY_GPU_FAULTS  a job failed by a GPU fault ("illegal memory access") is queued again this often
+#                              (default 1; 0 = never) — docs/design/decisions.md D-44
 #   ROUTER_PORT, GATEWAY_PORT  <host-ip>:<port> to publish on one address only
 name: comfyfarm
 
@@ -100,6 +102,7 @@ services:
       COMFYFARM_UI_AGENT: http://ui:8399
       COMFYFARM_UI_SHARED: ${COMFYFARM_SHARED:-/srv/comfyfarm/shared}
       COMFYFARM_FIRST_RECIPE: ${COMFYFARM_FIRST_RECIPE:-rocm-gfx1201}
+      COMFYFARM_RETRY_GPU_FAULTS: ${COMFYFARM_RETRY_GPU_FAULTS:-1}
       COMFYFARM_PUBLIC_ROUTER: ${ROUTER_PORT:-8188}          # what workers connect to: the setup form's default
     ports:
       - "${ROUTER_PORT:-8188}:8188"         # workers' launchers, /metrics — not for users' browsers
