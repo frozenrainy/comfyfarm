@@ -133,6 +133,12 @@ class Reconciler:
                         return False
                     return await transition(c, jid, "pending", ("dispatching",), "worker never received it",
                                             worker_id=None, dispatched_at=None, dispatch_ended_at=None, absent_seen_at=None)
+                if since_end >= timedelta(seconds=self.s.lost_grace) and st == "running" and r["started_at"] is None:
+                    # D-43: it waited in the worker's queue and never ran (no execution_start, never seen in progress):
+                    # a restart lost nothing of it — back in line, not failed (field, dev.21: the job queued behind a
+                    # dead executor). One that started stays D-06: never back to pending.
+                    return await transition(c, jid, "pending", ("running",), "the worker restarted before running it",
+                                            worker_id=None, dispatched_at=None, dispatch_ended_at=None, absent_seen_at=None)
                 if since_end >= timedelta(seconds=self.s.lost_grace):   # D-06: never back to pending
                     to = "cancelled" if st == "cancelling" else "failed"
                     return await transition(c, jid, to, ("running", "cancelling"), "lost",

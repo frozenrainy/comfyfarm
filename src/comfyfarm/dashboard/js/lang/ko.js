@@ -47,6 +47,8 @@ export default {
   "Show the error": "오류 보기", "all jobs": "모든 작업", "all finished": "끝난 작업 전체", "Finished from": "완료 시작일", "Finished until": "완료 종료일",
   "All finished jobs →": "끝난 작업 전체 →",
   "about {t} left": "약 {t} 남음", "preparing…": "준비 중…", "no word for {t}": "{t}째 신호 없음",
+  "answers but cannot run jobs ({why}): no job is sent to it. From extension 0.9 it restarts itself; an older one needs a restart (Rollout, or the service on its host)":
+    "응답은 하지만 작업을 실행할 수 없습니다({why}): 작업을 보내지 않습니다. 확장 0.9부터는 스스로 재시작합니다. 이전 버전은 재시작이 필요합니다(롤아웃, 또는 그 호스트의 서비스)",
   "part {k}/{n}": "구간 {k}/{n}", "worker {state}": "워커 {state}", "last report {t} ago": "마지막 보고 {t} 전",
   "(any)": "(아무 그룹)",
   "Run next": "다음 차례로", "Move up": "위로", "Move down": "아래로", "Move to the end": "맨 뒤로",

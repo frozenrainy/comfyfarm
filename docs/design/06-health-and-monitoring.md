@@ -10,11 +10,20 @@ Every 5 s all workers are probed **concurrently** (`GET /queue`, 3 s timeout); r
 | read timeout, write timeout, pool timeout, read error | busy | TCP connected → the process exists, its loop is blocked (model load, P14) |
 | connect refused, connect timeout, DNS | dead | nothing is listening |
 | anything else | busy | a false "busy" is cheaper for users than a false "dead" |
+| 2xx, but its vitals fail | broken | it answers and runs nothing: the prompt executor thread died, or the GPU context is broken (dev.22) |
+
+**Vitals** (dev.22, field dev.21: a GPU fault killed ComfyUI's executor thread; `/queue` answered 200 for hours and
+the next job waited in its queue forever): a worker that answers `/queue` is asked one more thing — the extension's
+`GET /comfyfarm/health` from 0.9 (`executor`: alive/dead, `device`: ok/cpu/error), else `GET /system_stats`, which
+ComfyUI answers 500 when the GPU context is broken. No answer there is no evidence; the probe judges reachability.
 
 `failing_since` is set on the first failure of a streak and **cleared on every success** (forgetting to clear it made
 the next single failure exceed the threshold immediately). Thresholds use elapsed time since `failing_since`:
 
-- `dead` for ≥ 15 s → `offline`: no new jobs; running jobs are left to reconcile/lost-job judgement.
+- `dead` (or `broken`) for ≥ 15 s → `offline`: no new jobs; running jobs are left to reconcile/lost-job judgement.
+  A broken worker's reason is kept as `capabilities.broken_as` and shown among its warnings. From extension 0.9 the
+  worker restarts itself: a watchdog thread exits the process (code 75) once the executor it saw is gone, and the
+  service manager (`Restart=on-failure`) starts ComfyUI again; the jobs that waited in its queue go back in line (D-43).
 - `busy` for ≥ 90 s → `busy_unresponsive`: no new jobs; shown amber, not red.
 - Recovery is immediate on the next success.
 

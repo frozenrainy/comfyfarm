@@ -261,7 +261,8 @@ async def test_foreign_answer_from_one_worker_does_not_stop_reconcile(router_fac
         for wid in (wbad, wgood):
             j, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
             await c.execute("UPDATE jobs SET status = 'running', worker_id = $2, dispatched_at = now() - interval '1 hour', "
-                            "dispatch_ended_at = now() - interval '1 hour' WHERE id = $1", j["id"], wid)
+                            "dispatch_ended_at = now() - interval '1 hour', started_at = now() - interval '1 hour' "
+                            "WHERE id = $1", j["id"], wid)
             ids.append(j["id"])
     await r.reconciler.tick()                                     # must not raise
     assert (await job_row(r, ids[1]))["error"]["kind"] == "lost"
@@ -286,7 +287,8 @@ async def test_unexpected_error_asking_one_worker_does_not_stop_reconcile(router
         for wid in (wbad, wgood):
             j, _ = await jobsvc.submit(r.db, owner="tester", prompt=tiny())
             await c.execute("UPDATE jobs SET status = 'running', worker_id = $2, dispatched_at = now() - interval '1 hour', "
-                            "dispatch_ended_at = now() - interval '1 hour' WHERE id = $1", j["id"], wid)
+                            "dispatch_ended_at = now() - interval '1 hour', started_at = now() - interval '1 hour' "
+                            "WHERE id = $1", j["id"], wid)
             ids.append(j["id"])
     real = r.adapter.job_state
 

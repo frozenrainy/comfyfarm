@@ -266,3 +266,12 @@ contract §2 ("references nothing outside itself"). → Publishing copies the ba
 python-build-standalone, as uv installs it) into `<venv>/.python/` — or uses the operating system's own Python under
 `/usr` — and refuses a venv whose `bin/python` or `pyvenv.cfg` `home` lies anywhere else. The host check runs every
 venv's interpreter on each host.
+
+**D-43 A job that waited in a worker's queue and never ran goes back in line when the worker forgets it.** *(field,
+dev.21)* — D-06 fails a running job the worker no longer knows, because the job may be what crashed it. A job ComfyUI
+had only queued — never started: no `execution_start`, never seen in progress (`started_at` empty) — cannot have
+crashed anything, and failing it made a user rerun a job that never ran (a GPU fault killed the executor; the next job
+sat in the dead process's queue until the restart, then was "lost"). → After the same grace, such a job returns to
+`pending` ("the worker restarted before running it"). One that started stays D-06. The residual risk: a job that ran
+start to end while the router heard nothing (event stream down, reconcile between polls) and then lost its record —
+it runs a second time.

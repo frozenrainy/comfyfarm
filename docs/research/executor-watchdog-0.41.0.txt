@@ -1,0 +1,27 @@
+Executor watchdog (comfyfarm_worker 0.9) on a stock ComfyUI 0.41.0 — 2026-10-25
+=============================================================================
+
+Why: on a ROCm worker a GPU fault ("illegal memory access") raised inside comfy.model_management.soft_empty_cache(),
+which ComfyUI's main.py prompt_worker calls outside its per-prompt try. The exception ended the thread
+"Thread-1 (prompt_worker)"; the process stayed up, GET /queue answered 200, and the next job sat in its queue until
+someone restarted the worker by hand.
+
+Setup: ComfyUI v0.41.0 (git tag), torch 2.14.1 CPU, Python 3.12, `main.py --cpu --base-directory <tmp>`, custom nodes:
+comfyfarm_worker 0.9 and a test node that replaces soft_empty_cache with one that raises once a flag file exists
+(the field's exception, at the field's line: main.py:422).
+
+1. Started: GET /comfyfarm/health → {"extension": "0.9", "executor": "alive", "device": "cpu"}
+   (the thread name the watchdog looks for, "(prompt_worker)", holds on this version).
+2. A prompt (EmptyImage → ImageBlur → PreviewImage) ran: "Prompt executed in 0.02 seconds"; executor still alive.
+3. Flag on, another prompt (after ComfyUI's 10 s GC interval): the prompt ran, then
+     Exception in thread Thread-1 (prompt_worker): … main.py, line 422, in prompt_worker
+       comfy.model_management.soft_empty_cache() … RuntimeError: simulated: CUDA error: an illegal memory access
+     [ERROR] comfyfarm: ComfyUI's prompt executor thread has stopped — no job can run in this process; exiting (code 75)
+   The process exited with 75 about 2 s later (the watchdog polls every 5 s). Under the worker unit
+   (Restart=on-failure, RestartPreventExitStatus=2) systemd starts it again.
+4. Control, COMFYFARM_EXECUTOR_WATCHDOG=0, the same fault: the process stays — the field's zombie:
+     GET /queue → 200; a second prompt → accepted, queue_running 0, queue_pending 1, forever
+     GET /comfyfarm/health → {"executor": "dead", …}   — what the router's health monitor reads as "broken"
+
+Not run on a GPU worker: the test host was busy with a long job and had 1 GB of RAM free; a second ComfyUI there
+could have pushed the kernel's OOM killer onto the running job.

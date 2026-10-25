@@ -13,6 +13,10 @@ log = logging.getLogger(__name__)
 WAIT_REMIND = 600.0          # a worker that never answered: one more line after this long (a build, or nothing started)
 
 
+async def _none():
+    return None
+
+
 class HealthMonitor:
     def __init__(self, db: Database, adapter: ComfyAdapter, settings: Settings, wake: asyncio.Event | None = None):
         self.db, self.adapter, self.s, self.wake = db, adapter, settings, wake
@@ -48,6 +52,10 @@ class HealthMonitor:
                 "SELECT id, name, base_url, state, capabilities, failing_since, last_ok_at, now() AS at FROM workers "
                 "WHERE enabled AND deleted_at IS NULL")]
         results = await asyncio.gather(*(self.adapter.probe(w["base_url"]) for w in workers))
+        # answering is not working: a worker whose executor died answers /queue and runs nothing (field, dev.21)
+        broken = await asyncio.gather(*(self.adapter.vitals(w["base_url"], (w["capabilities"] or {}).get("extension"))
+                                        if ok else _none() for w, (ok, _, _) in zip(workers, results)))
+        results = [(False, "broken", why) if why else res for res, why in zip(results, broken)]
         became_online = refreshed_one = False
         for w, (ok, kind, detail) in zip(workers, results):
             who = f"{w['name']} (#{w['id']})"
@@ -89,13 +97,14 @@ class HealthMonitor:
                 new = await c.fetchval("""
                     UPDATE workers SET failing_since = coalesce(failing_since, now()), failure_kind = $2,
                       state = CASE
-                        WHEN $2 IN ('dead', 'refused') AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3) THEN 'offline'
+                        WHEN $2 IN ('dead', 'refused', 'broken') AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3) THEN 'offline'
                         WHEN $2 = 'busy' AND now() - coalesce(failing_since, now()) >= make_interval(secs => $4) THEN 'busy_unresponsive'
                         ELSE state END,
-                      offline_since = CASE WHEN $2 IN ('dead', 'refused') AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3)
+                      offline_since = CASE WHEN $2 IN ('dead', 'refused', 'broken') AND now() - coalesce(failing_since, now()) >= make_interval(secs => $3)
                                            THEN coalesce(offline_since, now()) ELSE offline_since END,
-                      capabilities = CASE WHEN $2 = 'refused' THEN coalesce(capabilities, '{}'::jsonb)
-                                            || jsonb_build_object('refused_as', $5::text) ELSE capabilities END
+                      capabilities = CASE WHEN $2 IN ('refused', 'broken') THEN coalesce(capabilities, '{}'::jsonb)
+                                            || jsonb_build_object(CASE $2 WHEN 'refused' THEN 'refused_as' ELSE 'broken_as' END, $5::text)
+                                          ELSE capabilities END
                     WHERE id = $1 RETURNING state""", w["id"], kind, self.s.dead_after, self.s.busy_after, detail)
             if w["last_ok_at"] is None:
                 # never answered: it is being set up, built or started (the first start builds the UI worker for a

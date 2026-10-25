@@ -234,6 +234,10 @@ def make_router(ctx: Ctx) -> APIRouter:
                 warn.append(f"refuses the router: its allow-list does not have {seen} — add that address to "
                             "COMFYFARM_ALLOW_NETWORK in the host's /etc/comfyfarm/<instance>.env (Set up again writes it) "
                             "or to the profile's COMFYFARM_ALLOW, then restart the worker")
+            if r["failure_kind"] == "broken" and r["failing_since"] is not None:
+                why = caps.get("broken_as") or "it cannot run jobs"
+                warn.append(f"answers but cannot run jobs ({why}): no job is sent to it. From extension 0.9 it restarts "
+                            "itself; an older one needs a restart (Rollout, or the service on its host)")
             warn += security_warnings(caps)
             warn += consistency.warnings(rep.get(r["group_id"], {}).get("workers", {}).get(r["id"]))
             devs = [d for d in caps.get("devices") or [] if isinstance(d, dict) and d.get("type") != "cpu"]

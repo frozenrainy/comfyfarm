@@ -73,8 +73,9 @@ class Job:
 class FakeWorker:
     def __init__(self, *, version: str = "0.41.0-fake", backend: str = "cuda", ws_fix: bool = False, vram_gb: int = 16,
                  validate_endpoint: bool = True, secured: bool | None = None, models: dict | None = None,
-                 nodes_extra: list[str] | None = None):
+                 nodes_extra: list[str] | None = None, extension: str = "0.3-fake"):
         # secured: None = no extension (/comfyfarm/info 404); True/False = the extension's allow-list state
+        # extension: its version; from "0.9" it answers GET /comfyfarm/health (executor thread, device)
         self.version, self.backend, self.ws_fix, self.vram_gb = version, backend, ws_fix, vram_gb
         self.argv = ["main.py", "--listen", "0.0.0.0"]          # system.argv (sys.argv without the interpreter, P15)
         self.object_info_ok = True                             # False: /object_info answers 500 (a broken upgrade)
@@ -117,8 +118,12 @@ class FakeWorker:
         for p in ("", "/api"):
             r.add_get(p + "/models", self.get_models)
             r.add_get(p + "/models/{folder}", self.get_models_folder)
+        self.extension = extension
+        self.gpu_fault: str | None = None     # set: the device is broken — /system_stats answers 500 (as ComfyUI does)
         if secured is not None:
             r.add_get("/comfyfarm/info", self.info)
+            if tuple(int(x) for x in extension.split("-")[0].split(".")) >= (0, 9):
+                r.add_get("/comfyfarm/health", self.health)
         self.app.on_startup.append(self._start)
 
     # ---------------- fault injection ----------------
@@ -356,14 +361,32 @@ class FakeWorker:
         f = request.match_info["folder"]
         return web.json_response(self.models.get(f, []))
 
+    async def health(self, request):
+        executor = "dead" if self._executor.done() else "alive"
+        return web.json_response({"extension": self.extension, "executor": executor,
+                                  "device": f"error: AcceleratorError: {self.gpu_fault}" if self.gpu_fault else "ok"})
+
+    def kill_executor(self):
+        """The prompt executor dies, the process stays: requests are answered, nothing runs (field, dev.21)."""
+        self._executor.cancel()
+
+    def restart(self):
+        """What the service manager does after the watchdog exits: a fresh process — empty queue, live executor."""
+        self.pending.clear(); self.history.clear(); self.jobs.clear()
+        self.running, self.gpu_fault = None, None
+        if self._executor.done():
+            self._executor = asyncio.create_task(self.executor())
+
     async def info(self, request):
-        return web.json_response({"extension": "0.3-fake", "comfyui": self.version, "ws_fix": self.ws_fix,
+        return web.json_response({"extension": self.extension, "comfyui": self.version, "ws_fix": self.ws_fix,
                                   "custom_nodes": {"loaded": ["comfyfarm_worker"], "failed": self.failed_nodes,
                                                    "errors": {n: "libGL.so.1: cannot open shared object file: No such file or "
                                                               "directory" for n in self.failed_nodes}},
                                   "secured": self.secured, "allow": ["10.0.0.1/32"] if self.secured else [], "invalid": []})
 
     async def get_system_stats(self, request):
+        if self.gpu_fault:                    # ComfyUI asks torch for free VRAM here: a broken context raises
+            return web.json_response({"error": self.gpu_fault}, status=500)
         torch = "2.14.0+rocm7.2" if self.backend == "rocm" else "2.14.0+cu130"
         return web.json_response({"system": {"comfyui_version": self.version, "pytorch_version": torch, "os": "posix",
                                              "argv": self.argv},

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""ComfyFarm worker extension — three things a farm needs from a stock ComfyUI worker, without patching its core:
-a source allow-list (allow.py; the worker is otherwise open to everyone on the network), a validation endpoint, and
-a fix for the WebSocket reconnect race.
+"""ComfyFarm worker extension — four things a farm needs from a stock ComfyUI worker, without patching its core:
+a source allow-list (allow.py; the worker is otherwise open to everyone on the network), a validation endpoint, a
+fix for the WebSocket reconnect race, and a watchdog for the prompt executor (watchdog.py: a process whose executor
+thread died answers every request and runs nothing).
 
 ComfyUI's /ws handler removes `sockets[sid]` in `finally` without checking that the entry is still its own socket.
 When a client reconnects with the same clientId, the old connection's cleanup deletes the new registration and every
@@ -15,9 +16,10 @@ import hashlib, inspect, json, logging, os, re, uuid
 import aiohttp
 from aiohttp import web
 
+from . import watchdog
 from .allow import from_env, make_middleware
 
-EXT_VERSION = "0.8"
+EXT_VERSION = "0.9"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")
@@ -193,7 +195,21 @@ def _install_allow():
         return web.json_response(body)
 
 
-for _step, _fn in (("reconnect fix", _install), ("validate endpoint", _install_validate), ("allow-list", _install_allow)):
+def _install_watchdog():
+    """GET /comfyfarm/health — the executor thread and the GPU, what /queue cannot tell — and the watchdog that
+    exits a process whose executor died (0.9; the router reads the report, older workers by /system_stats)."""
+    from server import PromptServer
+
+    @PromptServer.instance.routes.get("/comfyfarm/health")
+    async def comfyfarm_health(request):
+        return web.json_response({"extension": EXT_VERSION, "executor": watchdog.WATCH.check(), "device": watchdog.device()})
+
+    if watchdog.start():
+        log.info("comfyfarm: executor watchdog on (COMFYFARM_EXECUTOR_WATCHDOG=0 turns it off)")
+
+
+for _step, _fn in (("reconnect fix", _install), ("validate endpoint", _install_validate), ("allow-list", _install_allow),
+                   ("executor watchdog", _install_watchdog)):
     try:
         _fn()
     except Exception as e:  # never break worker startup

@@ -61,6 +61,8 @@ function warnText(x) {
   // the ones with an address inside
   let m = /^refuses the router: its allow-list does not have (.+?) — add that address/.exec(x);
   if (m) return t("refuses the router: its allow-list does not have {addr} — add that address to COMFYFARM_ALLOW_NETWORK in the host's /etc/comfyfarm/<instance>.env (Set up again writes it) or to the profile's COMFYFARM_ALLOW, then restart the worker", { addr: m[1] });
+  m = /^answers but cannot run jobs \((.+)\): no job is sent to it/.exec(x);
+  if (m) return t("answers but cannot run jobs ({why}): no job is sent to it. From extension 0.9 it restarts itself; an older one needs a restart (Rollout, or the service on its host)", { why: m[1] });
   m = /^refused (\d+) request\(s\), the last from (.+?) — if that is/.exec(x);
   if (m) return t("refused {n} request(s), the last from {addr} — if that is this farm's gateway or router, add it to COMFYFARM_ALLOW_NETWORK in the host's /etc/comfyfarm/<instance>.env or to the profile's COMFYFARM_ALLOW", { n: m[1], addr: m[2] });
   const starts = [["unsecured: accepts requests from any address — set COMFYFARM_ALLOW to the router and gateway",

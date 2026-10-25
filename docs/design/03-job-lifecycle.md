@@ -49,7 +49,7 @@ Every 5 s, for jobs in `dispatching | running | cancelling`, group by worker and
 | `completed` | → completed, fetch outputs, correct `output_hint` (D-10) |
 | `failed` | → failed, keep the worker's error message |
 | `cancelled` | → cancelled (P8) |
-| 404 / unknown, and the job left the router more than *grace* ago | → **failed, kind=`lost`** ("worker restarted or never received it — rerun if needed"), never pending (D-06) |
+| 404 / unknown, and the job left the router more than *grace* ago | → **failed, kind=`lost`** ("worker restarted or never received it — rerun if needed"), never pending (D-06) — unless it never started (`started_at` empty): back to **pending**, "the worker restarted before running it" (D-43) |
 | no answer (busy worker) | keep; busy is judged by health, not here |
 
 *grace* = dispatch timeout (10 s) + reconcile period (5 s) + margin = 30 s by default.
