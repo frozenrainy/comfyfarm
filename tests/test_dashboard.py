@@ -295,4 +295,10 @@ async def test_dashboard_is_served(farm_api):
     assert (await c.get("/comfyfarm/dashboard")).status_code == 307
     page = await c.get("/comfyfarm/dashboard/")
     assert page.status_code == 200 and "app.js" in page.text
-    assert (await c.get("/comfyfarm/dashboard/app.js")).status_code == 200
+    js = await c.get("/comfyfarm/dashboard/app.js")
+    assert js.status_code == 200 and js.headers["cache-control"] == "no-cache"      # modules: revalidated every load
+    # the typeface comes from the router itself (a closed network has no font CDN) and may be cached for a day
+    font = await c.get("/comfyfarm/dashboard/fonts/PretendardVariable.woff2")
+    assert font.status_code == 200 and font.content[:4] == b"wOF2" and font.headers["cache-control"] == "public, max-age=86400"
+    assert "Pretendard" in (await c.get("/comfyfarm/dashboard/app.css")).text
+    assert (await c.get("/comfyfarm/dashboard/fonts/LICENSE-Pretendard.txt")).status_code == 200

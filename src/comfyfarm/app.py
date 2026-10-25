@@ -108,7 +108,8 @@ class NoCacheStatic(StaticFiles):
 
     async def get_response(self, path, scope):
         r = await super().get_response(path, scope)
-        r.headers["Cache-Control"] = "no-cache"
+        # the font is 2 MB and changes with its file name, not with releases: a day in the cache instead of a 304 per load
+        r.headers["Cache-Control"] = "public, max-age=86400" if path.startswith("fonts/") else "no-cache"
         return r
 
 

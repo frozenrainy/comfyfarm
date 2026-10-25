@@ -20,8 +20,14 @@
   }
 }
 
+/* One face on every browser and OS: Pretendard (SIL OFL, fonts/LICENSE-Pretendard.txt), Latin and Hangul in one file,
+   served by the router itself — the farm may have no way out to a font CDN. The system font shows until it arrives. */
+@font-face { font-family: "Pretendard Variable"; src: url("fonts/PretendardVariable.woff2") format("woff2"); font-weight: 45 920;
+             font-style: normal; font-display: swap; }
+
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 14px/1.45 "Pretendard Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
        word-break: keep-all; overflow-wrap: anywhere; }
 a { color: var(--accent); text-decoration: none; }
 .muted { color: var(--muted); }

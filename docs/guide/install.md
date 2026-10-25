@@ -149,7 +149,10 @@ Settings, all optional, in a `.env` next to `compose.yaml`:
 - **Closed network**: the first start, every *Build* and every node pack lookup need internet on this host. Without
   it: pull the images outside, `docker save ghcr.io/frozenrainy/comfyfarm:<version> postgres:17`, `docker load` them
   inside, and publish the artifacts on a machine that has internet with `publish.py recipe`, then carry the artifact
-  store in ([rollouts.md](rollouts.md) §1).
+  store in ([rollouts.md](rollouts.md) §1). The dashboard itself asks nothing of the outside: no script, style or
+  font comes from a CDN (its typeface, Pretendard, ships in the image). The stock ComfyUI editor renders offline too,
+  but its code reaches for comfy.org services (release notes, API nodes, telemetry) that a closed network answers
+  with a failure — expect some slow starts of those features, not a broken editor.
 
 ### Strict
 
