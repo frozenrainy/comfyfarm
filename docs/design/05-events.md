@@ -35,13 +35,25 @@ recv(event)
   frames keep their order.
 - Progress shown to the user is per node (`progress_state`), not a single percentage guessed from sampler node names —
   two-stage samplers made the old 0–100 % bar run twice. The nodes are **weighed** (dev.21): the router reads a plan
-  off the API prompt (`core.jobs.job_plan` — a sampler counts its `steps`, a VAE encode/decode 2, anything else 0.1)
-  and sends it with running jobs; the browser (`dashboard/js/progress.js`) sums finished and partial weights. Counting
-  nodes alike put a 20-node video workflow at 5 % through its one KSampler. The ETA is the steps left at the pace of
-  the sampler at work (two of its reports) — never `elapsed × (1 − p) / p`, which the minutes of model loading before
-  the first step blow up — and a row with no report for 20 s says so rather than show a stale number. Not solved:
-  loops that run the same nodes N times (a finished node going back to running lowers the bar); the next step is the
-  per-node times of the same workflow's earlier runs, a better clock than any guess from the prompt.
+  off the API prompt (`core.jobs.job_plan` — a sampler counts the steps it runs, `end_at_step − start_at_step` for a
+  KSamplerAdvanced, a VAE encode/decode 2, anything else 0.1; ComfyUI's own `max` replaces the guess once reported)
+  and sends it with running jobs; the browser (`dashboard/js/progress.js`) sums finished and partial weights.
+- **Loops** (dev.22): ComfyUI runs a StartLoop's body once per iteration under new ids, `<start>.<call>.<graph>.<k>_<id>`.
+  The router finds each body as ComfyUI does (`job_loops`); the browser weighs a loop as iterations × its body, the
+  finished iterations whole and the current one node by node. The count and the end of each iteration come from the
+  `Iteration k / N` text frames StartLoop and LoopProgress send, which the worker stream keeps (`JobTrack.loops`); until
+  the first is heard the count is read off the copies' ids and shown as `6?`.
+- **Time left** is never `elapsed × (1 − p) / p`, which the minutes of model loading before a first step blow up. Without
+  a loop: the weight left at the pace of the sampler at work, from the stream's record of its first step report
+  (`JobTrack.steps`) against the latest. With a loop: nothing through the first iteration (its samplers do not share a
+  pace), then the last iteration's length for each one left.
+- **Silence**: ComfyUI reports a sampler only when a step ends, so `at` (when the numbers last moved) can be minutes old
+  on a healthy worker. A row says *no word* only past 2.5 × the step pace (at least 2 min; 10 min before the first step),
+  and *worker offline* when the health monitor says so. dev.21 used a fixed 20 s and cried wolf on every video step.
+- **What runs**: a lazy input can leave a whole branch of the prompt out, and the prompt cannot tell which. After a
+  successful run the stream stores the prompt nodes that reported or came from the cache under the workflow's shape
+  (`workflow_shape`: node ids and types; table `workflow_runs`), and the next run of that shape weighs only those.
+  Not solved: nested loops weigh as their outermost; the editor's *My queue* still counts nodes.
 
 ## Browser WebSocket
 

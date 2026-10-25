@@ -28,38 +28,81 @@ console.log(JSON.stringify(ids));
     assert all(v4.match(i) for i in ids) and len(set(ids)) == len(ids)
 
 
+PROGRESS = (ROOT / "src" / "comfyfarm" / "dashboard" / "js" / "progress.js").as_uri()
+
+
+def run_progress(body: str):
+    script = f'import {{ weighted, pace, eta, silence, promptNode, copyOf }} from "{PROGRESS}";\nimport fs from "fs";\n{body}'
+    return json.loads(subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, check=True,
+                                     cwd=ROOT).stdout)
+
+
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
 def test_progress_is_weighed_by_the_plan_and_paced_by_the_sampler():
-    """One KSampler of 20 steps among 10 other nodes: at step 5 the job is about a quarter done, not 95 %; the ETA is
-    the steps left at the sampler's pace; a job the worker stopped reporting is told apart from one at 0 %."""
-    mod = (ROOT / "src" / "comfyfarm" / "dashboard" / "js" / "progress.js").as_uri()
-    script = f"""
-import {{ weighted, pace, eta, silence }} from "{mod}";
-const plan = {{ "3": 20 }}; for (let i = 10; i < 20; i++) plan[String(i)] = 0.1;
-const state = {{ "3": {{ value: 5, max: 20, state: "running" }} }};
-for (let i = 10; i < 20; i++) state[String(i)] = {{ value: 1, max: 1, state: "finished" }};
-const w = weighted({{ state, at: 1000 }}, plan);
+    """One KSampler of 20 steps among 10 other nodes: at step 5 the job is about a quarter done, not 95 %; the time left
+    is the steps left at the sampler's pace — from the router's first step report, the model's loading left out."""
+    o = run_progress("""
+const plan = { "3": 20 }; for (let i = 10; i < 20; i++) plan[String(i)] = 0.1;
+const state = { "3": { value: 5, max: 20, state: "running" } };
+for (let i = 10; i < 20; i++) state[String(i)] = { value: 1, max: 1, state: "finished" };
+const progress = { state, at: 1300, steps: { "3": [1000, 2] } };          // step 2 at 1000, step 5 at 1300: 100 s a step
+const w = weighted(progress, plan);
 const naive = Object.values(state).filter((n) => n.state === "finished").length / Object.keys(state).length;
-const samples = [{{ at: 1000, id: "3", value: 5, max: 20 }}, {{ at: 1030, id: "3", value: 8, max: 20 }}];
-const w2 = weighted({{ state: {{ ...state, "3": {{ value: 8, max: 20, state: "running" }} }}, at: 1030 }}, plan);
-const out = {{
-  frac: w.frac, naive, remaining: w.remaining, current: w.current,
-  pace: pace(samples), eta: eta(w2, pace(samples)),
-  etaNoPace: eta(w, null), etaBeforeFirstStep: eta(weighted({{ state: {{ "3": {{ value: 0, max: 20, state: "running" }} }}, at: 1 }}, plan), 10),
-  unplanned: weighted({{ state: {{ "3": {{ value: 10, max: 20, state: "running" }}, "40:2": {{ value: 1, max: 1, state: "finished" }} }} }}, {{ "3": 20, "40": 5 }}).frac,
-  nothing: weighted({{ state: {{}} }}, plan), bare: weighted({{ state: {{ value: 3, max: 6, node: "3" }} }}, plan).frac,
-  quiet: silence({{ at: 1000 }}, 1045), noReport: silence({{}}, 1045),
-}};
-console.log(JSON.stringify(out));
-"""
-    o = json.loads(subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True, check=True).stdout)
+const p = pace(progress, w.current);
+console.log(JSON.stringify({
+  frac: w.frac, naive, current: w.current, pace: p, eta: eta(w, p),
+  paceFromPage: pace({ state, at: 1300 }, w.current, [{ at: 1000, id: "3", value: 5, max: 20 }, { at: 1030, id: "3", value: 8, max: 20 }]),
+  steps20: weighted({ state: { "3": { value: 1, max: 40, state: "running" } } }, { "3": 20 }).frac,  // ComfyUI's max wins
+  nothing: weighted({ state: {} }, plan), bare: weighted({ state: { value: 3, max: 6, node: "3" } }, plan).frac,
+}));
+""")
     assert 0.27 < o["frac"] < 0.30 and o["naive"] > 0.9                   # (1 + 5) / 21 against 10 of 11 nodes done
-    assert abs(o["remaining"] - 15) < 1e-9 and o["current"] == {"id": "3", "value": 5, "max": 20}
-    assert o["pace"] == 10 and abs(o["eta"] - 120) < 1e-9                    # 3 steps in 30 s; 12 steps left
-    assert o["etaNoPace"] is None and abs(o["etaBeforeFirstStep"] - 210) < 1e-9   # paced: 20 steps + the ten small nodes, × 10 s
-    assert abs(o["unplanned"] - 15 / 25) < 1e-9                            # "40:2" weighs as its parent 40
+    assert o["current"] == {"id": "3", "value": 5, "max": 20} and o["pace"] == 100
+    assert abs(o["eta"] - 1500) < 1e-6                                     # 15 steps left (14 + ten 0.1s) × 100 s
+    assert o["paceFromPage"] == 10 and o["steps20"] == 1 / 40
     assert o["nothing"]["frac"] is None and o["nothing"]["started"] is False and o["bare"] == 0.5
-    assert o["quiet"] == 45 and o["noReport"] is None
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_long_step_is_not_a_silent_worker():
+    """dev.21 said "no word" 20 s into every 208-second step. Silence is measured against the job's own pace."""
+    o = run_progress("""
+const p = { at: 1000 };
+console.log(JSON.stringify({
+  midStep: silence(p, 1196, 208), longStep: silence(p, 1000 + 2.5 * 208 + 1, 208),
+  loading: silence(p, 1500, null), stuckLoading: silence(p, 1601, null), short: silence(p, 1121, 2), none: silence({}, 5, 1),
+}));
+""")
+    assert o["midStep"] == {"quiet": 196, "alarming": False}
+    assert o["longStep"]["alarming"] is True
+    assert o["loading"]["alarming"] is False and o["stuckLoading"]["alarming"] is True     # 10 min before the first step
+    assert o["short"]["alarming"] is True                                  # fast steps: still at least 2 min of grace
+    assert o["none"] == {"quiet": None, "alarming": False}
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_a_real_loop_run_is_weighed_by_its_iterations():
+    """A real run (field, dev.21), ids and numbers only: a VACE workflow whose StartLoop 96 runs its 57-node body 6
+    times; iteration 1, the high-noise sampler 96.0.0.0_160:137 at 7/10. dev.21 showed 3.3 %: the copies' ids were
+    not the plan's, so the sampler weighed 0.1. About 40 minutes into a 4-hour run is near 9 %."""
+    o = run_progress("""
+const f = JSON.parse(fs.readFileSync("tests/fixtures/progress_vace_loop.json"));
+const now = f.progress.at + 60;
+const w = weighted(f.progress, f.plan, f.loops, now);
+// the same run once the router has heard "Iteration 0 / 6" at t0 and "Iteration 1 / 6" 40 min later
+const t0 = f.progress.at - 2000, said = { ...f.progress, loops: { "96": { n: 6, ends: [t0, t0 + 2400] } } };
+const w2 = weighted(said, f.plan, f.loops, t0 + 3000);
+console.log(JSON.stringify({ frac: w.frac, loop: w.loop, current: w.current, eta: eta(w, 208),
+                             frac2: w2.frac, loop2: w2.loop, eta2: eta(w2, 208),
+                             ids: [promptNode("96.0.0.0_160:137"), copyOf("96.0.0.5_160:127"), copyOf("160:137")] }));
+""")
+    assert 0.07 < o["frac"] < 0.12
+    assert o["loop"] == {"k": 1, "n": 6, "known": False}                  # 6 seen in the copies' ids, not yet said
+    assert o["current"] == {"id": "96.0.0.0_160:137", "value": 7, "max": 10}
+    assert o["eta"] is None                                                # a first iteration is not timed yet: no number
+    assert o["loop2"] == {"k": 2, "n": 6, "known": True} and 1 / 6 <= o["frac2"] < 2 / 6
+    assert abs(o["eta2"] - ((2400 - 600) + 4 * 2400)) < 1e-6               # the rest of this one + four more, 40 min each
+    assert o["ids"] == ["160:137", {"start": "96", "pos": 5}, None]
 
 
 def test_no_browser_code_needs_a_secure_context():

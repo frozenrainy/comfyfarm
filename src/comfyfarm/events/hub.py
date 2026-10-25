@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import struct
 import time
 import uuid
@@ -41,7 +42,43 @@ class BrowserConn:
     preview_metadata: bool = False              # browser announced supports_preview_metadata
 
 
-PREVIEW_IMAGE, PREVIEW_IMAGE_WITH_METADATA = 1, 4     # ComfyUI protocol.BinaryEventTypes
+PREVIEW_IMAGE, PREVIEW_IMAGE_WITH_METADATA, TEXT_FRAME = 1, 4, 3     # ComfyUI protocol.BinaryEventTypes
+ITERATION = re.compile(r"^Iteration (\d+) / (\d+)$")     # comfy_extras/nodes_loop.py: StartLoop and LoopProgress say it
+EXPANDED = re.compile(r"^.*\.\d+\.\d+\.\d+_(.+)$")        # "<start>.<call>.<graph>.<iteration>_<id>": a loop body node
+
+
+def prompt_node(node_id: str) -> str:
+    """The id a reported node has in the submitted prompt: a loop iteration's copy is reported as
+    "96.0.0.3_160:137" — node 160:137 of the prompt, its fourth iteration (nested loops: the innermost)."""
+    m = EXPANDED.match(node_id)
+    return m.group(1) if m else node_id
+
+
+def parse_text(frame: bytes) -> tuple[str, str] | None:
+    """(node id, text) of a progress-text frame (send_progress_text: type, id length, id, utf-8 text)."""
+    if len(frame) < 8 or struct.unpack(">I", frame[:4])[0] != TEXT_FRAME:
+        return None
+    n = struct.unpack(">I", frame[4:8])[0]
+    try:
+        return frame[8:8 + n].decode(), frame[8 + n:].decode()
+    except UnicodeDecodeError:
+        return None
+
+
+class JobTrack:
+    """What a running job's progress says besides the per-node numbers (design 05), kept by the stream that sees it:
+    when each sampler gave its first step (its pace without the model loading before it), each loop's iteration count
+    and the time each iteration ended, and every prompt node that ran or came from the cache."""
+
+    def __init__(self, job_id: int):
+        self.job_id = job_id
+        self.state_at: float | None = None
+        self.steps: dict[str, list] = {}           # node id → [unix time, value] of its first step report
+        self.loops: dict[str, dict] = {}           # start id → {"n": N, "ends": [unix time of iteration 0 start, 1 end, …]}
+        self.ran: set[str] = set()
+
+    def doc(self, state) -> dict:
+        return {"state": state, "at": self.state_at, "steps": self.steps, "loops": self.loops}
 
 
 def parse_preview(frame: bytes) -> tuple[dict | None, bytes]:
@@ -123,6 +160,8 @@ class WorkerStream:
         self.current: JobRef | None = None
         self.last_progress_write = 0.0
         self.last_written = None
+        self.track: JobTrack | None = None          # the job the progress numbers below belong to
+        self.last_state = None
         self.connected = False
         self.down_since = time.monotonic()
         self.last_error: str | None = None          # logged once per streak, not on every retry
@@ -159,8 +198,16 @@ class WorkerStream:
             await asyncio.sleep(backoff[min(attempt, len(backoff) - 1)])
             attempt += 1
 
+    def tracked(self, ref: JobRef) -> JobTrack:
+        if self.track is None or self.track.job_id != ref.job_id:
+            self.track, self.last_state = JobTrack(ref.job_id), None
+        return self.track
+
     async def on_message(self, msg):
-        if isinstance(msg, (bytes, bytearray)):                 # live preview frame
+        if isinstance(msg, (bytes, bytearray)):                 # live preview frame, or a node's progress text
+            text = parse_text(bytes(msg))
+            if text and self.current is not None and (m := ITERATION.match(text[1].strip())):
+                await self.iteration(self.current, text[0], int(m.group(1)), int(m.group(2)))
             meta, frame = parse_preview(bytes(msg))
             ref = await self.hub.ref(meta["prompt_id"]) if meta and meta.get("prompt_id") else self.current
             if ref is not None:
@@ -176,6 +223,8 @@ class WorkerStream:
         if etype == "execution_start" and ref is not None:
             self.current = ref
             await self.hub.started(ref)
+        elif etype == "execution_cached" and ref is not None:   # cached nodes did not run, but they would have
+            self.tracked(ref).ran.update(prompt_node(str(k)) for k in data.get("nodes") or [])
         elif etype == "executing" and pid and ref is not None:
             if data.get("node") is not None:
                 self.current = ref          # a node of this prompt runs now (re-learns the job after a reconnect)
@@ -192,22 +241,49 @@ class WorkerStream:
         if etype in ("progress", "progress_state"):
             await self.progress(ref, data)
         elif etype in TERMINAL_EVENTS:
+            if etype == "execution_success" and self.track is not None and self.track.job_id == ref.job_id:
+                await self.hub.remember_run(ref, self.track.ran)
             await self.hub.finish(ref, TERMINAL_EVENTS[etype], data)
             if self.current is not None and self.current.prompt_id == ref.prompt_id:
                 self.current = None
 
     async def progress(self, ref: JobRef, data: dict):
-        """At most one write per worker every 2 s, only when the value changed (D-15). A dropped write costs a stale
-        number for one period; a failed write never breaks the receive loop."""
-        now = time.monotonic()
+        """At most one write per worker every 2 s, only when something changed (D-15). A dropped write costs a stale
+        number for one period; a failed write never breaks the receive loop. `at` is when the numbers last moved —
+        ComfyUI says nothing between two sampler steps, so a long step is a long silence, not a dead worker."""
+        tr, now = self.tracked(ref), time.time()
         value = data.get("nodes") if "nodes" in data else {"value": data.get("value"), "max": data.get("max"), "node": data.get("node")}
-        if value == self.last_written or now - self.last_progress_write < PROGRESS_THROTTLE:
+        if value != self.last_state:
+            self.last_state, tr.state_at = value, now
+        nodes = value if "nodes" in data else {str(data.get("node")): value}
+        for nid, n in (nodes or {}).items():
+            if not isinstance(n, dict):
+                continue
+            tr.ran.add(prompt_node(str(nid)))
+            v, mx = n.get("value") or 0, n.get("max") or 0
+            if mx > 1 and v >= 1 and nid not in tr.steps:
+                tr.steps[str(nid)] = [now, v]
+        await self.write_progress(tr)
+
+    async def iteration(self, ref: JobRef, node_id: str, k: int, n: int):
+        """"Iteration k / N" of a loop: 0 when it starts, k when its k-th iteration ended."""
+        tr = self.tracked(ref)
+        loop = tr.loops.setdefault(node_id, {"n": n, "ends": []})
+        loop["n"] = n
+        if k == len(loop["ends"]):
+            loop["ends"].append(time.time())
+        await self.write_progress(tr, force=True)
+
+    async def write_progress(self, tr: JobTrack, force: bool = False):
+        now = time.monotonic()
+        doc = tr.doc(self.last_state)
+        if doc == self.last_written or (now - self.last_progress_write < PROGRESS_THROTTLE and not force):
             return
-        self.last_progress_write, self.last_written = now, value
+        self.last_progress_write, self.last_written = now, json.loads(json.dumps(doc))
         try:
             async with self.hub.db.conn() as c:
                 await c.execute("UPDATE jobs SET progress = $2 WHERE id = $1 AND status IN ('running','dispatching','cancelling')",
-                                ref.job_id, {"state": value, "at": time.time()})
+                                tr.job_id, doc)
         except Exception as e:
             log.debug("progress write skipped: %s", type(e).__name__)
 
@@ -269,6 +345,20 @@ class EventHub:
                 await c.execute("UPDATE jobs SET started_at = coalesce(started_at, now()) WHERE id = $1", ref.job_id)
         except Busy:
             pass
+
+    async def remember_run(self, ref: JobRef, ran: set[str]):
+        """The prompt nodes a successful run executed, under its workflow's shape: the next run of the same shape
+        weighs only those (a lazy input's branch that never runs must not hold its bar back)."""
+        try:
+            async with self.db.conn() as c:
+                prompt = await c.fetchval("SELECT prompt FROM job_payloads WHERE job_id = $1", ref.job_id)
+                shape = jobsvc.workflow_shape(prompt)
+                ids = sorted(ran & set(prompt or {}))
+                if shape and ids:
+                    await c.execute("INSERT INTO workflow_runs(shape, ran) VALUES ($1, $2) "
+                                    "ON CONFLICT (shape) DO UPDATE SET ran = EXCLUDED.ran, at = now()", shape, ids)
+        except Exception as e:
+            log.debug("workflow run not remembered: %s", type(e).__name__)
 
     async def finish(self, ref: JobRef, to: str, data: dict):
         """WS terminal events finish a job immediately; reconcile confirms against /api/jobs (D-08)."""

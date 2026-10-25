@@ -46,7 +46,8 @@ RUNNABLE = """EXISTS (SELECT 1 FROM worker_groups g JOIN workers w ON w.group_id
                  AND comfyfarm_satisfies(w.capabilities, j.requirements))"""
 
 JOB_COLS = ("j.id, j.prompt_id, j.status, j.priority, j.group_id, j.owner, j.note, j.progress, j.error, j.created_at, "
-            "j.dispatched_at, j.started_at, j.finished_at, j.retry_of, j.title, j.hint, w.name AS worker, g.name AS group_name")
+            "j.dispatched_at, j.started_at, j.finished_at, j.retry_of, j.title, j.hint, w.name AS worker, w.state AS worker_state, "
+            "g.name AS group_name")
 JOB_FROM = "FROM jobs j LEFT JOIN workers w ON w.id = j.worker_id LEFT JOIN worker_groups g ON g.id = j.group_id"
 
 
@@ -58,6 +59,8 @@ def job_doc(r, place=None) -> dict:
     if r["status"] in ACTIVE:
         d["progress"] = r["progress"]
         d["place"] = place
+        if r["status"] == "running" and r["worker_state"] and r["worker_state"] != "online":
+            d["worker_state"] = r["worker_state"]          # the bar's silence explained: the worker is not answering
     else:
         d["run_seconds"] = (r["finished_at"] - r["started_at"]).total_seconds() if r["finished_at"] and r["started_at"] else None
         d["error"] = (r["error"] or {}).get("message") if r["status"] == "failed" else None
@@ -125,15 +128,23 @@ def make_router(ctx: Ctx) -> APIRouter:
         return out
 
     async def with_plans(c, docs: list[dict]) -> list[dict]:
-        """Running jobs carry their plan (core.jobs.job_plan): what the browser weighs the per-node progress by. Read
-        from the payloads of the running ones only — a queue page lists many more waiting jobs than running ones."""
+        """Running jobs carry their plan (core.jobs.job_plan) and loops (job_loops): what the browser weighs the
+        per-node progress by. A workflow whose shape ran before weighs only the nodes that ran then (lazy branches).
+        Read from the payloads of the running ones only — a queue page lists many more waiting jobs than running."""
         running = [d["key"] for d in docs if d["status"] == "running"]
         if running:
-            plans = {r["job_id"]: jobsvc.job_plan(r["prompt"]) for r in
-                     await c.fetch("SELECT job_id, prompt FROM job_payloads WHERE job_id = ANY($1::bigint[])", running)}
+            plans = {}
+            for r in await c.fetch("SELECT job_id, prompt FROM job_payloads WHERE job_id = ANY($1::bigint[])", running):
+                prompt = r["prompt"]
+                plan, ran = jobsvc.job_plan(prompt), await c.fetchval(
+                    "SELECT ran FROM workflow_runs WHERE shape = $1", jobsvc.workflow_shape(prompt))
+                if ran:
+                    keep = set(ran)
+                    plan = {k: (v if k in keep else 0.0) for k, v in plan.items()}
+                plans[r["job_id"]] = (plan, jobsvc.job_loops(prompt), bool(ran))
             for d in docs:
                 if d["key"] in plans:
-                    d["plan"] = plans[d["key"]]
+                    d["plan"], d["loops"], d["plan_learned"] = plans[d["key"]]
         return docs
 
     async def own_jobs(c, who: str, recent: int) -> tuple[list[dict], list[dict]]:

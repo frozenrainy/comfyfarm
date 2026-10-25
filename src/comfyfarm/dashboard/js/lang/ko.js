@@ -47,6 +47,7 @@ export default {
   "Show the error": "오류 보기", "all jobs": "모든 작업", "all finished": "끝난 작업 전체", "Finished from": "완료 시작일", "Finished until": "완료 종료일",
   "All finished jobs →": "끝난 작업 전체 →",
   "about {t} left": "약 {t} 남음", "preparing…": "준비 중…", "no word for {t}": "{t}째 신호 없음",
+  "part {k}/{n}": "구간 {k}/{n}", "worker {state}": "워커 {state}", "last report {t} ago": "마지막 보고 {t} 전",
   "(any)": "(아무 그룹)",
   "Run next": "다음 차례로", "Move up": "위로", "Move down": "아래로", "Move to the end": "맨 뒤로",
   "Pause": "일시정지", "Resume": "재개", "Keep it in the queue but skip it": "대기열에 두되 건너뜁니다",

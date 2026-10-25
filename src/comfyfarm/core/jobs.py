@@ -1,6 +1,8 @@
 """Job state transitions and submission. Only this module changes `jobs.status` (architecture rule 2)."""
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import uuid
 
@@ -86,6 +88,7 @@ def job_plan(prompt: dict) -> dict[str, float]:
     plan: dict[str, float] = {}
     if not isinstance(prompt, dict):
         return plan
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
     for nid, node in prompt.items():
         if not isinstance(node, dict):
             continue
@@ -93,12 +96,69 @@ def job_plan(prompt: dict) -> dict[str, float]:
         ins = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
         steps = ins.get("steps")
         if "sampler" in cls:
-            plan[str(nid)] = float(steps) if isinstance(steps, (int, float)) and not isinstance(steps, bool) and steps > 0 else 20.0
+            n = float(steps) if num(steps) and steps > 0 else 20.0
+            # KSamplerAdvanced runs start_at_step..end_at_step of its schedule (two-pass video: 0–10 of 20)
+            start, end = ins.get("start_at_step"), ins.get("end_at_step")
+            if num(start) or num(end):
+                n = max(1.0, min(n, float(end) if num(end) else n) - (float(start) if num(start) else 0.0))
+            plan[str(nid)] = n
         elif "vae" in cls and ("decode" in cls or "encode" in cls):
             plan[str(nid)] = 2.0
         else:
             plan[str(nid)] = 0.1
     return plan
+
+
+def job_loops(prompt: dict) -> dict[str, dict]:
+    """The loops of a workflow: {StartLoop id: {"end": its EndLoop, "body": [ids], "n": iterations or None}}. The body
+    is ComfyUI's own (comfy_execution/validation.py): what the start reaches before its end. ComfyUI runs each body
+    node once per iteration under a new id, "<start>.<call>.<graph>.<iteration>_<id>", and says "Iteration k / N" as
+    each ends; `n` is known here only when the count is typed in (not when another node computes it)."""
+    if not isinstance(prompt, dict):
+        return {}
+    nodes = {str(k): v for k, v in prompt.items() if isinstance(v, dict)}
+    children: dict[str, set] = {k: set() for k in nodes}
+    for k, n in nodes.items():
+        for v in (n.get("inputs") or {}).values():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], str) and v[0] in children:
+                children[v[0]].add(k)
+    ends = {k for k, n in nodes.items() if n.get("class_type") == "EndLoop"}
+    loops = {}
+    for start, n in nodes.items():
+        if n.get("class_type") != "StartLoop":
+            continue
+        body, reached, todo = set(), set(), list(children[start])
+        while todo:                                   # descendants of the start, not walking past an EndLoop
+            k = todo.pop()
+            if k in body or k in reached:
+                continue
+            if k in ends:
+                reached.add(k)
+                continue
+            body.add(k)
+            todo.extend(children[k])
+        if len(reached) != 1:                         # ComfyUI refuses such a prompt; nothing to say about it here
+            continue
+        ins = n.get("inputs") or {}
+        mode, count = ins.get("mode"), None
+        num = lambda v: isinstance(v, int) and not isinstance(v, bool)
+        if mode == "simple" and num(ins.get("mode.num_iterations")):
+            count = ins["mode.num_iterations"]
+        elif mode == "For" and all(num(ins.get(f"mode.{x}")) for x in ("start_iteration_index", "max_iteration")):
+            step = ins.get("mode.step", 1)
+            if num(step) and step != 0:
+                count = len(range(ins["mode.start_iteration_index"], ins["mode.max_iteration"], step))
+        loops[start] = {"end": next(iter(reached)), "body": sorted(body), "n": count}
+    return loops
+
+
+def workflow_shape(prompt: dict) -> str | None:
+    """A workflow's shape, the same for every run of it whatever its seeds, texts or files: node ids and types. What
+    the nodes that actually ran last time are remembered under (a lazy input can leave a whole branch out)."""
+    if not isinstance(prompt, dict) or not prompt:
+        return None
+    shape = sorted((str(k), str(v.get("class_type", ""))) for k, v in prompt.items() if isinstance(v, dict))
+    return hashlib.sha256(json.dumps(shape, separators=(",", ":")).encode()).hexdigest()[:32]
 
 
 def job_hint(prompt: dict) -> str | None:

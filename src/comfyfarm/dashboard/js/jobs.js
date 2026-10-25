@@ -4,8 +4,6 @@ import { act, ago, api, button, copyText, dur, h, namedRow, noteInput, now, setB
          t, toast, when } from "./core.js";
 import { eta, pace, silence, weighted } from "./progress.js";
 
-const QUIET_AFTER = 20;      // seconds without a word from the worker before the row says so instead of a stale %
-
 const jobUrl = (pid, op) => `/api/farm/jobs/${pid}/${op}`;
 const groupLabel = (j) => j.group ?? (j.group_id == null ? t("(any)") : `#${j.group_id}`);
 const viewUrl = (f, extra = "") => "/api/view?" + new URLSearchParams({ filename: f.filename, subfolder: f.subfolder || "",
@@ -82,19 +80,27 @@ function shortWhen(iso) {
   return d.toLocaleString(locale() ?? [], { ...(sameYear ? {} : { year: "2-digit" }), month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-// The bar weighs ComfyUI's per-node progress by the job's plan (sampler steps), and the line under it says what the
-// number cannot: the time left at the sampler's pace, that nothing has started, or that the worker has gone quiet.
+// The bar weighs ComfyUI's per-node progress by the job's plan (sampler steps; a loop counts its iterations), and the
+// line under it says what the number cannot: which iteration of a loop, the time left, that nothing has started, or
+// that the worker has said nothing for longer than this job's own steps take.
 function showProgress(tr, j) {
-  const w = weighted(j.progress, j.plan), at = j.progress?.at;
+  const nowS = now() / 1000, w = weighted(j.progress, j.plan, j.loops, nowS), at = j.progress?.at;
   if (w.current && typeof at === "number") {
     const last = tr.samples[tr.samples.length - 1];
     if (!last || last.at !== at) { tr.samples.push({ at, ...w.current }); if (tr.samples.length > 8) tr.samples.shift(); }
   }
-  const quiet = silence(j.progress, now() / 1000), left = eta(w, pace(tr.samples));
+  const p = pace(j.progress, w.current, tr.samples), left = eta(w, p), q = silence(j.progress, nowS, p);
   setBar(tr.bar, w.frac);
   setText(tr.run, "");
-  setText(tr.eta, quiet != null && quiet > QUIET_AFTER ? t("no word for {t}", { t: dur(quiet) })
-    : !w.started ? t("preparing…") : left != null ? t("about {t} left", { t: dur(left) }) : "");
+  const parts = [];
+  if (w.loop) parts.push(t("part {k}/{n}", { k: w.loop.k, n: w.loop.n == null ? "?" : w.loop.known ? w.loop.n : `${w.loop.n}?` }));
+  if (w.current) parts.push(`${w.current.value}/${w.current.max}`);
+  if (j.worker_state) parts.push(t("worker {state}", { state: t(j.worker_state) }));
+  else if (q.alarming) parts.push(t("no word for {t}", { t: dur(q.quiet) }));
+  else if (!w.started) parts.push(t("preparing…"));
+  else if (left != null) parts.push(t("about {t} left", { t: dur(left) }));
+  setText(tr.eta, parts.join(" · "));
+  tr.eta.title = q.quiet != null ? t("last report {t} ago", { t: dur(q.quiet) }) : "";
 }
 
 // opts: { owner: show the owner column, reorder: admin reorder buttons, refresh, list: () => the jobs shown (for reordering) }
