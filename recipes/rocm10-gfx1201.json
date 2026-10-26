@@ -1,0 +1,20 @@
+{
+ "recipe": "rocm10-gfx1201",
+ "about": "AMD RDNA4 (gfx1201: Radeon AI PRO R9700, RX 9070) with ROCm 10.1 PyTorch from AMD's index — next to rocm-gfx1201 (ROCm 7.2), to compare on one worker first",
+ "comfyui": {"repo": "https://github.com/comfyanonymous/ComfyUI.git", "ref": "v0.41.0"},
+ "python": "3.12",
+ "gpu": {
+  "venv": "rocm101", "accelerator": "rocm", "arch": ["gfx1201"],
+  "index": "https://stable.repo.amd.com/rocm/whl-next/",
+  "torch": ["torch[device-gfx1201]==2.14.0+rocm10.1.0", "torchvision==0.29.0a0+rocm10.1.0", "torchaudio==2.11.0.3+rocm10.1.0"],
+  "env": {"HSA_TOOLS_DISABLE_REGISTER": "1"},
+  "flags": []
+ },
+ "ui": {
+  "venv": "cpu", "accelerator": "cpu",
+  "index": "https://download.pytorch.org/whl/cpu",
+  "env": {},
+  "flags": ["--cpu"]
+ },
+ "nodes": []
+}

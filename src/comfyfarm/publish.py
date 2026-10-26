@@ -363,6 +363,11 @@ def check_recipe(r: dict) -> dict:
             raise Refused(f"{who}: {role} arch must be plain names")
         if not all(isinstance(a, str) and a.startswith("--") and "\n" not in a for a in v.get("pip", [])):
             raise Refused(f"{who}: {role} pip entries must be options (--…)")
+        # the torch family pinned by the recipe, extras and all — an index that ships each GPU's kernels as an extra
+        # (AMD's ROCm 10: torch[device-gfx1201]) needs it, and a loose torchvision could come from PyPI built for CUDA
+        if not isinstance(v.get("torch", []), list) or not all(
+                isinstance(x, str) and "\n" not in x and TORCH_FAMILY.match(x) for x in v.get("torch", [])):
+            raise Refused(f"{who}: {role} torch must be requirement lines for torch, torchvision and torchaudio only")
         if bad := [f for f in v.get("flags", []) if not isinstance(f, str) or (f.startswith("--") and f not in OPTIONS)]:
             raise Refused(f"{who}: {role} flags the launcher refuses: {bad}")
         if bad := [why for k, x in (v.get("env") or {}).items() if (why := env_problem(str(k), x))]:
@@ -724,6 +729,10 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
             # each role's venv has the requirements of the packs that role runs, resolved together with ComfyUI's
             acc = recipe[role]["accelerator"]
             req_files = [os.path.join(core_src, "requirements.txt"), base]
+            if pinned := recipe[role].get("torch"):          # absent: ComfyUI's own torch lines, from the index
+                req_files.append(os.path.join(work, f"torch-requirements-{role}.txt"))
+                with open(req_files[-1], "w") as f:
+                    f.write("\n".join(pinned) + "\n")
             lines = one_of([x for n in nodes_for(recipe, role) for x in reqs[n["name"]]], acc)
             node_file = os.path.join(work, f"node-requirements-{role}.txt")
             cons = recipe.get("constraints", []) + [x for n in nodes_for(recipe, role) for x in n.get("constraints", [])]

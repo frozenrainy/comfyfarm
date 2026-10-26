@@ -40,6 +40,12 @@ while the store has no template, and after a recipe update. A template whose art
 and not offered. A recipe of your own: copy one in `recipes/` — the ComfyUI `ref` is a release
 tag, every node a full commit.
 
+**Another PyTorch for the same GPU**: `rocm10-gfx1201` builds the AMD half with ROCm 10.1 from AMD's own index
+(`torch 2.14.0+rocm10.1.0`) instead of PyTorch's ROCm 7.2 — a separate venv (`rocm101`) and template, so one worker
+can run it while the others keep `rocm-gfx1201`. Its `"torch"` lines pin the torch family, extras and all: AMD's index
+ships each GPU's kernels as an extra (`torch[device-gfx1201]`), and a torchvision left loose could come from PyPI built
+for CUDA. ROCm in a venv is the user-space half; the kernel driver (`amdgpu`) stays the host's.
+
 **Custom nodes in a recipe** — one entry per node pack in `nodes`:
 
 ```json

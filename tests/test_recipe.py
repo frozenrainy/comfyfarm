@@ -393,3 +393,25 @@ def test_uv_copies_into_the_store(monkeypatch):
     with pytest.raises(SystemExit):
         publish.main(["venv"])
     assert env["UV_LINK_MODE"] == "symlink"
+
+
+def test_a_recipe_may_pin_the_torch_family_and_an_unpinned_one_builds_as_before(setup):
+    """AMD's ROCm 10 index ships each GPU's kernels as an extra (torch[device-gfx1201]); a loose torchvision could come
+    from PyPI built for CUDA. A recipe's `torch` lines join that role's requirements — and a recipe without them hashes
+    as before, so a farm upgraded to this builder keeps reusing its venvs."""
+    run(setup)
+    before = publish.venv_inputs(setup["recipe"], "gpu", [])
+    gpu_reqs = setup["built"][0][1]
+    assert not any("rocm10" in r for r in gpu_reqs)
+    pins = ["torch[device-gfx1201]==2.14.0+rocm10.1.0", "torchvision==0.29.0a0+rocm10.1.0"]
+    write(setup, gpu={**setup["recipe"]["gpu"], "venv": "gv10", "torch": pins})
+    setup["built"].clear()
+    run(setup)
+    gpu = [b for b in setup["built"] if b[0].startswith("gv10")]
+    assert gpu and "\n".join(pins) + "\n" in gpu[0][1]                       # its own requirements file
+    assert not any(b[0].startswith("uv") for b in setup["built"])              # the UI half: unchanged, reused
+    assert publish.venv_inputs(setup["recipe"], "gpu", []) == before            # nothing else moved
+    for bad in (["numpy==2"], ["--index-url=https://x"], ["torch\nnumpy"], "torch"):
+        write(setup, gpu={**setup["recipe"]["gpu"], "torch": bad})
+        with pytest.raises(publish.Refused, match="torch must be"):
+            run(setup)
