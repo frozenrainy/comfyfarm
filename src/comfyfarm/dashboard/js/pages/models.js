@@ -2,6 +2,7 @@
 // plane's model store, and copied to the GPU workers of the groups that use them.
 import { act, api, bar, button, formDialog, h, namedRow, pill, setText, syncRows, t, table, toast } from "../core.js";
 import { bytes, pickFiles, uploadFile } from "../upload.js";
+import { clearOver, dropDone, isOver, isWaiting } from "../upload_list.js";
 
 const size = (n) => n == null ? "—" : n >= 2 ** 30 ? `${(n / 2 ** 30).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 2 ** 20))} MB`;
 
@@ -115,17 +116,25 @@ export function models(root, { refresh }) {
   }
   async function startAll() {
     localStorage.setItem("comfyfarm.uploadFolder", staged.find((x) => x.state === "staged")?.folder || "loras");
-    for (const x of staged.filter((y) => y.state === "staged" || y.state === "failed")) {
+    // the groups ticked for this batch: taken now, and the ticks cleared for the next one (a batch for another group
+    // must not inherit them unseen; a batch started while this one runs keeps its own)
+    const grp = (batchGroups || []).map(Number);
+    batchGroups = null;
+    let sent = 0;
+    for (const x of staged.filter(isWaiting)) {
       x.state = "uploading"; x.error = null; renderUploads();
       try {
-        await uploadFile(x.file, "model", { folder: x.folder, groups: (batchGroups || []).map(Number) },
+        await uploadFile(x.file, "model", { folder: x.folder, groups: grp },
                          (n) => { x.received = n; renderUploads(); }, x.resume || null, () => x.state === "cancelled");
-        x.state = "done";
+        x.state = "done"; sent++;
       } catch (e) {
         if (x.state !== "cancelled") { x.state = "failed"; x.error = e.message; }
       }
       renderUploads();
     }
+    dropDone(staged);                    // they are in the models table now; failed ones stay, with their error
+    renderUploads();
+    if (sent) toast(t("{n} uploaded", { n: sent }));
     refresh();
   }
   async function resume(u) {
@@ -162,7 +171,7 @@ export function models(root, { refresh }) {
       h("td", { class: "actions" }, button(t("Go on"), () => resume(u), { title: t("pick the same file again") }),
         button(t("Cancel"), () => act(() => api("DELETE", `/api/admin/uploads/${u.id}`), t("Cancelled"), refresh), { cls: "danger" }))));
     if (!rows.length && !rest.length) return uploadsEl.replaceChildren();
-    const waiting = staged.some((x) => x.state === "staged" || x.state === "failed");
+    const waiting = staged.some(isWaiting), over = staged.some(isOver);
     uploadsEl.replaceChildren(h("div", { class: "callout" },
       h("strong", {}, t("Uploads")), " ",
       h("span", { class: "muted small" }, t("each file goes up in pieces; a broken connection goes on where it stopped")),
@@ -171,8 +180,10 @@ export function models(root, { refresh }) {
         ...groups.map((g) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: (batchGroups || []).includes(String(g.id)),
           onchange: (e) => { batchGroups = [...new Set([...(batchGroups || []).filter((v) => v !== String(g.id)), ...(e.target.checked ? [String(g.id)] : [])])]; } }),
           ` ${g.name}`))) : "",
-      waiting ? h("div", { class: "dialog-actions" }, button(t("Clear"), () => { for (let i = staged.length - 1; i >= 0; i--) if (staged[i].state !== "uploading") staged.splice(i, 1); renderUploads(); }),
-        button(t("Upload all"), () => startAll(), { cls: "primary" })) : ""));
+      waiting || over ? h("div", { class: "dialog-actions" },
+        over ? button(t("Clear finished"), () => { clearOver(staged); renderUploads(); },
+                      { title: t("done, failed and cancelled rows; files not sent yet stay") }) : "",
+        waiting ? button(t("Upload all"), () => startAll(), { cls: "primary" }) : "") : ""));
   }
 
   // ---- the inbox ---------------------------------------------------------------------------------------------

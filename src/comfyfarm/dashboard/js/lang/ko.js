@@ -709,6 +709,8 @@ export default {
     "Hugging Face 토큰이 없습니다: 게이트 모델은 빌더의 hf_token 파일에 토큰을 넣기 전까지 실패합니다.",
   // ---- uploads (docs/design/18) ----
   "Upload": "업로드", "Upload all": "모두 업로드", "Uploads": "업로드", "Clear": "비우기", "Go on": "이어 올리기",
+  "Clear finished": "끝난 줄 비우기", "done, failed and cancelled rows; files not sent yet stay": "완료·실패·취소된 줄만 — 아직 안 올린 파일은 남음",
+  "{n} uploaded": "{n}개 업로드 완료",
   "Remove from the list": "목록에서 빼기", "pick the same file again": "같은 파일을 다시 고르세요",
   "staged": "대기", "uploading": "올리는 중",
   "each file goes up in pieces; a broken connection goes on where it stopped": "파일은 조각으로 올라갑니다 — 연결이 끊기면 끊긴 곳부터 이어집니다",

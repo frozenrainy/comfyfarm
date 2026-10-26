@@ -76,6 +76,9 @@ as *System → Workers* shows.
 
 **Upload** (*System → Models → Upload*):
 - Pick one file or several. Each gets a folder (the last one used is offered). Then pick the groups and *Upload all*.
+- When the batch ends, its finished files leave the list (they are in the models table). Failed ones stay with their
+  error: *Upload all* tries them again with the next files, *Clear finished* or ✕ drops them. The groups ticked
+  belong to one batch; the next starts with none ticked.
 - A file goes up in 16 MiB pieces. If the connection breaks, it goes on where it stopped. If the page was closed, the
   upload is listed as stopped: *Go on* and pick the same file again. An upload not finished within a day is dropped.
 - The router keeps the pieces in `<model store>/.uploads/`. The builder then copies the file into place while hashing

@@ -140,3 +140,40 @@ console.log(JSON.stringify(toasts.map((t) => [t.severity, t.summary, /no worker 
     out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
     assert out == [["warn", "Node list out of date", True, False]] * 2
     assert "if (/^\\/(api\\/)?object_info$/.test(route)) warnIfStale(res);" in src      # the node list the editor loads
+
+
+UPLOAD_LIST = (ROOT / "src" / "comfyfarm" / "dashboard" / "js" / "upload_list.js").as_uri()
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_the_upload_list_keeps_the_next_batch_and_drops_the_last():
+    """Field (dev.24): after a batch the done rows stayed; picking the next files added them below, and Clear — the only
+    way to remove done rows — took the new picks too. Done rows go when their batch ends; Clear takes what is over."""
+    script = f'import {{ clearOver, dropDone, isOver, isWaiting }} from "{UPLOAD_LIST}";' + """
+const row = (name, state) => ({ file: { name }, state });
+const names = (l) => l.map((x) => `${x.file.name}:${x.state}`);
+const out = {};
+const list = [row("a", "done"), row("b", "failed"), row("c", "cancelled")];
+dropDone(list);                                              // the batch ended
+out.afterBatch = names(list);
+list.push(row("d", "staged"), row("e", "staged"));           // the next picks
+out.sent = names(list.filter(isWaiting));                    // what "Upload all" sends: picks, and the failed one again
+out.cleared = clearOver(list);
+out.afterClear = names(list);
+list.push(row("f", "uploading"));
+out.over = list.some(isOver);
+out.clearedNone = clearOver(list);
+out.left = names(list);
+console.log(JSON.stringify(out));
+"""
+    o = json.loads(subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True,
+                                  check=True, cwd=ROOT).stdout)
+    assert o["afterBatch"] == ["b:failed", "c:cancelled"]
+    assert o["sent"] == ["b:failed", "d:staged", "e:staged"]
+    assert o["cleared"] == 2 and o["afterClear"] == ["d:staged", "e:staged"]
+    assert o["over"] is False and o["clearedNone"] == 0 and o["left"] == ["d:staged", "e:staged", "f:uploading"]
+    models = (ROOT / "src" / "comfyfarm" / "dashboard" / "js" / "pages" / "models.js").read_text()
+    assert "dropDone(staged)" in models and "clearOver(staged)" in models
+    assert "staged.splice(i, 1); renderUploads(); }), " not in models     # the old Clear (everything not uploading)
+    # the groups ticked are this batch's: taken at its start, not read again while it runs
+    assert "const grp = (batchGroups || []).map(Number);\n    batchGroups = null;" in models
