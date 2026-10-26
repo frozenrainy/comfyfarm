@@ -154,7 +154,10 @@ environment). The token value itself is refused: it would be stored in the ledge
 4. Upgrades: *Start rollout* — the worker is drained (its running job finishes), restarted through the backend, must be
    seen going down, must come back with exactly the new argv (badge `match`), is verified (node list, a broken
    workflow is refused, every custom node imported, optionally a smoke workflow), and returns to service. If anything fails, that worker goes back
-   to its previous profile and stays in maintenance; the remaining workers are skipped.
+   to the profile it ran before and stays in maintenance; the remaining workers are skipped. *Assign* on a running
+   worker changes nothing it runs — start a rollout instead (assigning first is harmless: the way back is what the
+   worker runs, not what it was assigned). A failed step leaves the worker in maintenance: no job reaches it until a
+   rollout succeeds on it or *Maintenance* is turned off.
 
 The backend `manual` needs no agent: the dashboard tells an operator which instance to restart and waits for it.
 

@@ -1,3 +1,12 @@
+// What a step ended as, in the reader's language (the engine writes these two after a failed step).
+function stepDetail(d) {
+  let m = /^back on (.+); left in maintenance$/.exec(d || "");
+  if (m) return t("back on {profile}; left in maintenance", { profile: m[1] });
+  m = /^no earlier profile to go back to: stays on (.+); left in maintenance$/.exec(d || "");
+  if (m) return t("no earlier profile to go back to: stays on {profile}; left in maintenance", { profile: m[1] });
+  return d ?? "";
+}
+
 // Rollout tab (docs/design/07): how each worker is launched (instance), what it should run (profile), and rolling a
 // profile out one worker at a time — drain, restart, wait for the badge, verify, revert that worker on failure.
 import { act, api, bar, button, formDialog, h, namedRow, pill, qs, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
@@ -125,7 +134,7 @@ export function rollout(root, { refresh }) {
     if (!v) return;
     const res = await act(() => api("POST", `/api/admin/instances/${i.worker_id}/assign`, { profile_id: Number(v.profile) }),
                           v.start ? null : t("Assigned"), v.start ? null : refresh);
-    if (res?.warnings?.length) alert(res.warnings.join("\n"));
+    if (res?.warnings?.length) alert(res.warnings.map((x) => t(x)).join("\n"));
     if (res && v.start) await start(i);
   }
   // Restart a running worker the safe way: a rollout of the profile it runs, restarting even though nothing changed in
@@ -500,7 +509,7 @@ export function rollout(root, { refresh }) {
     for (const s of ro.steps) {
       const took = s.started_at ? ((s.finished_at ? Date.parse(s.finished_at) : Date.now()) - Date.parse(s.started_at)) / 1000 : null;
       tb.tbody.append(h("tr", {}, h("td", { class: "num" }, String(s.position + 1)), h("td", {}, s.worker),
-        h("td", {}, `${s.from ?? "—"} → ${s.to}`), h("td", {}, pill(s.status)), h("td", {}, s.detail ?? ""),
+        h("td", {}, `${s.from ?? "—"} → ${s.to}`), h("td", {}, pill(s.status)), h("td", {}, stepDetail(s.detail)),
         h("td", { class: "err" }, s.error ?? ""), h("td", {}, s.started_at ? when(s.started_at) : ""),
         h("td", { class: "num" }, took == null ? "" : `${Math.round(took)}s`)));
     }

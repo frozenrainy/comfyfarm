@@ -360,6 +360,12 @@ class Engine:
                 await self.undrain(w, sid, actor)                       # nothing changed: back to work
                 await self.set_step(sid, "failed", error=str(e))
                 return False
+            if frm is not None and frm["id"] == to["id"]:
+                # it ran this very profile before the rollout: there is no earlier one, and restarting into it again
+                # changes nothing — say so instead of "reverted"
+                await self.set_step(sid, "revert_failed", f"no earlier profile to go back to: stays on {to['name']}; "
+                                    "left in maintenance", error=str(e))
+                return False
             await self.set_step(sid, "reverting", f"back to {frm['name'] if frm else '?'}", error=str(e))
             await self.revert(sid, backend, inst, w, frm, opts, actor, str(e))
             return False

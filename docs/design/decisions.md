@@ -286,3 +286,11 @@ the front of the queue (`retry_of`, reason "automatic retry of job N after a GPU
 `COMFYFARM_RETRY_GPU_FAULTS` times (default 1) along one chain of automatic retries, only within 10 minutes of the
 failure, and never when it was retried already. A retry that faults again stops the chain: a second fault in a row
 is more likely the job's own than bad luck.
+
+**D-45 A rollout goes back to what the worker ran, not to what it was assigned.** *(field, dev.23)* — A new profile
+was assigned (no restart), then rolled out; its node pack failed to import. The step had taken the assignment as
+where the worker came from, so the revert restarted the worker into the same broken profile, and the badge said
+`match` — the worker did run what it was assigned. → At rollout start each step's `from` is the profile whose render
+the worker's argv matches (its assignment, the targets of its successful rollouts, then any profile), else the
+target of its last successful rollout, else its assignment. A step whose `from` is its target says it has no way
+back instead of "reverted"; *Assign* on an online worker warns that it changes nothing until a restart.

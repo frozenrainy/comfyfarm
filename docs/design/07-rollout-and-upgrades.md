@@ -88,6 +88,10 @@ within `comfy-upgrade/1` (export edition v1.1, §9):
   workflow (EmptyImage → PreviewImage) must succeed.
 - Failure after the assignment changed → revert that worker (old profile, restart, `match`), left in maintenance;
   failure before (drain timeout) → nothing changed, back to service. Either stops new steps (canary stop).
+- The old profile is what the worker **runs** when the rollout starts, not its assignment (D-45): the profile whose
+  render its argv matches — its assignment, the targets of its successful rollouts, then any profile. A worker that
+  already ran the target (a restart rollout) has no way back: its failed step says so ("no earlier profile to go back
+  to: stays on …") instead of "reverted".
 - Interrupted rollouts are resumed or aborted by a person (D-38). An engine error (database busy or gone) interrupts
   the rollout the same way — it is never picked up again on its own. On resume a step caught while reverting finishes
   its revert (never forward), and a failure recorded before the interruption still stops new steps.

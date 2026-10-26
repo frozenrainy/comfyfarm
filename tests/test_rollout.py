@@ -695,3 +695,37 @@ async def test_the_audit_log_comes_a_page_at_a_time(farm):
     live = (await api.get("/api/admin/audit/page?limit=20", headers=H)).json()     # the first page shows them
     assert live["total"] == 50 and live["items"][0]["target"] == "49"
     assert (await api.get("/api/admin/audit/page", headers={"X-ComfyFarm-User": "mallory"})).status_code == 403
+
+
+async def test_a_rollout_after_an_assign_goes_back_to_what_ran(farm):
+    """Field, dev.23: the new profile was *assigned* first (no restart), then rolled out. The step took the assignment
+    as where it came from, so the failed rollout "reverted" to the new, broken profile and the badge said match. The
+    way back is what the worker runs — the profile whose render its argv matches."""
+    api, hosts = farm["api"], farm["hosts"]
+    w1 = hosts["w1"]
+    res = await api.post(f"/api/admin/instances/{w1.wid}/assign", json={"profile_id": farm["p2"]}, headers=H)
+    assert any("keeps running its current profile" in x for x in res.json()["warnings"])     # said at assign time
+    assert (await instances(api))["w1"]["badge"] == "differs"                  # assigned p2, still running p1
+    w1.modes = ["node_import_failed"]
+    rid = await start(api, farm["p2"], [w1.wid])
+    ro = await wait_rollout(api, rid)
+    step = ro["steps"][0]
+    assert ro["status"] == "failed" and step["from"] == "p1", step
+    assert step["status"] == "reverted" and "back on p1" in step["detail"]
+    inst = await instances(api)
+    assert inst["w1"]["profile"] == "p1" and inst["w1"]["badge"] == "match"    # really back on the old one
+
+
+async def test_a_failed_rollout_of_what_already_ran_says_there_is_no_way_back(farm):
+    """A worker restarted into the profile it already ran (the restart option): a failure has nothing earlier to
+    return to. Not "reverted" — it stays, out of service, and the step says why."""
+    api, hosts = farm["api"], farm["hosts"]
+    w1 = hosts["w1"]
+    w1.modes = ["node_import_failed"]
+    rid = await start(api, farm["p1"], [w1.wid], options={"restart": True})
+    ro = await wait_rollout(api, rid)
+    step = ro["steps"][0]
+    assert step["from"] == step["to"] == "p1"
+    assert step["status"] == "revert_failed" and "no earlier profile to go back to: stays on p1" in step["detail"], step
+    workers = {w["name"]: w for w in (await api.get("/api/admin/workers", headers=H)).json()}
+    assert workers["w1"]["maintenance"]

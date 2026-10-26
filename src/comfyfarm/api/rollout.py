@@ -361,6 +361,31 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(400, "; ".join(errors))
         return inst, prof, render, warnings
 
+    async def running_profile(c, worker_id: int, inst) -> int | None:
+        """The profile a worker runs now, as far as can be told: the one whose render its argv matches (the badge's
+        test) — its assignment first, then what its successful rollouts left it on (newest first), then any other
+        profile. An assignment made without a restart is not what runs (field, dev.23: assign, then a rollout of the
+        same profile — its revert had nowhere to go). Nothing matches (offline, never started): what its last
+        successful rollout left it on, else its assignment."""
+        caps = await c.fetchval("SELECT capabilities FROM workers WHERE id = $1", worker_id) or {}
+        done = [r["to_profile_id"] for r in await c.fetch(
+            "SELECT to_profile_id FROM rollout_steps WHERE worker_id = $1 AND status = 'done' ORDER BY id DESC LIMIT 10",
+            worker_id)]
+        if isinstance(caps.get("argv"), list):
+            others = [r["id"] for r in await c.fetch("SELECT id FROM profiles ORDER BY id DESC")]
+            seen = set()
+            for pid in [inst["profile_id"], *done, *others]:
+                if pid is None or pid in seen:
+                    continue
+                seen.add(pid)
+                prof = await profile_doc(c, pid)
+                try:
+                    if prof is not None and rd.badge(rd.build(prof, inst), caps["argv"]) == "match":
+                        return pid
+                except Exception:                              # a profile that no longer renders cannot be running
+                    continue
+        return done[0] if done else inst["profile_id"]
+
     @api.post("/api/admin/instances/{worker_id}/assign")
     async def assign(worker_id: int, body: AssignIn, x_comfyfarm_user: str | None = Header(default=None)):
         """Set the assignment without restarting (first setup; the badge shows `differs` until the worker restarts).
@@ -371,6 +396,10 @@ def make_router(ctx: Ctx) -> APIRouter:
                 if await in_active_rollout(c, worker_id):
                     raise HTTPException(409, "the worker is part of an active rollout")
                 inst, prof, render, warnings = await check_assignment(c, worker_id, body.profile_id)
+                state = await c.fetchval("SELECT state FROM workers WHERE id = $1", worker_id)
+                if state == "online" and prof["id"] != inst["profile_id"]:
+                    warnings = [*warnings, "it keeps running its current profile until it restarts — to change what a "
+                                "running worker runs, start a rollout: it checks the new profile and goes back on failure"]
                 await c.execute("UPDATE instances SET profile_id = $2, updated_at = now() WHERE worker_id = $1", worker_id, prof["id"])
                 await audit(c, who, "assign", inst["instance"], **{"from": inst["profile_id"], "to": prof["id"],
                                                                      "profile": prof["name"], "restart": False})
@@ -528,7 +557,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                     except HTTPException as e:
                         raise HTTPException(e.status_code, f"{name}: {e.detail}")
                     warnings += [f"{name}: {x}" for x in warn]
-                    plan.append((wid, inst["profile_id"]))
+                    plan.append((wid, await running_profile(c, wid, inst)))    # what a failure goes back to
                 try:
                     async with c.transaction():
                         rid = await c.fetchval("INSERT INTO rollouts(target_profile_id, window_size, options, created_by) "
