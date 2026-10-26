@@ -33,7 +33,7 @@
 name: comfyfarm
 
 x-image: &image
-  image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.22}
+  image: ghcr.io/frozenrainy/comfyfarm:${COMFYFARM_VERSION:-0.1.0-dev.23}
   build:                                    # only for `docker compose build` (a change of your own, a closed network)
     context: ../..
     dockerfile: deploy/Dockerfile
