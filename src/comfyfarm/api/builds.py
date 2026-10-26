@@ -212,7 +212,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         async with db.conn() as c:
             ui = await c.fetchval("SELECT EXISTS (SELECT 1 FROM workers w JOIN instances i ON i.worker_id = w.id WHERE "
                                   "w.kind = 'ui' AND w.deleted_at IS NULL AND i.profile_id IS NOT NULL AND w.state = 'online')")
-            gpu_profile = await c.fetchval("SELECT EXISTS (SELECT 1 FROM profiles WHERE NOT (flags @> '[\"--cpu\"]'::jsonb))")
+            gpu_profile = await c.fetchval("SELECT EXISTS (SELECT 1 FROM profiles WHERE deleted_at IS NULL AND NOT (flags @> '[\"--cpu\"]'::jsonb))")
             gpu_worker = await c.fetchval("SELECT EXISTS (SELECT 1 FROM workers w JOIN instances i ON i.worker_id = w.id WHERE "
                                           "w.kind = 'gpu' AND w.deleted_at IS NULL AND w.group_id IS NOT NULL AND "
                                           "i.profile_id IS NOT NULL AND w.state = 'online')")
@@ -411,7 +411,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         name, p = f"{tpl['template']}-ui", tpl["ui"]
         async with db.conn() as c:
             async with c.transaction():
-                pid = await c.fetchval("SELECT id FROM profiles WHERE name = $1", name)
+                pid = await c.fetchval("SELECT id FROM profiles WHERE name = $1 AND deleted_at IS NULL", name)
                 if pid is None:
                     prof = check_profile({"name": name, "core": p["core"], "venv": p["venv"], "nodes": p.get("nodes") or [],
                                           "frontend": None, "flags": p.get("flags") or [], "env": p.get("env") or {},

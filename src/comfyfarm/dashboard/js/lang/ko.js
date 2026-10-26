@@ -54,6 +54,13 @@ export default {
   "back on {profile}; left in maintenance": "{profile}(으)로 되돌림, 유지보수 상태로 둠",
   "no earlier profile to go back to: stays on {profile}; left in maintenance": "되돌아갈 이전 프로필이 없음: {profile}에 남음, 유지보수 상태로 둠",
   "running {profile}": "{profile} 실행 중",
+  "In use": "사용 중", "assigned to {worker}": "{worker}에 할당됨", "{worker} runs it": "{worker}가 실행 중",
+  "rollout #{rollout} uses it": "롤아웃 #{rollout}이 사용 중", "Deleted {n}": "{n}개 삭제", "Kept {n} — {why}": "{n}개 남김 — {why}",
+  "Nothing to delete": "지울 것이 없음", "{n} profile(s) not in use": "사용하지 않는 프로필 {n}개", "Select those not in use": "사용 안 하는 것 모두 선택",
+  "Delete selected": "선택 삭제",
+  "Delete {n} profile(s)? Profiles in use stay; the rollout history keeps the names of the others.": "프로필 {n}개를 삭제할까요? 사용 중인 프로필은 남고, 나머지는 롤아웃 기록에 이름만 남습니다.",
+  "in use — {why}": "사용 중 — {why}",
+  "A profile in use cannot be changed — copy it and roll the copy out. A deleted profile leaves the list; the rollout history keeps its name.": "사용 중인 프로필은 바꿀 수 없습니다 — 복사해서 그 복사본을 롤아웃하세요. 삭제한 프로필은 목록에서 사라지고 롤아웃 기록에는 이름이 남습니다.",
   "running {profile}; still in maintenance as before the rollout: it takes no jobs until maintenance is turned off": "{profile} 실행 중 · 롤아웃 전처럼 유지보수 상태 그대로: 유지보수를 끌 때까지 작업을 받지 않음",
   "it keeps running its current profile until it restarts — to change what a running worker runs, start a rollout: it checks the new profile and goes back on failure":
     "재시작할 때까지 지금 프로필로 계속 돕니다 — 실행 중인 워커를 바꾸려면 롤아웃을 시작하세요: 새 프로필을 확인하고 실패하면 되돌립니다",

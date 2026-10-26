@@ -755,3 +755,38 @@ async def test_a_worker_in_maintenance_before_the_rollout_stays_in_it_and_says_s
     w2 = farm["hosts"]["w2"]
     ro = await wait_rollout(api, await start(api, farm["p2"], [w2.wid]))
     assert [s["detail"] for s in ro["steps"]] == ["running p2"]
+
+
+async def test_profiles_in_the_rollout_history_can_be_deleted_and_several_at_once(farm):
+    """Field (dev.24): 26 profiles in five days, two assigned — and none of the others could be deleted: every one was
+    named by a rollout's history, the database refused, and the dashboard said "assigned". D-47: deleting archives the
+    profile (the history keeps its name, its name is free again); it is refused only while it is assigned, a worker runs
+    it, or an active rollout uses it — and says which. Several at once: what may go goes, the rest says why."""
+    api, w1, w2 = farm["api"], farm["hosts"]["w1"], farm["hosts"]["w2"]
+    rid = await start(api, farm["p2"], [w1.wid, w2.wid])
+    assert (await wait_rollout(api, rid))["status"] == "succeeded"
+    p3 = (await api.post("/api/admin/profiles", json={"name": "p3", "core": "c1", "venv": "v1", "flags": ["--lowvram"]}, headers=H)).json()["id"]
+    for w in (w1, w2):                                       # assigned without a restart: they still run p2
+        assert (await api.post(f"/api/admin/instances/{w.wid}/assign", json={"profile_id": p3}, headers=H)).status_code == 200
+    listed = {p["name"]: p for p in (await api.get("/api/admin/profiles", headers=H)).json()}
+    assert listed["p1"]["kept"] is None                                           # only in the history: may go
+    assert listed["p2"]["kept"] == {"kind": "running", "worker": "w1"} and listed["p2"]["assigned"] == 0
+    assert listed["p3"]["kept"] == {"kind": "assigned", "worker": "w1"}
+
+    r = await api.delete(f"/api/admin/profiles/{farm['p2']}", headers=H)
+    assert r.status_code == 409 and r.json()["detail"]["message"] == "w1 runs p2" and r.json()["detail"]["kind"] == "running"
+    out = (await api.post("/api/admin/profiles/delete", json={"ids": [farm["p1"], farm["p2"], p3, 999999]}, headers=H)).json()
+    assert out["deleted"] == [{"id": farm["p1"], "name": "p1"}] and out["missing"] == [999999]
+    assert [(k["name"], k["kind"]) for k in out["kept"]] == [("p2", "running"), ("p3", "assigned")]
+    assert "p1" not in {p["name"] for p in (await api.get("/api/admin/profiles", headers=H)).json()}
+    ro = (await api.get(f"/api/admin/rollouts/{rid}", headers=H)).json()        # the history still names it
+    assert {s["from"] for s in ro["steps"]} == {"p1"}
+    # gone for new use: no assignment, no rollout; its name is free
+    assert (await api.post(f"/api/admin/instances/{w1.wid}/assign", json={"profile_id": farm["p1"]}, headers=H)).status_code == 404
+    bad = await api.post("/api/admin/rollouts", headers=H, json={"profile_id": farm["p1"], "worker_ids": [w1.wid], "options": FAST})
+    assert bad.status_code == 404
+    assert (await api.post("/api/admin/profiles", json={"name": "p1", "core": "c1", "venv": "v1"}, headers=H)).status_code == 200
+    assert (await api.delete(f"/api/admin/profiles/{farm['p1']}", headers=H)).status_code == 404       # already gone
+    assert (await api.post("/api/admin/profiles/delete", json={"ids": "1"}, headers=H)).status_code == 400
+    actions = [a["action"] for a in (await api.get("/api/admin/audit", headers=H)).json()]
+    assert actions.count("profile deleted") == 1

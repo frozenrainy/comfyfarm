@@ -306,3 +306,13 @@ again carries `X-ComfyFarm-Nodes-Stale: <when it was read>`, and the editor's ex
 rollout still restores maintenance as it was (an admin's maintenance is an admin's), and a step that leaves its worker
 in maintenance says so: "running …; still in maintenance as before the rollout: it takes no jobs until maintenance is
 turned off".
+
+**D-47 Deleting a profile archives it; only a profile in use stays.** *(field, dev.24)* — 26 profiles in five days,
+two assigned, and none of the others could be deleted: every one was named by a rollout's history (target, or a step's
+from/to), the database refused, and the dashboard showed "the profile is assigned or part of a rollout's history" —
+read as "assigned" next to an *Assigned* count of 0. → *Delete* sets `deleted_at`: the profile leaves lists,
+assignments and new rollouts; the history still names it, D-45 still finds it on a worker whose command line matches
+it, and a partial unique index frees its name. It is refused, with the reason, while it is assigned, a worker runs it
+(D-45's `running_profile`: an assignment without a restart is not what runs) or an active rollout uses it.
+`POST /api/admin/profiles/delete {ids}` deletes several at once and says why each other one stays; the dashboard
+selects them, or all those not in use.

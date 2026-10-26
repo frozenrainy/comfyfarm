@@ -150,6 +150,10 @@ environment). The token value itself is refused: it would be stored in the ledge
    environment `COMFYFARM_KEYS_DIR`, default `/etc/comfyfarm/keys`; `/keys` in the compose deployment) — give them
    as a file name there or as a path inside it; anything else is refused.
 2. **Profiles**: core, venv, node artifacts, extra flags, environment. A profile in use cannot be changed; copy it.
+   *Delete* (one, or several: tick them, or *Select those not in use*) archives a profile: it leaves the list, the
+   rollout history keeps its name, and the name is free again. A profile stays while it is assigned, a worker runs it
+   (its command line matches the render — an assignment without a restart is not what runs) or an active rollout uses
+   it; the *In use* column says which ([D-47](../design/decisions.md)).
 3. First start: *Assign* the current profile (no restart), start the unit on the host, wait for the badge `match`.
 4. Upgrades: *Start rollout* — the worker is drained (its running job finishes), restarted through the backend, must be
    seen going down, must come back with exactly the new argv (badge `match`), is verified (node list, a broken

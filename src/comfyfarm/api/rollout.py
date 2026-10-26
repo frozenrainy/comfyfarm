@@ -197,8 +197,55 @@ def make_router(ctx: Ctx) -> APIRouter:
         ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
             rows = await c.fetch("SELECT p.*, (SELECT count(*) FROM instances i WHERE i.profile_id = p.id) AS assigned "
-                                 "FROM profiles p ORDER BY p.created_at DESC")
-        return [{k: (iso(r[k]) if k.endswith("_at") else r[k]) for k in r.keys()} for r in rows]
+                                 "FROM profiles p WHERE p.deleted_at IS NULL ORDER BY p.created_at DESC")
+            kept = await kept_reasons(c)
+        return [{**{k: (iso(r[k]) if k.endswith("_at") else r[k]) for k in r.keys() if k != "deleted_at"},
+                 "kept": kept.get(r["id"])} for r in rows]
+
+    async def kept_reasons(c) -> dict[int, dict]:
+        """Why a profile cannot be deleted now (D-47), by profile id; the first reason found: it is assigned, a worker
+        runs it (D-45: the render its command line matches — an assignment without a restart is not what runs), or an
+        active rollout uses it (its target, or a profile a step goes back to). Everything else may go."""
+        kept: dict[int, dict] = {}
+        insts = await c.fetch("SELECT i.*, w.name AS worker FROM instances i JOIN workers w ON w.id = i.worker_id "
+                              "WHERE w.deleted_at IS NULL ORDER BY w.name")
+        for r in insts:
+            if r["profile_id"] is not None:
+                kept.setdefault(r["profile_id"], {"kind": "assigned", "worker": r["worker"]})
+        for r in insts:
+            pid = await running_profile(c, r["worker_id"], dict(r))
+            if pid is not None:
+                kept.setdefault(pid, {"kind": "running", "worker": r["worker"]})
+        for r in await c.fetch("SELECT r.id, r.target_profile_id, s.from_profile_id, s.to_profile_id FROM rollouts r "
+                               "LEFT JOIN rollout_steps s ON s.rollout_id = r.id "
+                               "WHERE r.status IN ('running','aborting','interrupted') ORDER BY r.id"):
+            for pid in (r["target_profile_id"], r["from_profile_id"], r["to_profile_id"]):
+                if pid is not None:
+                    kept.setdefault(pid, {"kind": "rollout", "rollout": r["id"]})
+        return kept
+
+    def kept_message(name: str, why: dict) -> str:
+        return {"assigned": f"{name} is assigned to {why.get('worker')}",
+                "running": f"{why.get('worker')} runs {name}",
+                "rollout": f"rollout #{why.get('rollout')} uses {name}"}[why["kind"]]
+
+    async def archive_profiles(c, ids: list[int], who: str) -> dict:
+        """D-47: deleted = archived — the rollout history that names a profile keeps it; lists, assignments and new
+        rollouts do not see it, and its name is free again."""
+        kept = await kept_reasons(c)
+        rows = {r["id"]: r["name"] for r in await c.fetch(
+            "SELECT id, name FROM profiles WHERE id = ANY($1::bigint[]) AND deleted_at IS NULL FOR UPDATE", ids)}
+        out = {"deleted": [], "kept": [], "missing": [i for i in ids if i not in rows]}
+        for pid in ids:
+            if pid not in rows:
+                continue
+            if pid in kept:
+                out["kept"].append({"id": pid, "name": rows[pid], **kept[pid], "message": kept_message(rows[pid], kept[pid])})
+                continue
+            await c.execute("UPDATE profiles SET deleted_at = now() WHERE id = $1", pid)
+            await audit(c, who, "profile deleted", rows[pid])
+            out["deleted"].append({"id": pid, "name": rows[pid]})
+        return out
 
     @api.post("/api/admin/profiles")
     async def create_profile(body: ProfileIn, x_comfyfarm_user: str | None = Header(default=None)):
@@ -221,7 +268,7 @@ def make_router(ctx: Ctx) -> APIRouter:
         patch = {k: v for k, v in body.model_dump().items() if v is not None}
         async with db.conn() as c:
             async with c.transaction():
-                cur = await c.fetchrow("SELECT * FROM profiles WHERE id = $1 FOR UPDATE", profile_id)
+                cur = await c.fetchrow("SELECT * FROM profiles WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", profile_id)
                 if cur is None:
                     raise HTTPException(404, "not found")
                 in_use = await c.fetchval("SELECT count(*) FROM instances WHERE profile_id = $1", profile_id) or \
@@ -247,16 +294,24 @@ def make_router(ctx: Ctx) -> APIRouter:
         who = ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
             async with c.transaction():
-                name = await c.fetchval("SELECT name FROM profiles WHERE id = $1", profile_id)
-                if name is None:
-                    raise HTTPException(404, "not found")
-                try:
-                    async with c.transaction():
-                        await c.execute("DELETE FROM profiles WHERE id = $1", profile_id)
-                except asyncpg.ForeignKeyViolationError:
-                    raise HTTPException(409, "the profile is assigned or part of a rollout's history")
-                await audit(c, who, "profile deleted", name)
+                out = await archive_profiles(c, [profile_id], who)
+        if out["missing"]:
+            raise HTTPException(404, "not found")
+        if out["kept"]:
+            k = out["kept"][0]
+            raise HTTPException(409, {"message": k["message"], **{x: k[x] for x in ("kind", "worker", "rollout", "name") if x in k}})
         return {"deleted": True}
+
+    @api.post("/api/admin/profiles/delete")
+    async def delete_profiles(body: dict, x_comfyfarm_user: str | None = Header(default=None)):
+        """Several at once (D-47): deletes what may go, says why each other one stays."""
+        who = ctx.admin(x_comfyfarm_user)
+        ids = body.get("ids")
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids) or len(ids) > 500:
+            raise HTTPException(400, "ids: a list of profile ids (1..500)")
+        async with db.conn() as c:
+            async with c.transaction():
+                return await archive_profiles(c, list(dict.fromkeys(ids)), who)
 
     # ---- instances -------------------------------------------------------------------------------------------
     async def inst_row(c, worker_id: int):
@@ -349,8 +404,8 @@ def make_router(ctx: Ctx) -> APIRouter:
         if inst is None:
             raise HTTPException(400, "configure the worker's instance first")
         prof = await profile_doc(c, profile_id)
-        if prof is None:
-            raise HTTPException(404, "no such profile")
+        if prof is None or await c.fetchval("SELECT deleted_at IS NOT NULL FROM profiles WHERE id = $1", profile_id):
+            raise HTTPException(404, "no such profile")             # a deleted (archived, D-47) one included
         try:
             render = rd.check(prof, inst)
         except rd.BadProfile as e:

@@ -42,7 +42,13 @@ export function rollout(root, { refresh }) {
   const ARCHIVES = ".zip,.tar.gz,.tgz,.tar";
   const active = h("div");
   const instT = table([[t("Worker")], [t("Instance")], [t("Profile")], [t("Badge")], [t("Rev")], [t("Running")], [t("Restart via")], ["", "actions"]]);
-  const profT = table([[t("Profile")], [t("Core")], [t("Venv")], [t("Nodes")], [t("Flags")], [t(t("Assigned")), "num"], [t("Note")], ["", "actions"]]);
+  // profiles: several can be deleted at once (D-47) — a deleted one is archived; it stays only while in use
+  const profSel = new Set(), profBulk = h("div");
+  const profAll = h("input", { type: "checkbox", title: t("Select all"), onchange: (e) => {
+    for (const p of profiles || []) e.target.checked ? profSel.add(p.id) : profSel.delete(p.id);
+    renderProfSel(); } });
+  const profT = table([[profAll, "pick"], [t("Profile")], [t("Core")], [t("Venv")], [t("Nodes")], [t("Flags")], [t(t("Assigned")), "num"],
+                       [t("In use")], [t("Note")], ["", "actions"]]);
   const packT = table([[t("Node pack")], [t("Repository")], [t("Commit")], [t("UI worker")], [t("Note")], ["", "actions"]]);
   const auditT = table([[t("When")], [t("Who")], [t("What")], [t("Target")], [t("Detail")]]);
   // the audit log a page at a time; an older page stays put while new entries come in (upto: the newest when it left)
@@ -90,7 +96,8 @@ export function rollout(root, { refresh }) {
       "differs = it runs something else (not restarted yet, or a failed start).")), instT.el),
     h("section", {}, head(t("Profiles"), button(t("From a recipe"), () => fromRecipe(), { cls: "primary" }),
                           button(t("New profile"), () => editProfile(null))),
-      h("p", { class: "muted small" }, t("A profile in use cannot be changed — copy it and roll the copy out.")), profT.el),
+      h("p", { class: "muted small" }, t("A profile in use cannot be changed — copy it and roll the copy out. A deleted profile leaves the list; the rollout history keeps its name.")),
+      profBulk, profT.el),
     h("section", {}, head(t("Node packs"), button(t("Build"), () => buildOnPlane(), { cls: "primary" }),
                           button(t("Add node pack"), () => addPack()), button(t("Upload an archive"), () => uploadPack())),
       packInfo, packUpload, packT.el),
@@ -491,19 +498,50 @@ export function rollout(root, { refresh }) {
       : b.node_sources.length ? t("Added packs are built into node sets and venvs by Build, then rolled out like any profile — the UI worker first. Allowed sources: {s}", { s: b.node_sources.join(", ") })
       : t("This farm's builder takes no node packs from the dashboard (COMFYFARM_BUILD_NODE_SOURCES is empty).");
   }
-  const profCols = ["name", "core", "venv", "nodes", "flags", "assigned", "note", "actions"];
+  const profCols = ["pick", "name", "core", "venv", "nodes", "flags", "assigned", "inuse", "note", "actions"];
+  // why a profile stays: assigned, a worker runs it (its command line), or an active rollout uses it
+  const keptText = (k) => !k ? "" : k.kind === "assigned" ? t("assigned to {worker}", k)
+    : k.kind === "running" ? t("{worker} runs it", k) : t("rollout #{rollout} uses it", k);
+  async function deleteProfiles(ids) {
+    const out = await api("POST", "/api/admin/profiles/delete", { ids });
+    for (const d of out.deleted) profSel.delete(d.id);
+    const kept = out.kept.map((k) => `${k.name}: ${keptText(k)}`);
+    toast([out.deleted.length ? t("Deleted {n}", { n: out.deleted.length }) : "",
+           kept.length ? t("Kept {n} — {why}", { n: kept.length, why: kept.join(" · ") }) : ""].filter(Boolean).join(" · ")
+          || t("Nothing to delete"), !out.deleted.length && kept.length > 0);
+  }
+  function renderProfSel() {
+    const list = profiles || [];
+    for (const id of [...profSel]) if (!list.some((p) => p.id === id)) profSel.delete(id);      // gone since
+    for (const tr of profT.tbody.children) if (tr.pick) tr.pick.checked = profSel.has(tr._item.id);
+    profAll.checked = list.length > 0 && list.every((p) => profSel.has(p.id));
+    profAll.indeterminate = profSel.size > 0 && !profAll.checked;
+    const unused = list.filter((p) => !p.kept);
+    profBulk.replaceChildren(h("div", { class: "bulk" },
+      profSel.size ? h("strong", {}, t("{n} selected", { n: profSel.size })) : h("span", { class: "muted" }, t("{n} profile(s) not in use", { n: unused.length })),
+      Object.assign(button(t("Select those not in use"), () => { for (const p of unused) profSel.add(p.id); renderProfSel(); }), { disabled: !unused.length }),
+      profSel.size ? button(t("Delete selected"), () => {
+        if (confirm(t("Delete {n} profile(s)? Profiles in use stay; the rollout history keeps the names of the others.", { n: profSel.size })))
+          act(() => deleteProfiles([...profSel]), null, refresh);
+      }, { cls: "danger" }) : "",
+      profSel.size ? button(t("Clear selection"), () => { profSel.clear(); renderProfSel(); }) : ""));
+  }
   function buildProf() {
-    const tr = namedRow(profCols, { assigned: "num", actions: "actions" });
+    const tr = namedRow(profCols, { pick: "pick", assigned: "num", actions: "actions" });
+    tr.pick = h("input", { type: "checkbox", onchange: (e) => { e.target.checked ? profSel.add(tr._item.id) : profSel.delete(tr._item.id); renderProfSel(); } });
+    tr.c.pick.append(tr.pick);
     tr.edit = button(t("Edit"), () => editProfile(tr._item));
-    tr.c.actions.append(button(t("Copy"), () => editProfile(tr._item, true)), tr.edit,
-      button(t("Delete"), () => { if (confirm(t("Delete profile {name}?", tr._item))) act(() => api("DELETE", `/api/admin/profiles/${tr._item.id}`), t("Deleted"), refresh); },
-             { cls: "danger" }));
+    tr.del = button(t("Delete"), () => { if (confirm(t("Delete profile {name}?", tr._item))) act(() => deleteProfiles([tr._item.id]), null, refresh); },
+                    { cls: "danger" });
+    tr.c.actions.append(button(t("Copy"), () => editProfile(tr._item, true)), tr.edit, tr.del);
     return tr;
   }
   function updateProf(tr, p) {
     setText(tr.c.name, p.name); setText(tr.c.core, p.core); setText(tr.c.venv, p.venv);
     setText(tr.c.nodes, p.nodes.join(", ") || "—"); setText(tr.c.flags, p.flags.join(" ") || "—");
-    setText(tr.c.assigned, p.assigned); setText(tr.c.note, p.note ?? "");
+    setText(tr.c.assigned, p.assigned); setText(tr.c.note, p.note ?? ""); setText(tr.c.inuse, keptText(p.kept) || "—");
+    tr.pick.checked = profSel.has(p.id);
+    tr.del.disabled = !!p.kept; tr.del.title = p.kept ? t("in use — {why}", { why: keptText(p.kept) }) : "";
     tr.edit.title = p.assigned ? t("in use: only the note can change") : "";
   }
 
@@ -561,6 +599,7 @@ export function rollout(root, { refresh }) {
       if (artifacts === null) artifacts = await api("GET", "/api/admin/artifacts");
       syncRows(instT.tbody, i, (x) => x.worker_id, buildInst, updateInst);
       syncRows(profT.tbody, p, (x) => x.id, buildProf, updateProf);
+      renderProfSel();
       renderActive(r);
       const sig = JSON.stringify(r.filter((x) => !ACTIVE.includes(x.status)).map((x) => [x.id, x.status]));
       if (history.dataset.v !== sig) { history.dataset.v = sig; renderHistory(r); }
