@@ -53,6 +53,8 @@ export default {
     "워커 확장 {have}이(가) 이 라우터의 {want}보다 오래되었습니다: Build 후, 새 빌드로 만든 프로필을 롤아웃하세요",
   "back on {profile}; left in maintenance": "{profile}(으)로 되돌림, 유지보수 상태로 둠",
   "no earlier profile to go back to: stays on {profile}; left in maintenance": "되돌아갈 이전 프로필이 없음: {profile}에 남음, 유지보수 상태로 둠",
+  "running {profile}": "{profile} 실행 중",
+  "running {profile}; still in maintenance as before the rollout: it takes no jobs until maintenance is turned off": "{profile} 실행 중 · 롤아웃 전처럼 유지보수 상태 그대로: 유지보수를 끌 때까지 작업을 받지 않음",
   "it keeps running its current profile until it restarts — to change what a running worker runs, start a rollout: it checks the new profile and goes back on failure":
     "재시작할 때까지 지금 프로필로 계속 돕니다 — 실행 중인 워커를 바꾸려면 롤아웃을 시작하세요: 새 프로필을 확인하고 실패하면 되돌립니다",
   "part {k}/{n}": "구간 {k}/{n}", "worker {state}": "워커 {state}", "last report {t} ago": "마지막 보고 {t} 전",

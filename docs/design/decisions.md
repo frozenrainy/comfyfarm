@@ -294,3 +294,15 @@ where the worker came from, so the revert restarted the worker into the same bro
 the worker's argv matches (its assignment, the targets of its successful rollouts, then any profile), else the
 target of its last successful rollout, else its assignment. A step whose `from` is its target says it has no way
 back instead of "reverted"; *Assign* on an online worker warns that it changes nothing until a restart.
+
+**D-46 Node definitions come from workers in maintenance too; a list served out of date says so.** *(field, dev.24)*
+— Two failed rollouts left the group's only GPU worker and the UI worker in maintenance. The rollouts after them
+succeeded and, restoring maintenance as they found it, left both there; the read of the group's node definitions after
+each asked workers in service only — none — and the editor kept those from before three node packs: a pack that was
+installed showed as "missing", with nothing to say why. → A worker in maintenance takes no jobs but runs the group's
+node sets: the read asks the workers the rollout just verified first (maintenance or not), then workers in service,
+then — only when there is none — workers in maintenance. `/api/object_info` served from a list that could not be read
+again carries `X-ComfyFarm-Nodes-Stale: <when it was read>`, and the editor's extension shows it once per list. A
+rollout still restores maintenance as it was (an admin's maintenance is an admin's), and a step that leaves its worker
+in maintenance says so: "running …; still in maintenance as before the rollout: it takes no jobs until maintenance is
+turned off".

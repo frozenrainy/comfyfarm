@@ -405,8 +405,9 @@ keeps all of this: stop and disable `comfyfarm@<instance>` only, and remove its 
 The order is [First day](#first-day). Groups: one per set of identical workers (the first is made with the first GPU
 worker); requirements are optional — leave them empty unless a group must only take workers with a backend or enough
 VRAM. Users: a new account may use every group unless you untick some; artists choose among theirs in ComfyUI.
-A group's node list is read from its workers the first time someone needs it and again after every rollout to them;
-*Refresh nodes* is only for changes made outside a rollout. Without the builder: Profiles (one for the UI worker, one
+A group's node list is read from its workers the first time someone needs it and again after every rollout to them —
+from a worker in maintenance too when no other is there; *Refresh nodes* is only for changes made outside a rollout. A
+list that could not be read again is served as it was, and the editor says since when ("Node list out of date"). Without the builder: Profiles (one for the UI worker, one
 per kind of GPU worker) → *Set up a worker*: the UI worker, then each GPU host.
 
 ## 5. Check

@@ -729,3 +729,29 @@ async def test_a_failed_rollout_of_what_already_ran_says_there_is_no_way_back(fa
     assert step["status"] == "revert_failed" and "no earlier profile to go back to: stays on p1" in step["detail"], step
     workers = {w["name"]: w for w in (await api.get("/api/admin/workers", headers=H)).json()}
     assert workers["w1"]["maintenance"]
+
+
+async def test_a_worker_in_maintenance_before_the_rollout_stays_in_it_and_says_so(farm):
+    """Field (dev.24): a failed rollout left the worker in maintenance; the next ones succeeded and left it there —
+    restored as it was — so it took no jobs for hours while its rollouts read 'done'. And its node definitions were
+    never read: only workers in service were asked. D-46: the step says it is still in maintenance; the read after the
+    rollout asks the worker it verified, in maintenance or not."""
+    api, r = farm["api"], farm["router"]
+    w1 = farm["hosts"]["w1"]
+    async with r.db.conn() as c:
+        await c.execute("UPDATE workers SET maintenance = true WHERE id = $1", w1.wid)
+        await c.execute("UPDATE object_info_snapshots SET stale = true WHERE group_id = $1", farm["gid"])
+    rid = await start(api, farm["p2"], [w1.wid])
+    ro = await wait_rollout(api, rid)
+    assert ro["status"] == "succeeded", ro
+    (step,) = ro["steps"]
+    assert step["status"] == "done" and step["detail"] == ("running p2; still in maintenance as before the rollout: it "
+                                                           "takes no jobs until maintenance is turned off")
+    async with r.db.conn() as c:
+        assert await c.fetchval("SELECT maintenance FROM workers WHERE id = $1", w1.wid)
+        snap = await c.fetchrow("SELECT source, stale FROM object_info_snapshots WHERE group_id = $1", farm["gid"])
+    assert snap is not None and snap["source"] == "w1" and not snap["stale"]
+    # a worker in service before the rollout: back in service, and the step says only what it runs
+    w2 = farm["hosts"]["w2"]
+    ro = await wait_rollout(api, await start(api, farm["p2"], [w2.wid]))
+    assert [s["detail"] for s in ro["steps"]] == ["running p2"]

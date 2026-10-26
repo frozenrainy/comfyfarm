@@ -117,3 +117,26 @@ def test_no_browser_code_needs_a_secure_context():
             if "navigator.clipboard" in line:          # only where the file copies the old way too
                 assert 'execCommand("copy")' in text, f"{f.name}:{n}: navigator.clipboard without a fallback"
             assert "crypto.subtle" not in line, f"{f.name}:{n}: crypto.subtle needs a secure context"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_the_editor_says_when_its_node_list_is_out_of_date():
+    """D-46: /object_info served out of date carries the time it was read; the extension says so once per such list,
+    with a toast — packs added since show as missing otherwise, for no visible reason."""
+    src = EXT.read_text()
+    fn = re.search(r"let staleWarned = \"\";\nfunction warnIfStale\(res\) \{.*?\n\}", src, re.S).group(0)
+    script = """
+const toasts = [];
+const app = { extensionManager: { toast: { add: (t) => toasts.push(t) } } };
+const tr = (s) => s;
+""" + fn + """
+const res = (h) => ({ headers: { get: (k) => (k === "X-ComfyFarm-Nodes-Stale" ? h : null) } });
+warnIfStale(res(null));                                   // up to date: nothing
+warnIfStale(res("2026-10-26T01:30:56+00:00"));
+warnIfStale(res("2026-10-26T01:30:56+00:00"));            // the same list again (the editor asks twice): once
+warnIfStale(res("2026-10-26T09:00:00+00:00"));            // another out-of-date list: again
+console.log(JSON.stringify(toasts.map((t) => [t.severity, t.summary, /no worker of this group/.test(t.detail), t.detail.includes("{when}")])));
+"""
+    out = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert out == [["warn", "Node list out of date", True, False]] * 2
+    assert "if (/^\\/(api\\/)?object_info$/.test(route)) warnIfStale(res);" in src      # the node list the editor loads

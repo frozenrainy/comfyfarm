@@ -17,6 +17,7 @@ from fastapi.responses import Response
 from ..core import jobs as jobsvc
 
 log = logging.getLogger(__name__)
+STALE_HEADER = "X-ComfyFarm-Nodes-Stale"   # on /api/object_info served out of date: when it was read (D-46)
 UI_SOURCE = "ui:"                     # object_info_snapshots.source of a stand-in from the UI worker
 
 STOCK_STATUS = {"pending": "pending", "paused": "pending", "dispatching": "in_progress", "running": "in_progress",
@@ -251,11 +252,13 @@ def make_router(ctx) -> APIRouter:
         who = identity(x_comfyfarm_user)
         async with router.db.conn() as c:
             g = await group_for(c, who, x_comfyfarm_group)
-            snap = g and await c.fetchrow("SELECT data, source, stale FROM object_info_snapshots WHERE group_id = $1", g["id"])
+            snap = g and await c.fetchrow("SELECT data, source, stale, fetched_at FROM object_info_snapshots WHERE group_id = $1",
+                                          g["id"])
             # definitions taken from the UI worker stand in until a GPU worker of the group can give its own
             stand_in = bool(snap) and (snap["source"] or "").startswith(UI_SOURCE)
+            # a worker in maintenance counts: it takes no jobs, but it runs the group's node sets (D-46)
             gpu_up = bool(g) and await c.fetchval("SELECT EXISTS (SELECT 1 FROM workers WHERE group_id = $1 AND enabled AND "
-                                                  "deleted_at IS NULL AND NOT maintenance AND state = 'online')", g["id"])
+                                                  "deleted_at IS NULL AND state = 'online')", g["id"])
         if g is None:                       # a new farm without groups: the screen still opens, with the UI worker's nodes
             data = await ui_object_info()
             if data is None:
@@ -266,13 +269,17 @@ def make_router(ctx) -> APIRouter:
         due = bool(snap) and snap["stale"] and gpu_up and time.monotonic() - stale_tried.get(g["id"], -1e9) > 60
         if due:
             stale_tried[g["id"]] = time.monotonic()
+        read_failed = False
         if snap is None or (stand_in and gpu_up) or due:
             snap_data = await refresh_once(g["id"])
+            read_failed = snap_data is None
             if snap_data is not None:
                 return Response(snap_data, media_type="application/json")
             if snap is None:
                 raise HTTPException(503, "no node definitions yet: no worker of this group or UI worker answered")
-        return Response(gzip.decompress(snap["data"]), media_type="application/json")
+        # served out of date: the editor's extension says so (D-46) — packs added since show as "missing" otherwise
+        headers = {STALE_HEADER: snap["fetched_at"].isoformat()} if snap["stale"] or read_failed else None
+        return Response(gzip.decompress(snap["data"]), media_type="application/json", headers=headers)
 
     @api.get("/api/object_info/{node_class}")
     async def object_info_one(node_class: str, x_comfyfarm_user: str | None = Header(default=None),
@@ -317,15 +324,20 @@ def make_router(ctx) -> APIRouter:
         on the editor's next request once a worker answers."""
         prefer = list(prefer or [])
         async with router.db.conn() as c:
-            ws = await c.fetch("SELECT id, name, base_url, current_job_id IS NULL AS idle FROM workers WHERE group_id = $1 "
-                               "AND enabled AND deleted_at IS NULL AND NOT maintenance "
+            ws = await c.fetch("SELECT id, name, base_url, current_job_id IS NULL AS idle, maintenance FROM workers "
+                               "WHERE group_id = $1 AND enabled AND deleted_at IS NULL "
                                "AND (state = 'online' OR id = ANY($2::bigint[]))", group_id, prefer)
             had = await c.fetchval("SELECT source FROM object_info_snapshots WHERE group_id = $1", group_id)
-        idle = [w for w in ws if w["idle"]]; busy = [w for w in ws if not w["idle"]]
+        # D-46: those the rollout just verified first, in maintenance or not (field, dev.24: two failed rollouts left
+        # the only GPU worker in maintenance; the rollouts after them succeeded, but nobody was asked, and the editor
+        # kept definitions from before three node packs). Then the group's workers in service; workers in maintenance
+        # only when there is no other — they take no jobs, but they run the node sets the editor must know.
+        first = [w for w in ws if w["id"] in prefer]
+        rest = [w for w in ws if w["id"] not in prefer]
+        serving = [w for w in rest if not w["maintenance"]] or [w for w in rest if w["maintenance"]]
+        idle = [w for w in serving if w["idle"]]; busy = [w for w in serving if not w["idle"]]
         random.shuffle(idle); random.shuffle(busy)
-        order = idle + busy
-        if prefer:
-            order = [w for w in order if w["id"] in prefer] + [w for w in order if w["id"] not in prefer]
+        order = first + idle + busy
         got = None
         for w in order[:3]:
             if got := await fetch_object_info(w):
@@ -333,7 +345,7 @@ def make_router(ctx) -> APIRouter:
                 break
         # the UI worker only stands in where nothing better was ever had: GPU workers that are there but failed, or
         # a real snapshot whose workers are away for now, keep what the group had (stale-if-error)
-        if got is None and not ws and (had is None or had.startswith(UI_SOURCE)):
+        if got is None and not order and (had is None or had.startswith(UI_SOURCE)):
             if ui := await ui_object_info(prefer):
                 source, got = UI_SOURCE + ui[0], ui[1:]
         if got is None:

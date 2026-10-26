@@ -4,6 +4,10 @@ function stepDetail(d) {
   if (m) return t("back on {profile}; left in maintenance", { profile: m[1] });
   m = /^no earlier profile to go back to: stays on (.+); left in maintenance$/.exec(d || "");
   if (m) return t("no earlier profile to go back to: stays on {profile}; left in maintenance", { profile: m[1] });
+  m = /^running (.+); still in maintenance as before the rollout: it takes no jobs until maintenance is turned off$/.exec(d || "");
+  if (m) return t("running {profile}; still in maintenance as before the rollout: it takes no jobs until maintenance is turned off", { profile: m[1] });
+  m = /^running (.+)$/.exec(d || "");
+  if (m) return t("running {profile}", { profile: m[1] });
   return d ?? "";
 }
 

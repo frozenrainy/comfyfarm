@@ -41,7 +41,9 @@ const KO = {
   "Nothing queued, nothing finished yet.": "대기 중이거나 끝난 작업이 없습니다.", "Open in the dashboard": "대시보드에서 보기",
   "pending": "대기", "paused": "일시정지", "dispatching": "보내는 중", "running": "실행 중", "cancelling": "취소 중",
   "completed": "완료", "failed": "실패", "cancelled": "취소됨", "#{n} in line": "{n}번째", "Running": "실행 중",
-  "Finished": "끝남",
+  "Finished": "끝남", "Node list out of date": "노드 목록이 오래됨",
+  "The node list was read {when} and no worker of this group has answered since. Node packs added after that show as missing. Start a worker of the group, then reload.":
+    "노드 목록은 {when}에 읽은 것이고, 그 뒤로 이 그룹의 워커가 응답하지 않았습니다. 그 뒤에 추가한 노드 팩은 누락으로 보입니다. 그룹의 워커를 켠 뒤 새로고침하세요.",
 };
 function lang() {
   const pref = localStorage.getItem("comfyfarm.lang") || "auto";
@@ -84,7 +86,11 @@ api.fetchApi = async function (route, options = {}) {
   // the id, not the name: header values must be Latin-1, and a group may be called "렌더팀"
   options.headers = { ...(options.headers || {}), ...(g ? { "X-ComfyFarm-Group": String(g.id) } : {}) };
   const isSubmit = (route === "/prompt" || route === "/api/prompt") && (options.method || "GET").toUpperCase() === "POST";
-  if (!isSubmit) return origFetchApi(route, options);
+  if (!isSubmit) {
+    const res = await origFetchApi(route, options);
+    if (/^\/(api\/)?object_info$/.test(route)) warnIfStale(res);
+    return res;
+  }
 
   if (submitting) throw new Error("ComfyFarm: a submission is still being retried");
   const body = JSON.parse(options.body);
@@ -113,6 +119,20 @@ api.fetchApi = async function (route, options = {}) {
     submitting = false;
   }
 };
+
+// ---- node definitions served out of date (D-46): say so, or packs added since look "missing" for no visible reason --
+let staleWarned = "";
+function warnIfStale(res) {
+  const at = res?.headers?.get?.("X-ComfyFarm-Nodes-Stale");
+  if (!at || staleWarned === at) return;
+  staleWarned = at;
+  const when = new Date(at);
+  const detail = tr("The node list was read {when} and no worker of this group has answered since. Node packs added after that show as missing. Start a worker of the group, then reload.")
+    .replace("{when}", isNaN(when) ? at : when.toLocaleString());
+  const toast = app.extensionManager?.toast;
+  if (toast?.add) toast.add({ severity: "warn", summary: tr("Node list out of date"), detail, life: 20000 });
+  else console.warn("ComfyFarm:", detail);
+}
 
 // Inside the dashboard's Workflow tab: tell the ComfyFarm shell (same origin only) so its queue badge updates at once.
 function notifyShell(msg) {

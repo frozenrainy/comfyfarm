@@ -344,7 +344,10 @@ class Engine:
                     await c.execute("UPDATE workers SET maintenance = $2 WHERE id = $1", w["id"], was)
                     if not was:
                         await audit(c, actor, "maintenance off", w["name"])
-            await self.set_step(sid, "done", f"running {to['name']}")
+            # D-46: maintenance is restored as it was — one left by an earlier failed rollout too. Say so: a worker that
+            # passed its rollout but takes no jobs looks finished (field, dev.24: three hours without jobs)
+            await self.set_step(sid, "done", f"running {to['name']}" + ("; still in maintenance as before the rollout: it "
+                                "takes no jobs until maintenance is turned off" if was else ""))
             self.r.dispatcher.wake.set()
             return True
         except Aborted:

@@ -156,8 +156,10 @@ environment). The token value itself is refused: it would be stored in the ledge
    workflow is refused, every custom node imported, optionally a smoke workflow), and returns to service. If anything fails, that worker goes back
    to the profile it ran before and stays in maintenance; the remaining workers are skipped. *Assign* on a running
    worker changes nothing it runs — start a rollout instead (assigning first is harmless: the way back is what the
-   worker runs, not what it was assigned). A failed step leaves the worker in maintenance: no job reaches it until a
-   rollout succeeds on it or *Maintenance* is turned off.
+   worker runs, not what it was assigned). A failed step leaves the worker in maintenance: no job reaches it until
+   *Maintenance* is turned off. A later rollout restores maintenance as it found it — a worker in maintenance before
+   the rollout is in maintenance after it, and its step says so ("still in maintenance as before the rollout"): turn
+   it off once the worker is fit ([D-46](../design/decisions.md)).
 
 The backend `manual` needs no agent: the dashboard tells an operator which instance to restart and waits for it.
 
