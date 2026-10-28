@@ -7,6 +7,7 @@ back with the render's argv. Plus the ways real restarts go wrong:
   never_up    goes down and stays down (crash at import)
   wrong_argv  comes back, but still with the old argv (the service manager ran something else)
   broken      comes back with the new argv, but /object_info fails (a custom node broke)
+  crash_loop  dies as it starts, again and again: the service manager restarts it every moment (NRestarts grows)
 
 `status` mimics systemd: ExecMainStatus "2" when the launcher refused the render.
 """
@@ -60,6 +61,7 @@ class FakeHost:
 
     def request_restart(self):
         self.restarts += 1
+        self.generation = getattr(self, "generation", 0) + 1
         self.task = asyncio.create_task(self._restart())
 
     async def _restart(self):
@@ -69,6 +71,12 @@ class FakeHost:
         await self.stop()
         self.status = {**self.status, "ActiveState": "activating"}
         await asyncio.sleep(self.down_seconds)
+        if mode == "crash_loop":
+            gen = self.generation
+            while gen == self.generation:                    # until the next restart request (the revert)
+                self.status = {**self.status, "ActiveState": "activating", "NRestarts": self.status["NRestarts"] + 1}
+                await asyncio.sleep(0.2)
+            return
         if mode == "never_up":
             self.status = {**self.status, "ActiveState": "failed", "ExecMainStatus": "1"}
             return

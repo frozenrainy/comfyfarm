@@ -327,3 +327,12 @@ the upstream and closes it when it ends, fails or is cancelled — also when the
 where a `finally` inside the body generator never runs; the router and the workers have separate pools
 (`upstream_max_connections` for the workers). Router paths match segment-wise (`/api/prompt`, `/api/prompt/…`, not
 `/api/prompt_json`).
+
+**D-49 A node set holds one copy of a pack; a worker that dies as it starts fails its step at once.** *(field, dev.25)*
+— A pack's next version was uploaded as a second pack instead of *Update*. Both unpacked from `stage_carry/` and
+registered the same route; ComfyUI stopped at start ("method HEAD is already registered"), the service manager
+restarted it 48 times, and the rollout waited out its 900 s before going back — twice. → The build refuses two packs
+from the same repository or two archives with the same top-level folder, naming both and saying to *Update* the first.
+While a step waits for the worker, three automatic restarts (the service manager's `NRestarts`, read with the status)
+fail the step at once, pointing at `logs/<instance>.log` in the service account's home. Reading that log for the
+error is left out: the agent answers restart, status and check only (contract §6), and widening it is its own decision.

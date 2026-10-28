@@ -429,3 +429,25 @@ async def test_a_worker_running_the_farms_folders_is_shown_as_matching(farm):
         await x.execute("UPDATE workers SET capabilities = $2 WHERE id = $1", wid, {"argv": running["argv"][1:]})
     got = next(i for i in (await c.get("/api/admin/instances", headers=H)).json() if i["worker_id"] == wid)
     assert (got["badge"], got["rev"]) == ("match", running["rev"])
+
+
+def test_two_versions_of_one_pack_in_a_node_set_are_refused_before_the_build(tmp_path):
+    """Field (10-28): the new stage_carry zip was added as a second pack next to the old one; both unpack from
+    stage_carry/, register the same route, and ComfyUI died at start on every worker of the set."""
+    def pack(name, files):
+        (tmp_path / name).write_bytes(zip_of(files))
+        return {"name": name.removesuffix(".zip"), "archive": str(tmp_path / name)}
+    old = pack("stage_carry-bcb08ff.zip", {"stage_carry/__init__.py": "a", "stage_carry/web/x.js": "b"})
+    new = pack("stage_carry-fb0af5f.zip", {"stage_carry/__init__.py": "a2"})
+    other = pack("story_prompt_gen.zip", {"story_prompt_gen/__init__.py": "c"})
+    loose = pack("loose.zip", {"__init__.py": "d"})                         # no top folder: nothing to compare by
+    loose2 = pack("loose2.zip", {"__init__.py": "e"})
+    publish.refuse_same_pack([old, other, loose, loose2])                 # different packs: fine
+    with pytest.raises(publish.Refused, match=r"stage_carry-bcb08ff and stage_carry-fb0af5f are the same pack "
+                                              r"\(archive folder stage_carry/\).*update stage_carry-bcb08ff"):
+        publish.refuse_same_pack([old, other, new])
+    a = {"name": "kj", "repo": "https://github.com/kijai/ComfyUI-KJNodes.git"}
+    b = {"name": "kj2", "repo": "https://github.com/kijai/comfyui-kjnodes/"}
+    with pytest.raises(publish.Refused, match="kj and kj2 are the same pack"):
+        publish.refuse_same_pack([a, b])
+    publish.refuse_same_pack([a, {"name": "vhs", "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"}])

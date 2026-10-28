@@ -513,6 +513,47 @@ def unpack(archive: str, sha256: str, dest: str) -> str:
     return dest
 
 
+def archive_top(archive: str) -> str | None:
+    """The single top-level directory an archive unpacks from (what unpack() strips), or None."""
+    import tarfile
+    import zipfile
+    try:
+        if zipfile.is_zipfile(archive):
+            names = zipfile.ZipFile(archive).namelist()
+        else:
+            with tarfile.open(archive, "r:*") as t:
+                names = t.getnames()
+    except (OSError, tarfile.TarError, zipfile.BadZipFile):
+        return None                                  # unpack() refuses it with the real reason
+    parts = [[p for p in n.replace("\\", "/").split("/") if p not in ("", ".")] for n in names]
+    tops = {p[0] for p in parts if p}
+    return next(iter(tops)) if len(tops) == 1 and any(len(p) > 1 for p in parts) else None
+
+
+def pack_origin(n: dict, top=archive_top) -> str | None:
+    """What makes two node packs the same pack: the repository, or the folder an uploaded archive unpacks from."""
+    if "archive" in n:
+        t = top(n["archive"])
+        return f"archive folder {t}/" if t else None
+    repo = re.sub(r"(\.git)?/*$", "", re.sub(r"^[a-z]+://", "", n.get("repo", "").strip().lower()))
+    return f"repository {repo}" if repo else None
+
+
+def refuse_same_pack(nodes: list[dict], top=archive_top) -> None:
+    """Two versions of one pack in a node set register the same nodes and the same routes — ComfyUI stops at start
+    ("method HEAD is already registered") and every worker on the set restarts until the rollout gives up (10-28:
+    stage_carry-bcb08ff and stage_carry-fb0af5f, the new version added as a second pack instead of an update)."""
+    seen: dict[str, str] = {}
+    for n in nodes:
+        origin = pack_origin(n, top)
+        if origin is None:
+            continue
+        if origin in seen:
+            raise Refused(f"node packs {seen[origin]} and {n['name']} are the same pack ({origin}) — a node set holds one "
+                          f"copy: update {seen[origin]} to the new version instead of adding a second pack")
+        seen[origin] = n["name"]
+
+
 def node_requirements(n: dict, tree: str) -> tuple[list[str], list[str]]:
     """The requirement lines of one node pack, and notes on what was left out. The recipe's own list wins; otherwise
     the pack's requirements_file (requirements.txt by default — some packs ship a lighter one), otherwise the
@@ -679,6 +720,7 @@ def publish_recipe(art: str, name: str, uv: str | None = None, rebuild: bool = F
     if extra_nodes:                                  # node packs picked in the dashboard (builder.py checked their source)
         recipe = check_recipe({**recipe, "nodes": recipe.get("nodes", []) + list(extra_nodes),
                                "about": (recipe.get("about", "") + f" + {len(extra_nodes)} node pack(s) from the dashboard").strip()})
+    refuse_same_pack(recipe.get("nodes", []))         # before anything is fetched: the set could not start anyway
     roles = tuple(r for r in ROLES if r in roles)
     if not roles:
         raise Refused("roles: gpu, ui or both")

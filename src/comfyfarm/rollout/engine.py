@@ -33,6 +33,7 @@ DEFAULTS = {"drain_timeout": 0, "observe_timeout": None, "start_timeout": 900, "
 FINAL = ("done", "failed", "reverted", "revert_failed", "skipped")
 REFILL_DELAY = 4.0             # after a worker returns, before the next leaves: capacity never dips below the window
 STATUS_EVERY = 5.0             # backend.status (an ssh call) at most this often per instance
+CRASH_RESTARTS = 3             # automatic restarts while waiting for the worker = it dies as it starts: stop waiting
 HEARTBEAT = 240.0              # log line while a drain waits (log-based suppression windows must not expire)
 QUICK_DRAIN = 10.0             # the re-check under the startup lock gives up this soon (and lets the lock go)
 BAD = ("failed", "reverted", "revert_failed")
@@ -87,6 +88,7 @@ class Engine:
         self.start_lock = asyncio.Lock()                 # startups are serialised (shared storage, D: docs/design/07)
         self.current: int | None = None
         self._status_at: dict[str, float] = {}
+        self._status: dict[str, dict | None] = {}
         self.http = httpx.AsyncClient(timeout=QUERY_TIMEOUT)
 
     # ---- loop ---------------------------------------------------------------------------------------------------
@@ -483,7 +485,15 @@ class Engine:
             return False
         self._status_at[key] = time.monotonic()
         st = await backend.status(key)
+        self._status[key] = st
         return bool(st) and str(st.get("ExecMainStatus")) == "2"
+
+    def restarts(self, inst) -> int | None:
+        """The service manager's count of automatic restarts, as last read by refused()."""
+        try:
+            return int((self._status.get(inst["instance"]) or {})["NRestarts"])
+        except (KeyError, TypeError, ValueError):
+            return None
 
     async def restart(self, backend, inst: dict, w: dict, opts: dict):
         ok, detail = await backend.restart(inst["instance"])
@@ -503,10 +513,22 @@ class Engine:
         raise StepFailed(f"the worker was not seen down within {limit:.0f} s: the restart did nothing")
 
     async def wait_match(self, backend, inst: dict, w: dict, render: dict, opts: dict):
-        t0, last = time.monotonic(), None
+        t0, last, first = time.monotonic(), None, None
+        self._status.pop(inst["instance"], None)          # count from this start, not from an older reading
         while time.monotonic() - t0 < opts["start_timeout"]:
             if await self.refused(backend, inst):
                 raise StepFailed("the launcher refused the render (exit 2)")
+            # ComfyUI that dies as it starts is restarted by the service manager every few seconds and never answers;
+            # waiting the whole start_timeout (900 s) for it only keeps the worker down longer (10-28: two copies of
+            # one node pack, 48 restarts before the rollout gave up)
+            n = self.restarts(inst)
+            if n is not None:
+                first = n if first is None or n < first else first
+                if n - first >= CRASH_RESTARTS:
+                    raise StepFailed(f"ComfyUI exits as it starts: restarted {n - first} times in "
+                                     f"{time.monotonic() - t0:.0f} s without answering — the error is at the end of "
+                                     f"logs/{inst['instance']}.log in the worker service account's home (a node pack "
+                                     "that fails to load, or two copies of one pack)")
             last = await self.argv(w["base_url"])
             if last == render["argv"][1:]:
                 # badge, version and jobs API current right away (a restart shorter than the health probe interval

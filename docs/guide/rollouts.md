@@ -156,7 +156,9 @@ environment). The token value itself is refused: it would be stored in the ledge
    it; the *In use* column says which ([D-47](../design/decisions.md)).
 3. First start: *Assign* the current profile (no restart), start the unit on the host, wait for the badge `match`.
 4. Upgrades: *Start rollout* — the worker is drained (its running job finishes), restarted through the backend, must be
-   seen going down, must come back with exactly the new argv (badge `match`), is verified (node list, a broken
+   seen going down, must come back with exactly the new argv (badge `match`) — a ComfyUI that dies as it starts
+   (restarted three times by the service manager while the step waits) fails the step at once instead of after the
+   start timeout, and the error points at the worker's log ([D-49](../design/decisions.md)) — is verified (node list, a broken
    workflow is refused, every custom node imported, optionally a smoke workflow), and returns to service. If anything fails, that worker goes back
    to the profile it ran before and stays in maintenance; the remaining workers are skipped. *Assign* on a running
    worker changes nothing it runs — start a rollout instead (assigning first is harmless: the way back is what the

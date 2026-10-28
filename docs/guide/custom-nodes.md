@@ -17,7 +17,9 @@ every worker of a group must run exactly the same nodes. Worked example at the e
 - *Node packs → Upload an archive* takes a `.zip`, `.tar.gz`, `.tgz` or `.tar` of up to 2 GiB. GitHub's
   *Download ZIP* works as it is: its single top-level directory is taken as the pack.
 - The pack is pinned to the archive's SHA-256, as a git pack is pinned to its commit. *Update* takes its next version as
-  another archive; the name and the settings stay.
+  another archive; the name and the settings stay. Do not add the next version as a second pack: two copies of one pack
+  register the same nodes and routes, and ComfyUI stops at start on every worker of the set. The build refuses two
+  packs from the same repository, or two archives that unpack from the same top-level folder ([D-49](../design/decisions.md)).
 - The builder unpacks it when it builds, and only regular files and directories come out: absolute paths, `..`,
   links and devices refuse the archive, and `.git` is left out ([design 18](../design/18-uploads.md)).
 - Archives skip the builder's allowed sources, so they need its own switch: `COMFYFARM_BUILD_NODE_ARCHIVES=1`. The

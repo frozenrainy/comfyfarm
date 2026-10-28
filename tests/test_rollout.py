@@ -199,6 +199,22 @@ async def test_failed_restarts_are_detected(farm, modes, expect, why):
         assert (await instances(api))["w1"]["badge"] == "match" and (await instances(api))["w1"]["profile"] == "p1"
 
 
+async def test_a_worker_dying_as_it_starts_fails_the_step_early(farm, monkeypatch):
+    """10-28: two copies of one node pack — ComfyUI died at start 48 times while the rollout waited out 900 s."""
+    from comfyfarm.rollout import engine
+    monkeypatch.setattr(engine, "STATUS_EVERY", 0.2)
+    api, h = farm["api"], farm["hosts"]["w1"]
+    h.modes = ["crash_loop"]
+    rid = await start(api, farm["p2"], [h.wid], options={"start_timeout": 60})
+    t0 = asyncio.get_running_loop().time()
+    ro = await wait_rollout(api, rid)
+    step = ro["steps"][0]
+    assert ro["status"] == "failed" and step["status"] == "reverted", step
+    assert "exits as it starts" in step["error"] and "logs/" in step["error"]
+    assert asyncio.get_running_loop().time() - t0 < 30                     # not the 60 s start_timeout
+    assert (await instances(api))["w1"]["profile"] == "p1"
+
+
 async def test_abort_while_draining(farm):
     api, h = farm["api"], farm["hosts"]["w1"]
     pid = (await api.post("/api/prompt", json={"prompt": tiny(2, blur=30), "comfyfarm_group": farm["gid"]}, headers=H)).json()["prompt_id"]
