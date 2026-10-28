@@ -13,6 +13,16 @@ origin must be something that can split traffic:
 | `/api/view?type=output…` | UI worker; on 404 the GPU worker that executed the job (found through the ledger, owner-scoped) | outputs normally sit on shared storage (01); without it the executing worker still has the file |
 | everything else | UI worker | default |
 
+A path goes to the router when it *is* one of the router's paths or lies under it, segment by segment: `/api/prompt`
+and `/api/history/<id>`, never `/api/prompt_json/list` — a custom node's own route that only starts with the same
+letters (field: such a route went to the router and answered 404).
+
+The gateway passes the upstream's response headers on as the bytes it received: ComfyUI names a saved output in
+`Content-Disposition` as raw UTF-8, which a header re-encoded from text cannot carry. It closes every upstream response
+it opened — finished, failed, or the browser gone before the first byte — and keeps two connection pools: one to the
+router (login, sessions, jobs, dashboard) and one to the workers. A worker-side pool that fills (slow downloads, a
+stuck worker) then cannot lock users out of the farm (D-48).
+
 Without a UI worker (topology A), user-data paths go to a designated GPU worker; the screen then freezes during model
 loads on that worker — acceptable for a homelab, documented.
 

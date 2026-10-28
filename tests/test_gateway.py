@@ -15,6 +15,7 @@ from comfyfarm.gateway import GatewaySettings, create_gateway
 from conftest import add_worker, fast_settings, free_port, tiny, wait_status
 
 SECRET = "s3cret-for-tests"
+NON_ASCII_FILE = "산책 저녁_00001.mp4"
 
 
 async def serve_asgi(app, started):
@@ -41,6 +42,7 @@ class UIStub:
         self.app.router.add_get("/api/settings", self.settings)
         self.app.router.add_get("/assets/index-AbCdEf12.js", self.asset)
         self.app.router.add_get("/api/view", self.view)          # no shared storage in this test: nothing here
+        self.app.router.add_get("/api/prompt_json/list", self.prompt_json)   # a custom node route under a router prefix
         self.views = []
 
     async def index(self, r):
@@ -61,7 +63,22 @@ class UIStub:
         self.seen.append(dict(r.headers)); return web.json_response({"user": r.headers.get("comfy-user")})
 
     async def view(self, r):
-        self.views.append(dict(r.query)); return web.json_response({"error": "no such file"}, status=404)
+        self.views.append(dict(r.query))
+        name = r.query.get("filename")
+        if name == NON_ASCII_FILE:                              # stock ComfyUI puts the name in the header as UTF-8
+            return web.Response(body=b"mp4 bytes", content_type="video/mp4",
+                                headers={"Content-Disposition": f'filename="{name}"'})
+        if name == "slow.bin":                                  # a long video the browser stops reading
+            resp = web.StreamResponse(headers={"Content-Type": "application/octet-stream"})
+            await resp.prepare(r)
+            for _ in range(400):
+                await resp.write(b"x" * 65536)
+                await asyncio.sleep(0.02)
+            return resp
+        return web.json_response({"error": "no such file"}, status=404)
+
+    async def prompt_json(self, r):
+        return web.json_response({"from": "ui"})
 
     async def asset(self, r):
         return web.Response(text="js", headers={"Cache-Control": "no-store"})
@@ -83,6 +100,7 @@ async def farm(dsn, fakes):
     await add_user(dsn, "root", "pw-root-1", admin=True)
     yield {"router": router_app.state.router, "router_url": f"http://127.0.0.1:{router_port}",
            "gw": f"http://127.0.0.1:{gw_port}", "ws": f"ws://127.0.0.1:{gw_port}/ws", "ui": ui, "worker": worker,
+           "ui_url": f"http://127.0.0.1:{ui_port}",
            "servers": started}
     for server, task in started:
         server.should_exit = True
@@ -535,3 +553,101 @@ async def test_first_administrator_only_once_when_two_try_at_once(dsn):
                 "code": code, "username": f"admin{i}", "password": "password-1"}) for i in range(4)))
             assert sorted(r.status_code for r in rs) == [200, 409, 409, 409]
             assert (await c.get("/api/internal/first-admin", headers=G)).json() == {"needed": False}
+
+
+async def small_gateway(farm, **kw):
+    """A second gateway on the same router and UI worker, with a small worker-side connection pool: a connection the
+    gateway fails to give back shows as the next request timing out instead of after a hundred leaks."""
+    gw = create_gateway(GatewaySettings(farm["router_url"], farm["ui_url"], SECRET, b"k" * 32, **kw))
+    return f"http://127.0.0.1:{await serve_asgi(gw, farm['servers'])}"
+
+
+async def test_non_ascii_upstream_header_is_passed_through_and_frees_the_connection(farm):
+    """Field (10-28): a saved output named in Korean made ComfyUI send `Content-Disposition: filename="…"` as UTF-8;
+    the gateway raised building the response, never closed the upstream stream, and after 100 such views every
+    request — the router's too — failed with PoolTimeout."""
+    gw = await small_gateway(farm, upstream_max_connections=2, pool_timeout=1)
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        for _ in range(5):
+            r = await c.get(f"{gw}/api/view", params={"filename": NON_ASCII_FILE, "subfolder": "", "type": "output"})
+            assert r.status_code == 200 and r.content == b"mp4 bytes"
+            raw = dict(r.headers.raw)[b"content-disposition"]
+            assert raw == f'filename="{NON_ASCII_FILE}"'.encode()             # the same bytes the worker sent
+        assert (await c.get(f"{gw}/api/queue")).status_code == 200
+
+
+async def test_a_browser_leaving_mid_download_frees_the_connection(farm):
+    gw = await small_gateway(farm, upstream_max_connections=2, pool_timeout=1)
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        for _ in range(4):
+            async with c.stream("GET", f"{gw}/api/view", params={"filename": "slow.bin", "type": "output"}) as r:
+                assert r.status_code == 200
+                async for _chunk in r.aiter_raw():
+                    break                                                         # the video element seeks away
+        for _ in range(50):                                  # the gateway notices the closed socket on its next write
+            r = await c.get(f"{gw}/api/settings")
+            if r.status_code == 200:
+                break
+            await asyncio.sleep(0.1)
+        assert r.status_code == 200
+
+
+async def test_workers_holding_every_connection_leave_the_router_reachable(farm):
+    """The router and the workers have separate pools: slow or stuck worker downloads cannot lock users out of
+    login, the queue and the dashboard."""
+    gw = await small_gateway(farm, upstream_max_connections=1, pool_timeout=1)
+    async with httpx.AsyncClient() as c, httpx.AsyncClient() as d:
+        await login(c, gw, "alice", "pw-alice")
+        d.cookies = c.cookies
+        async with c.stream("GET", f"{gw}/api/view", params={"filename": "slow.bin", "type": "output"}) as r:
+            assert r.status_code == 200
+            assert (await d.get(f"{gw}/api/queue")).status_code == 200
+            assert (await d.get(f"{gw}/comfyfarm/dashboard/")).status_code == 200
+
+
+async def test_a_custom_node_route_sharing_a_router_prefix_goes_to_the_ui_worker(farm):
+    """Field (10-27): `/api/prompt_json/list` only starts with the characters of `/api/prompt` — it is not under it."""
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        assert (await c.get(f"{gw}/api/prompt_json/list")).json() == {"from": "ui"}
+        assert (await c.post(f"{gw}/api/prompt", json={"prompt": tiny(1)})).json().get("prompt_id")
+        assert (await c.get(f"{gw}/api/history/{uuid.uuid4()}")).status_code == 200   # still the router's
+
+
+async def test_upstream_closed_when_the_browser_is_gone_before_the_first_byte():
+    """The case a `finally` inside the body generator misses: the response start fails, the generator never runs."""
+    from starlette.requests import ClientDisconnect
+    from starlette.responses import StreamingResponse
+    from comfyfarm.gateway import UpstreamResponse
+    gone_errors = (OSError, ClientDisconnect)                    # starlette reports the failed send as a disconnect
+
+    # stream=, not content=: a response built from bytes counts as closed from the start and would prove nothing
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, stream=httpx.ByteStream(b"x" * 1000)))
+    scope = {"type": "http", "asgi": {"spec_version": "2.4"}, "http_version": "1.1", "method": "GET"}
+
+    async def receive():
+        await asyncio.sleep(3600)
+
+    async def gone(message):
+        raise OSError("client went away")
+
+    async with httpx.AsyncClient(transport=transport) as c:
+        old = await c.send(c.build_request("GET", "http://w/x"), stream=True)
+
+        async def body_iter():                                   # the shape before 10-28
+            try:
+                async for chunk in old.aiter_raw():
+                    yield chunk
+            finally:
+                await old.aclose()
+        with pytest.raises(gone_errors):
+            await StreamingResponse(body_iter())(scope, receive, gone)
+        assert not old.is_closed                                 # the scenario is real: the old shape leaks here
+
+        up = await c.send(c.build_request("GET", "http://w/x"), stream=True)
+        with pytest.raises(gone_errors):
+            await UpstreamResponse(up, 200)(scope, receive, gone)
+        assert up.is_closed

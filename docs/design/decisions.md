@@ -316,3 +316,14 @@ it, and a partial unique index frees its name. It is refused, with the reason, w
 (D-45's `running_profile`: an assignment without a restart is not what runs) or an active rollout uses it.
 `POST /api/admin/profiles/delete {ids}` deletes several at once and says why each other one stays; the dashboard
 selects them, or all those not in use.
+
+**D-48 The gateway passes header bytes, closes every upstream, and keeps the router's connections apart.** *(field,
+dev.25)* — Every page answered `router unavailable (PoolTimeout)` a moment after a job was queued. Saved outputs named in
+Korean: ComfyUI sends `Content-Disposition: filename="…"` as raw UTF-8; the gateway decoded the headers to text and
+raised re-encoding them (latin-1), after opening the upstream stream and before anything would close it. Each view of
+such a file kept one connection; after 100 in 39 hours the single pool (httpx default 100) was full, and the router's
+requests waited in it too. → Headers go through as received bytes (hop-by-hop ones dropped); a response object owns
+the upstream and closes it when it ends, fails or is cancelled — also when the browser is gone before the first byte,
+where a `finally` inside the body generator never runs; the router and the workers have separate pools
+(`upstream_max_connections` for the workers). Router paths match segment-wise (`/api/prompt`, `/api/prompt/…`, not
+`/api/prompt_json`).

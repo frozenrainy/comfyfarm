@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
+import anyio
 import httpx
 import websockets
 from starlette.applications import Starlette
@@ -44,6 +45,15 @@ class UiUnavailable(Exception):
 ROUTER_PREFIXES = ("/api/prompt", "/api/jobs", "/api/queue", "/api/history", "/api/interrupt", "/api/object_info",
                    "/api/farm/", "/api/admin/", "/api/health/",
                    "/comfyfarm/dashboard", "/prompt", "/queue", "/history", "/interrupt", "/object_info")
+
+
+def under(path: str, prefixes) -> bool:
+    """`path` is one of the prefixes or below it, segment-wise: /api/prompt and /api/prompt/x, not /api/prompt_json
+    (10-27: a custom node's /api/prompt_json/list went to the router and 404'd). A prefix ending in / is already a
+    directory and matches anything under it."""
+    return any(path.startswith(p) if p.endswith("/") else path == p or path.startswith(p + "/") for p in prefixes)
+
+
 DASHBOARD = "/comfyfarm/dashboard/"
 AFTER_LOGIN = ("/", DASHBOARD)           # the dashboard is the landing page; "/" (bare ComfyUI) only when asked for
 # Same look as the dashboard; the theme the browser last used there (localStorage) before the first paint.
@@ -129,10 +139,33 @@ class GatewaySettings:
     dev_user: str = "dev"
     secure_cookie: bool = False
     comfy_users: dict[str, str] = field(default_factory=dict)   # identity → UI worker user id (cache)
+    upstream_max_connections: int = 100     # to workers (UI and GPU); the router has its own pool
+    pool_timeout: float = 10.0              # seconds to wait for a free connection
+
+
+class UpstreamResponse(StreamingResponse):
+    """Streams an upstream response and closes it whatever happens: finished, failed, or the browser gone before
+    the first byte (then the body iterator never starts and a `finally` inside it would never run). An unclosed
+    stream keeps its pooled connection for good — a hundred of them and the pool is empty."""
+
+    def __init__(self, up: httpx.Response, status_code: int):
+        super().__init__(up.aiter_raw(), status_code=status_code)
+        self.up = up
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):          # also when cancelled: the close itself must not be
+                await self.up.aclose()
 
 
 def create_gateway(s: GatewaySettings) -> Starlette:
-    http = httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=300, write=60, pool=10))
+    timeout = httpx.Timeout(connect=5, read=300, write=60, pool=s.pool_timeout)
+    # Two pools: worker downloads (long videos, a stuck worker) must not take the connections that login, the queue
+    # and the dashboard need from the router (10-28: one pool, filled by worker streams, made every page PoolTimeout).
+    http = httpx.AsyncClient(timeout=timeout)                                                    # the router
+    upstream = httpx.AsyncClient(timeout=timeout, limits=httpx.Limits(max_connections=s.upstream_max_connections))
     comfy_user_lock = asyncio.Lock()
 
     # ---- identity ----------------------------------------------------------------------------------------------
@@ -222,12 +255,12 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             if ident.user in s.comfy_users:
                 return s.comfy_users[ident.user]
             try:
-                r = await http.get(f"{ui}/api/users")
+                r = await upstream.get(f"{ui}/api/users")
                 if r.status_code == 200:
                     users = r.json().get("users") or {}
                     uid = next((k for k, v in users.items() if v == ident.user), None)
                     if uid is None:
-                        r = await http.post(f"{ui}/api/users", json={"username": ident.user})
+                        r = await upstream.post(f"{ui}/api/users", json={"username": ident.user})
                         uid = r.json() if r.status_code == 200 else None
             except (httpx.HTTPError, ValueError, AttributeError) as e:
                 raise UiUnavailable(f"the UI worker at {ui} is unreachable or not ComfyUI ({type(e).__name__})")
@@ -248,25 +281,28 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         raw = (request.scope.get("raw_path") or request.url.path.encode()).decode("latin-1")
         url = f"{base}{raw}" + (f"?{request.url.query}" if request.url.query else "")
         body = request.stream() if request.method not in ("GET", "HEAD") else None
-        req = http.build_request(request.method, url, headers=headers, content=body)
+        client = http if base == s.router_url else upstream
+        req = client.build_request(request.method, url, headers=headers, content=body)
         try:
-            up = await http.send(req, stream=True)
+            up = await client.send(req, stream=True)
         except httpx.HTTPError as e:
             return JSONResponse({"error": f"upstream unavailable: {type(e).__name__}"}, status_code=502)
-        if miss is not None and up.status_code == miss:
-            await up.aclose()
-            return None
-        out_headers = {k: v for k, v in up.headers.items() if k.lower() not in HOP_HEADERS | {"content-encoding"}}
-        if cache_immutable and up.status_code == 200:
-            out_headers["cache-control"] = "public, max-age=31536000, immutable"    # stock sends no-store
-
-        async def body_iter():
-            try:
-                async for chunk in up.aiter_raw():
-                    yield chunk
-            finally:                     # released here, not in a background task: a disconnecting client skips those
+        try:
+            if miss is not None and up.status_code == miss:
                 await up.aclose()
-        return StreamingResponse(body_iter(), status_code=up.status_code, headers=out_headers)
+                return None
+            # Header bytes go through as the upstream sent them: ComfyUI names a saved output in Content-Disposition
+            # as raw UTF-8, which a str header cannot be re-encoded from (10-28: every Korean file name raised here)
+            out = [(k.lower(), v) for k, v in up.headers.raw
+                   if k.decode("latin-1").lower() not in HOP_HEADERS | {"content-encoding"}]
+            if cache_immutable and up.status_code == 200:
+                out = [(k, v) for k, v in out if k != b"cache-control"] + [(b"cache-control", b"public, max-age=31536000, immutable")]
+            resp = UpstreamResponse(up, status_code=up.status_code)               # stock sends no-store, above
+            resp.raw_headers = out
+            return resp
+        except BaseException:
+            await up.aclose()
+            raise
 
     # ---- login -------------------------------------------------------------------------------------------------
     def safe_next(v) -> str:
@@ -411,7 +447,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
                 if path.startswith("/comfyfarm/dashboard"):
                     return RedirectResponse(f"/comfyfarm/login?next={DASHBOARD}", status_code=303)
             return JSONResponse({"error": "not authenticated"}, status_code=401)
-        if path.startswith(ROUTER_PREFIXES):
+        if under(path, ROUTER_PREFIXES):
             return await proxy(request, s.router_url, router_headers(request, ident))
         base_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS | IDENTITY_HEADERS}
         if path in ("/api/view", "/view") and any(len(request.query_params.getlist(k)) > 1
@@ -512,6 +548,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
     async def lifespan(app):
         yield
         await http.aclose()
+        await upstream.aclose()
 
     return Starlette(routes=[
         Route("/comfyfarm/login", login_page, methods=["GET"]),
