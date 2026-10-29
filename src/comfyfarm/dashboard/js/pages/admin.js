@@ -1,6 +1,6 @@
 // System administration: workers, groups, users, statistics (admins only; the router enforces it as well).
 import { TZ, act, api, button, dailyChart, dur, formDialog, h, hours, namedRow, noteInput, periodPicker, pill, progressOf,
-         qs, setPill, setText, statCards, syncNote, syncRows, t, table, toast, when } from "../core.js";
+         qs, setMemory, setPill, setText, statCards, syncNote, syncRows, t, table, toast, when } from "../core.js";
 import { locale } from "../i18n.js";
 import { models } from "./models.js";
 import { rollout } from "./rollout.js";
@@ -80,8 +80,9 @@ const head = (title, ...right) => h("div", { class: "section-head" }, h("h2", {}
 // ---- workers ------------------------------------------------------------------------------------------------------
 function workers(root, { refresh }) {
   let groupList = [];
-  const cols = ["name", "group", "state", "gpu", "job", "warnings", "note", "actions"];
-  const tb = table([[t("Name")], [t("Group")], [t("State")], [t("GPU")], [t("Job")], [t("Warnings")], [t("Note")], ["", "actions"]]);
+  const cols = ["name", "group", "state", "gpu", "memory", "job", "warnings", "note", "actions"];
+  const tb = table([[t("Name")], [t("Group")], [t("State")], [t("GPU")], [t("Memory"), "memory"], [t("Job")], [t("Warnings")], [t("Note")],
+                    ["", "actions"]]);
   const groupOptions = () => [{ value: "", label: t("(no group)") }, ...groupList.map((g) => ({ value: g.name, label: g.name }))];
   const patch = (id, body, msg) => act(() => api("PATCH", `/api/admin/workers/${id}`, body), msg, refresh);
   const add = button(t("Add worker"), async () => {
@@ -100,7 +101,7 @@ function workers(root, { refresh }) {
       "Delete keeps the worker's history."))));
 
   function build() {
-    const tr = namedRow(cols, { name: "nowrap", actions: "actions" });
+    const tr = namedRow(cols, { name: "nowrap", memory: "memory", actions: "actions" });
     const id = () => tr._item.id;
     tr.sel = h("select", { onchange: () => patch(id(), { group: tr.sel.value }, t("Group changed")) });
     tr.uiNote = h("span", { class: "muted", hidden: true }, t("UI worker"));
@@ -156,6 +157,7 @@ function workers(root, { refresh }) {
     tr.again.hidden = !!w.builtin;      // the compose deployment's own UI worker: its container is set up by compose
     setText(c.gpu, [w.gpu, w.vram_gb ? `${w.vram_gb} GB` : null, w.backend, w.comfyui ? `ComfyUI ${w.comfyui}` : null]
       .filter(Boolean).join(" · ") || "—");
+    setMemory(c.memory, w.memory);
     const frac = w.job ? progressOf(w.job.progress) : null;
     setText(c.job, w.job ? `${w.job.owner} · ${w.job.prompt_id.slice(0, 8)}${frac != null ? ` · ${Math.round(frac * 100)}%` : ""}`
       : w.state === "online" && w.enabled && !w.maintenance ? t("idle") : "");

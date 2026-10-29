@@ -68,6 +68,45 @@ export function setBar(el, frac) {
   if (el.dataset.v !== key) { el.dataset.v = key; el.replaceChildren(bar(frac)); }
 }
 
+// ---- memory of a worker (health check, extension 0.11; RAM only from older workers) ----------------------------
+const GB = 2 ** 30, MB = 2 ** 20;
+const gb = (n) => (n / GB).toFixed(1);
+const fill = (frac) => bar(frac, frac >= 0.9 ? "full" : "");
+// RAM "used" = total - available: page cache is free for the taking, so a busy host does not look full
+export function memoryView(m) {
+  if (!m) return h("span", { class: "muted" }, "—");
+  const lines = [];
+  if (m.ram_total) {
+    const used = m.ram_available != null ? m.ram_total - m.ram_available : null;
+    lines.push(h("div", { class: "mem" }, h("b", {}, t("RAM")), " ", used != null ? fill(used / m.ram_total) : "",
+      ` ${used != null ? gb(used) : "?"} / ${gb(m.ram_total)} GB`));
+  }
+  if (m.swap_total) {
+    const rate = m.swap_in_rate != null
+      ? " · " + t("in {in} MB/s · out {out} MB/s", { in: (m.swap_in_rate / MB).toFixed(0), out: (m.swap_out_rate / MB).toFixed(0) }) : "";
+    lines.push(h("div", { class: "mem" }, h("b", {}, t("Swap")), ` ${gb(m.swap_used)} / ${gb(m.swap_total)} GB${rate}`));
+  }
+  for (const d of m.devices || []) {
+    const mine = d.reserved != null ? t("ComfyUI {n} GB", { n: gb(d.reserved) }) : "";
+    if (d.used != null && d.total) {
+      lines.push(h("div", { class: "mem" }, h("b", {}, t("VRAM")), " ", fill(d.used / d.total),
+        ` ${gb(d.used)} / ${gb(d.total)} GB${mine ? " · " + mine : ""}`));
+    } else if (mine && d.total) {          // an older worker: what ComfyUI reserved, not the device's use
+      lines.push(h("div", { class: "mem", title: t("The device's own use shows from worker extension 0.11 (Build, then a rollout)") },
+        h("b", {}, t("VRAM")), ` ${mine} / ${gb(d.total)} GB`));
+    }
+  }
+  return lines.length ? h("div", {}, ...lines) : h("span", { class: "muted" }, "—");
+}
+export function setMemory(el, m) {
+  // rebuilt only when a shown number changes (every poll would reset hover titles)
+  const q = (n) => (n == null ? null : Math.round(n / 2 ** 26));      // 64 MiB steps (not >>: 32-bit in JS)
+  const key = m ? JSON.stringify([m.ram_total, q(m.ram_available), q(m.swap_used), m.swap_total,
+    Math.round((m.swap_in_rate || 0) / MB), Math.round((m.swap_out_rate || 0) / MB),
+    (m.devices || []).map((d) => [q(d.used), q(d.reserved), d.total])]) : "";
+  if (el.dataset.v !== key) { el.dataset.v = key; el.replaceChildren(memoryView(m)); }
+}
+
 // ---- feedback --------------------------------------------------------------------------------------------------
 let toastTimer;
 // The toast is a popover: the browser's top layer, so it shows above an open dialog (a modal dialog covers everything

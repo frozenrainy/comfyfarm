@@ -240,3 +240,16 @@ pre.code.wrap { white-space: pre-wrap; word-break: break-all; }
               font-size: .8rem; font-weight: normal; line-height: 1.4; text-align: left; white-space: normal;
               word-break: keep-all; overflow-wrap: anywhere; pointer-events: none; opacity: 0; visibility: hidden; }
 .tip:hover::after, .tip:focus::after { opacity: 1; visibility: visible; }
+
+/* worker memory (System → Workers, dashboard group cards) */
+td.memory, th.memory { min-width: 17rem; }
+.mem { white-space: nowrap; font-size: .92em; line-height: 1.6; }
+.mem > b { display: inline-block; min-width: 3.4em; font-weight: 600; }
+.mem .bar { width: 60px; }
+.mem .bar > i { background: var(--info); }          /* a fill level, not "good": neutral */
+.mem .bar.full > i { background: var(--amber); }    /* 90 % and more */
+.cards:has(.members) { grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); }  /* room for a line */
+.card .mem { white-space: normal; }                 /* still narrower (a phone): wrap rather than spill out */
+.card .members { margin-top: .6rem; border-top: 1px solid var(--line); padding-top: .5rem; }
+.card .members > div + div { margin-top: .5rem; }
+.card .members .who { font-weight: 600; }

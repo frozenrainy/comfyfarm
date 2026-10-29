@@ -179,10 +179,16 @@ def make_router(ctx: Ctx) -> APIRouter:
                                    "count(w.id) FILTER (WHERE w.deleted_at IS NULL AND w.enabled AND w.state = 'online') AS online "
                                    "FROM worker_groups g LEFT JOIN workers w ON w.group_id = g.id "
                                    "WHERE $1::bigint[] IS NULL OR g.id = ANY($1) GROUP BY g.id ORDER BY g.name", allowed)
+            members = await c.fetch("SELECT id, name, group_id, state, maintenance FROM workers WHERE deleted_at IS NULL "
+                                    "AND enabled AND group_id = ANY($1::bigint[]) ORDER BY name", [g["id"] for g in groups])
             queue, recent = await own_jobs(c, who, RECENT_ON_DASHBOARD)
             mystats = await statsvc.compute(c, since, until, zone, owner=who)
+        board = ctx.router.health.memory
+        # the group's workers and their memory: whether a big workflow fits now, or why a job crawls (swapping)
+        of = lambda gid: [{"name": m["name"], "state": m["state"], "maintenance": m["maintenance"], "memory": board.view(m["id"])}
+                          for m in members if m["group_id"] == gid]
         return {"groups": [{"id": g["id"], "name": g["name"], "workers": g["workers"], "online": g["online"],
-                            "health": health["groups"].get(str(g["id"]))} for g in groups],
+                            "health": health["groups"].get(str(g["id"])), "members": of(g["id"])} for g in groups],
                 "queue": queue,
                 "recent": recent,
                 "stats": {k: mystats[k] for k in ("since", "until", "total", "groups", "daily")}}

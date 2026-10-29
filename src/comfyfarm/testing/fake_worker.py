@@ -123,6 +123,7 @@ class FakeWorker:
             extension = bundled_extension() or "0.9"
         self.extension = extension
         self.gpu_fault: str | None = None     # set: the device is broken — /system_stats answers 500 (as ComfyUI does)
+        self.memory: dict | None = None       # set: GET /comfyfarm/health reports it (extension 0.11, memory.py's shape)
         self.error_message = "fake execution error"     # mode "error": what the failing node says
         if secured is not None:
             r.add_get("/comfyfarm/info", self.info)
@@ -367,8 +368,11 @@ class FakeWorker:
 
     async def health(self, request):
         executor = "dead" if self._executor.done() else "alive"
-        return web.json_response({"extension": self.extension, "executor": executor,
-                                  "device": f"error: AcceleratorError: {self.gpu_fault}" if self.gpu_fault else "ok"})
+        body = {"extension": self.extension, "executor": executor,
+                "device": f"error: AcceleratorError: {self.gpu_fault}" if self.gpu_fault else "ok"}
+        if self.memory is not None:
+            body["memory"] = self.memory
+        return web.json_response(body)
 
     def kill_executor(self):
         """The prompt executor dies, the process stays: requests are answered, nothing runs (field, dev.21)."""
@@ -393,8 +397,10 @@ class FakeWorker:
             return web.json_response({"error": self.gpu_fault}, status=500)
         torch = "2.14.0+rocm7.2" if self.backend == "rocm" else "2.14.0+cu130"
         return web.json_response({"system": {"comfyui_version": self.version, "pytorch_version": torch, "os": "posix",
-                                             "argv": self.argv},
-                                  "devices": [{"name": f"Fake {self.backend.upper()} GPU", "type": "cuda", "vram_total": self.vram_gb * 1073741824}]})
+                                             "argv": self.argv, "ram_total": 64 * 2**30, "ram_free": 40 * 2**30},
+                                  "devices": [{"name": f"Fake {self.backend.upper()} GPU", "type": "cuda", "index": 0,
+                                               "vram_total": self.vram_gb * 1073741824, "vram_free": self.vram_gb * 1073741824,
+                                               "torch_vram_total": 2 * 2**30, "torch_vram_free": 2**30}]})
 
     # ---------------- executor ----------------
     async def _start(self, app):

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from ..health import memory
+
 log = logging.getLogger(__name__)
 
 DISPATCH_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=10.0, pool=3.0)
@@ -185,31 +187,37 @@ class ComfyAdapter:
         j = _object(r) if r.status_code == 200 else None
         return {"installed": True, **j} if j is not None else None
 
-    async def vitals(self, base_url: str, extension: dict | None) -> str | None:
-        """Why a worker that answers /queue cannot run jobs, or None. Its prompt executor thread can die while the
-        process keeps answering (field, dev.21: a GPU fault; /queue 200, every job waited forever). The extension
-        from 0.9 says so on GET /comfyfarm/health; an older worker shows it as GET /system_stats → 500 (ComfyUI asks
-        the broken GPU context for free memory there). No answer is not evidence: the probe judges reachability."""
+    async def vitals(self, base_url: str, extension: dict | None) -> tuple[str | None, dict | None]:
+        """(why a worker that answers /queue cannot run jobs, or None; its memory reading, or None). Its prompt executor
+        thread can die while the process keeps answering (field, dev.21: a GPU fault; /queue 200, every job waited
+        forever). The extension from 0.9 says so on GET /comfyfarm/health, and reports memory there from 0.11; an
+        older worker shows a dead GPU context as GET /system_stats → 500 (ComfyUI asks the broken context for free
+        memory there), and its RAM there. No answer is not evidence: the probe judges reachability."""
         version = str((extension or {}).get("extension") or "")
         try:
             newer = tuple(int(x) for x in version.split("-")[0].split(".")[:2]) >= (0, 9)
         except ValueError:
             newer = False
+        why = mem = None
         try:
             if newer:
                 r = await self.http.get(f"{base_url}/comfyfarm/health", timeout=QUERY_TIMEOUT)
                 j = _object(r) if r.status_code == 200 else None
                 if j is None:
-                    return None
+                    return None, None
                 if j.get("executor") == "dead":
-                    return "its prompt executor has stopped"
-                if str(j.get("device", "")).startswith("error"):
-                    return f"GPU {j['device']}"[:200]
-                return None
+                    why = "its prompt executor has stopped"
+                elif str(j.get("device", "")).startswith("error"):
+                    why = f"GPU {j['device']}"[:200]
+                mem = memory.from_extension(j.get("memory"))
+                if mem is not None or why is not None:
+                    return why, mem
             r = await self.http.get(f"{base_url}/system_stats", timeout=QUERY_TIMEOUT)
-            return "system_stats answers HTTP 500 (a GPU fault?)" if r.status_code >= 500 else None
+            if r.status_code >= 500:
+                return why or (None if newer else "system_stats answers HTTP 500 (a GPU fault?)"), None
+            return why, memory.from_system_stats(_object(r)) if r.status_code == 200 else None
         except Exception:
-            return None
+            return why, mem
 
     async def cancel(self, base_url: str, prompt_id: str, jobs_api: bool = True) -> bool | None:
         """Cancel wherever the job is (pending or running). True = something was cancelled, False = nothing to

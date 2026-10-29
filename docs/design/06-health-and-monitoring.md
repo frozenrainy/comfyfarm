@@ -67,6 +67,22 @@ Top level: `ungrouped_unsatisfiable_pending` — ungrouped jobs no group can tak
 `comfyfarm_ledger_up`. A `null` is an **absent series**, never 0. When the ledger cannot be read the scrape still
 succeeds with only `comfyfarm_ledger_up 0`: "not observed" must not look like "nothing to report".
 
+**Worker memory** ([D-50](decisions.md)) — each health check also reads the worker's memory, and the router keeps the
+last reading per worker in its own memory (not the ledger; older than 30 s = not shown). From extension 0.11 the worker
+reports it on `GET /comfyfarm/health`: host RAM total and **available** (MemAvailable — "free" leaves out reclaimable page
+cache and makes a busy host look full), swap total/used and bytes swapped in/out since boot (the router makes a rate of
+two readings — swapping in is what makes a job crawl; "used" stays high long after the pressure is gone), the RSS of
+ComfyUI, and per device the VRAM torch reserved and the VRAM in use **as the driver counts it**. On ROCm that is sysfs
+`mem_info_vram_used` of the device's PCI address: `torch.cuda.mem_get_info` — what ComfyUI's `/system_stats` reports —
+undercounts there (field, R9700: 14.1 GiB against the driver's 23.5 and torch's own 22.8 reserved). An older worker is
+read from `/system_stats`: RAM, and the VRAM ComfyUI reserved — never its `vram_free`. Shown in System → Workers and,
+for the groups a user may use, in the dashboard's group cards; exported with label `worker="<name>"` (devices also
+`device="<index>"`): `comfyfarm_worker_ram_total_bytes`, `…_ram_available_bytes`, `…_swap_total_bytes`,
+`…_swap_used_bytes`, `…_swap_in_bytes_per_second`, `…_swap_out_bytes_per_second`, `…_process_rss_bytes`,
+`…_vram_total_bytes`, `…_vram_used_bytes`, `…_vram_reserved_bytes`. These need no ledger. No alert is built in yet:
+the threshold for "swapping while a job runs" is to come from the readings (field: 150 MB/s for minutes when a run did
+not fit, 0 when it did).
+
 Example alert (stall for 5 minutes, unless a rollout is running):
 
 ```

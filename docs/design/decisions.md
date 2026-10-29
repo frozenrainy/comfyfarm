@@ -336,3 +336,14 @@ from the same repository or two archives with the same top-level folder, naming 
 While a step waits for the worker, three automatic restarts (the service manager's `NRestarts`, read with the status)
 fail the step at once, pointing at `logs/<instance>.log` in the service account's home. Reading that log for the
 error is left out: the agent answers restart, status and check only (contract §6), and widening it is its own decision.
+
+**D-50 Worker memory is shown from the health check, VRAM as the driver counts it.** *(field, dev.26)* — A two-hour
+video run that no longer fit in RAM swapped (150 MB/s in) and ran at half speed, and nothing on the farm's pages said
+so: the dashboard knew a worker's VRAM size only. → From extension 0.11 `GET /comfyfarm/health` carries host RAM
+(available, not free), swap and its in/out counters, ComfyUI's RSS, and per device the VRAM torch reserved and the
+VRAM in use from the driver; the router keeps the last reading per worker in memory (a write every few seconds is no
+history; /metrics is) and computes swap rates from two readings. The device's use is not taken from
+`torch.cuda.mem_get_info`: on ROCm it said 14.1 GiB where the driver (sysfs, by the device's PCI address) said 23.5 and
+torch alone had reserved 22.8; on CUDA it is the driver's figure. Older workers show RAM from `/system_stats` and the
+VRAM ComfyUI reserved. Admins see it in System → Workers, users in the cards of the groups they may use. No alert yet:
+its threshold comes from the readings.

@@ -8,13 +8,14 @@ import time
 from ..adapter.comfy import ComfyAdapter
 from ..db import Busy, BusyLog, Database
 from ..core.settings import Settings
+from .memory import MemoryBoard
 
 log = logging.getLogger(__name__)
 WAIT_REMIND = 600.0          # a worker that never answered: one more line after this long (a build, or nothing started)
 
 
-async def _none():
-    return None
+async def _none2():
+    return None, None
 
 
 class HealthMonitor:
@@ -26,6 +27,7 @@ class HealthMonitor:
         self.inventory_tried: dict[int, float] = {}
         self.last_failure: dict[int, tuple] = {}            # worker id → (kind, detail) last logged
         self.reminded: set[int] = set()                     # never-answered workers told about after WAIT_REMIND
+        self.memory = MemoryBoard()                         # last memory reading per worker (dashboard, /metrics)
 
     async def run(self):
         while True:
@@ -53,9 +55,12 @@ class HealthMonitor:
                 "WHERE enabled AND deleted_at IS NULL")]
         results = await asyncio.gather(*(self.adapter.probe(w["base_url"]) for w in workers))
         # answering is not working: a worker whose executor died answers /queue and runs nothing (field, dev.21)
-        broken = await asyncio.gather(*(self.adapter.vitals(w["base_url"], (w["capabilities"] or {}).get("extension"))
-                                        if ok else _none() for w, (ok, _, _) in zip(workers, results)))
-        results = [(False, "broken", why) if why else res for res, why in zip(results, broken)]
+        vitals = await asyncio.gather(*(self.adapter.vitals(w["base_url"], (w["capabilities"] or {}).get("extension"))
+                                        if ok else _none2() for w, (ok, _, _) in zip(workers, results)))
+        for w, (_, mem) in zip(workers, vitals):
+            self.memory.update(w["id"], mem, w["name"])
+        self.memory.forget({w["id"] for w in workers})
+        results = [(False, "broken", why) if why else res for res, (why, _) in zip(results, vitals)]
         became_online = refreshed_one = False
         for w, (ok, kind, detail) in zip(workers, results):
             who = f"{w['name']} (#{w['id']})"

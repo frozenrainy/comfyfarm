@@ -49,4 +49,10 @@ rollouts, every worker (reachable? locked down with `COMFYFARM_ALLOW`? which gro
 agree on nodes and models, whether GPU workers see files uploaded through the UI worker (shared storage), disk space,
 published artifacts, backup tooling. Exit code 1 when anything FAILs — usable from a cron job.
 
+**Memory of the workers**: System → Workers (and, for users, the cards of their groups on the dashboard) shows each
+worker's host RAM in use, swap with how fast it is being read and written, and VRAM in use with the part ComfyUI holds.
+A job that crawls while swap is read at tens of MB/s does not fit in that host's RAM. The device's VRAM use and swap
+need worker extension 0.11 (*Build*, then roll the GPU and UI profiles out); until then RAM shows from ComfyUI's own
+report. The same numbers are on `/metrics` (`comfyfarm_worker_*`) for a history in Prometheus/Grafana.
+
 Backups: [backup.md](backup.md). Upgrading workers: [rollouts.md](rollouts.md).

@@ -120,6 +120,10 @@ export default {
 
   // ---- system: workers ----
   "Name": "이름", "State": "상태", "GPU": "GPU", "Job": "작업", "Warnings": "경고",
+  "Memory": "메모리", "RAM": "RAM", "Swap": "스왑", "VRAM": "VRAM", "in {in} MB/s · out {out} MB/s": "읽기 {in} MB/s · 쓰기 {out} MB/s",
+  "ComfyUI {n} GB": "ComfyUI {n} GB",
+  "The device's own use shows from worker extension 0.11 (Build, then a rollout)":
+    "장치 전체 사용량은 워커 확장 0.11부터 보입니다 (Build 후 롤아웃)",
   "(no group)": "(그룹 없음)", "Add worker": "워커 추가", "ComfyUI URL": "ComfyUI 주소",
   "Worker added — it appears online after its first health check": "워커를 추가했습니다 — 첫 상태 점검 뒤 온라인으로 보입니다",
   "Maintenance: no new jobs, the running one finishes. Disable: also no health checks. Delete keeps the worker's history.":

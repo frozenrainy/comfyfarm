@@ -281,6 +281,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                         "backend": caps.get("backend"), "gpu": device_name(devs[0].get("name")) if devs else None,
                         "builtin": bool(ctx.settings.ui_service) and r["base_url"].rstrip("/") == ctx.settings.ui_service.rstrip("/"),
                         "vram_gb": round(vram / 2**30, 1) if vram else None, "comfyui": caps.get("comfyui"),
+                        "memory": router.health.memory.view(r["id"]),
                         "capabilities": caps,
                         "job": {"prompt_id": str(r["job_prompt_id"]), "owner": r["job_owner"], "progress": r["job_progress"]}
                         if r["job_prompt_id"] else None})

@@ -23,6 +23,7 @@ from .db import Busy, Database
 from .events.hub import EventHub
 from .health.dispatch import prometheus, snapshot as dispatch_snapshot
 from .health.monitor import HealthMonitor
+from .health.memory import prometheus as memory_prometheus
 
 log = logging.getLogger(__name__)
 DASHBOARD_DIR = pathlib.Path(__file__).parent / "dashboard"
@@ -319,7 +320,8 @@ def create_app(settings: Settings) -> FastAPI:
         except Exception as e:
             log.warning("metrics: ledger unreadable: %s", type(e).__name__)
             snap = None
-        return PlainTextResponse(prometheus(snap), media_type="text/plain; version=0.0.4; charset=utf-8")
+        text = prometheus(snap) + memory_prometheus(router.health.memory.views())      # memory needs no ledger
+        return PlainTextResponse(text, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     # ---- dashboard (static, no build step: the farm may have no package registry, D-32) --------------------------
     @app.get("/comfyfarm/dashboard")
