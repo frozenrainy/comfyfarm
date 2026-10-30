@@ -347,3 +347,13 @@ history; /metrics is) and computes swap rates from two readings. The device's us
 torch alone had reserved 22.8; on CUDA it is the driver's figure. Older workers show RAM from `/system_stats` and the
 VRAM ComfyUI reserved. Admins see it in System → Workers, users in the cards of the groups they may use. No alert yet:
 its threshold comes from the readings.
+
+**D-51 The health check makes no GPU runtime call on ROCm.** *(field, dev.27)* — After extension 0.11 a worker had two
+GPU faults (illegal memory access, amdgpu page fault) at the same moment — a model loading right after sampling —
+in about 17 runs, none in about 25 before. 0.11 had added torch calls (device properties, the allocator's reserved
+memory) to the health check, which runs on the server's thread while the executor works the GPU. Not proven the
+cause; not worth the risk. → From 0.12 the devices are read once at load; each reading takes the device's use from
+sysfs and the worker's own VRAM from its DRM descriptors (`/proc/self/fdinfo`), with no GPU runtime call;
+`COMFYFARM_MEMORY=0` turns it off; a worker that reports memory itself is never asked `/system_stats` (ComfyUI asks
+the GPU there). On CUDA the reading still uses `mem_get_info` and torch's reserved memory. The device check the health
+report has carried since 0.9 (`mem_get_info`) is unchanged.

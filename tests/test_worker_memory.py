@@ -33,24 +33,47 @@ def test_vram_in_use_comes_from_the_driver_on_rocm(tmp_path):
     dev.mkdir()
     (dev / "mem_info_vram_used").write_text(str(int(23.5 * GiB)))
     (dev / "mem_info_vram_total").write_text(str(32 * GiB))
-    torch = fake_torch("7.2", free=int(17.9 * GiB), total=32 * GiB, reserved=int(22.8 * GiB))
-    d = ext.devices(torch, sysfs=str(tmp_path))[0]
+    fd = tmp_path / "fdinfo"
+    fd.mkdir()
+    (fd / "8").write_text("drm-driver:\tamdgpu\ndrm-client-id:\t1066\ndrm-pdev:\t0000:08:00.0\n"
+                          f"drm-memory-vram:\t{int(22.8 * GiB) // 1024} KiB\ndrm-memory-gtt: \t8244 KiB\n")
+    (fd / "9").write_text((fd / "8").read_text())                      # the same client twice: counted once
+    (fd / "3").write_text("pos:\t0\nflags:\t02\n")                    # not a GPU descriptor
+    torch = fake_torch("7.2", free=int(17.9 * GiB), total=32 * GiB, reserved=1)
+    ext.prime(torch)
+    # 0.12: after the one read at load, a reading makes no GPU runtime call on ROCm (two faults at a model load
+    # followed 0.11, which asked torch on every health check)
+    def no_call(*a, **k):
+        raise AssertionError("a GPU runtime call from the health check")
+    for name in ("is_available", "device_count", "get_device_properties", "memory_reserved", "mem_get_info"):
+        setattr(torch.cuda, name, no_call)
+    d = ext.devices(torch, sysfs=str(tmp_path), fdinfo=str(fd))[0]
     assert d["used"] == int(23.5 * GiB) and d["used"] != 32 * GiB - int(17.9 * GiB)     # not mem_get_info's figure
-    assert d["reserved"] == int(22.8 * GiB) and d["total"] == 32 * GiB
+    assert d["reserved"] == int(22.8 * GiB) // 1024 * 1024 and d["total"] == 32 * GiB    # this process, from the driver
     # no driver file (another platform): unknown, not mem_get_info's undercount
-    assert ext.devices(torch, sysfs=str(tmp_path / "none"))[0]["used"] is None
+    assert ext.devices(torch, sysfs=str(tmp_path / "none"), fdinfo=str(fd))[0]["used"] is None
     # CUDA: mem_get_info is the driver's own figure
+    ext.prime(fake_torch(None, free=4 * GiB, total=12 * GiB, reserved=7 * GiB))
     cuda = ext.devices(fake_torch(None, free=4 * GiB, total=12 * GiB, reserved=7 * GiB), sysfs=str(tmp_path))[0]
-    assert cuda["used"] == 8 * GiB and cuda["total"] == 12 * GiB
+    assert cuda["used"] == 8 * GiB and cuda["total"] == 12 * GiB and cuda["reserved"] == 7 * GiB
+
+
+def test_the_reading_can_be_turned_off_and_the_router_then_asks_nothing_else(monkeypatch):
+    monkeypatch.setenv("COMFYFARM_MEMORY", "0")
+    assert ext.sample() == {"off": True}
+    assert board_mod.from_extension({"off": True}) is None
 
 
 def test_a_broken_gpu_context_does_not_break_the_reading():
     def boom(i):
         raise RuntimeError("HIP error: an illegal memory access")
-    torch = fake_torch("7.2", 0, 0, 0)
-    torch.cuda.get_device_properties = boom
+    torch = fake_torch(None, 0, 0, 0)
+    ext.prime(torch)
+    torch.cuda.mem_get_info = boom
     assert "illegal memory access" in ext.devices(torch)[0]["error"]
     assert board_mod.from_extension({"ram_total": 1, "ram_available": 1, "devices": ext.devices(torch)})["devices"] == []
+    torch.cuda.get_device_properties = boom                         # at load: no devices, no failure
+    assert ext.prime(torch) == []
 
 
 def test_the_board_turns_counters_into_rates_and_hides_old_readings():

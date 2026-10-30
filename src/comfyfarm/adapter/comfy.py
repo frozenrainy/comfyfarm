@@ -210,7 +210,9 @@ class ComfyAdapter:
                 elif str(j.get("device", "")).startswith("error"):
                     why = f"GPU {j['device']}"[:200]
                 mem = memory.from_extension(j.get("memory"))
-                if mem is not None or why is not None:
+                # 0.11+ answers memory itself (also "off"): never ask /system_stats then — ComfyUI asks the GPU for
+                # free memory there, from its server thread, while a job may be loading a model (GPU faults, 10-30)
+                if mem is not None or why is not None or "memory" in j:
                     return why, mem
             r = await self.http.get(f"{base_url}/system_stats", timeout=QUERY_TIMEOUT)
             if r.status_code >= 500:

@@ -19,7 +19,7 @@ from aiohttp import web
 from . import memory, watchdog
 from .allow import from_env, make_middleware
 
-EXT_VERSION = "0.11"
+EXT_VERSION = "0.12"
 
 NODE_CLASS_MAPPINGS = {}
 log = logging.getLogger("comfyfarm.worker")
@@ -198,8 +198,11 @@ def _install_allow():
 def _install_watchdog():
     """GET /comfyfarm/health — the executor thread and the GPU, what /queue cannot tell — and the watchdog that
     exits a process whose executor died (0.9; the router reads the report, older workers by /system_stats); host and
-    GPU memory (0.11, memory.py)."""
+    GPU memory (0.11, memory.py; no GPU runtime call on ROCm from 0.12)."""
     from server import PromptServer
+
+    if memory.enabled():
+        memory.prime()                                       # devices once, now — never from the server thread later
 
     @PromptServer.instance.routes.get("/comfyfarm/health")
     async def comfyfarm_health(request):

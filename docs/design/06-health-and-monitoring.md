@@ -74,8 +74,12 @@ cache and makes a busy host look full), swap total/used and bytes swapped in/out
 two readings — swapping in is what makes a job crawl; "used" stays high long after the pressure is gone), the RSS of
 ComfyUI, and per device the VRAM torch reserved and the VRAM in use **as the driver counts it**. On ROCm that is sysfs
 `mem_info_vram_used` of the device's PCI address: `torch.cuda.mem_get_info` — what ComfyUI's `/system_stats` reports —
-undercounts there (field, R9700: 14.1 GiB against the driver's 23.5 and torch's own 22.8 reserved). An older worker is
-read from `/system_stats`: RAM, and the VRAM ComfyUI reserved — never its `vram_free`. Shown in System → Workers and,
+undercounts there (field, R9700: 14.1 GiB against the driver's 23.5 and torch's own 22.8 reserved). From 0.12 the reading makes **no GPU runtime call on ROCm**:
+the devices are read once when the extension loads (before any job), the device's use from sysfs, and the worker's own
+VRAM from its DRM file descriptors (`/proc/self/fdinfo`, `drm-memory-vram`) — the health check runs on the server's
+thread while the executor may be loading a model ([D-51](decisions.md)). `COMFYFARM_MEMORY=0` on the worker turns the
+reading off. An older worker (0.9–0.10) is read from `/system_stats`: RAM, and the VRAM ComfyUI reserved — never its
+`vram_free`; a worker that reports memory itself (0.11+, also "off") is never asked `/system_stats`. Shown in System → Workers and,
 for the groups a user may use, in the dashboard's group cards; exported with label `worker="<name>"` (devices also
 `device="<index>"`): `comfyfarm_worker_ram_total_bytes`, `…_ram_available_bytes`, `…_swap_total_bytes`,
 `…_swap_used_bytes`, `…_swap_in_bytes_per_second`, `…_swap_out_bytes_per_second`, `…_process_rss_bytes`,
