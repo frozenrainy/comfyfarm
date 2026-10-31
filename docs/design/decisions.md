@@ -348,12 +348,22 @@ torch alone had reserved 22.8; on CUDA it is the driver's figure. Older workers 
 VRAM ComfyUI reserved. Admins see it in System → Workers, users in the cards of the groups they may use. No alert yet:
 its threshold comes from the readings.
 
-**D-51 The health check makes no GPU runtime call on ROCm.** *(field, dev.27)* — After extension 0.11 a worker had two
-GPU faults (illegal memory access, amdgpu page fault) at the same moment — a model loading right after sampling —
-in about 17 runs, none in about 25 before. 0.11 had added torch calls (device properties, the allocator's reserved
-memory) to the health check, which runs on the server's thread while the executor works the GPU. Not proven the
-cause; not worth the risk. → From 0.12 the devices are read once at load; each reading takes the device's use from
+**D-51 The health check makes no GPU runtime call on ROCm.** *(field, dev.27)* — GPU faults (illegal memory access,
+amdgpu page fault) began on a worker in the days extension 0.11 went out, at the moment a model was moved after
+sampling. 0.11 had added torch calls (device properties, the allocator's reserved memory) to the health check, which
+runs on the server's thread while the executor works the GPU. The faults turned out to have another cause (D-52: the
+profile had lost `--disable-async-offload` and two other flags); the change stays as a precaution — a health check has
+no business calling the GPU runtime while a job runs. → From 0.12 the devices are read once at load; each reading takes the device's use from
 sysfs and the worker's own VRAM from its DRM descriptors (`/proc/self/fdinfo`), with no GPU runtime call;
 `COMFYFARM_MEMORY=0` turns it off; a worker that reports memory itself is never asked `/system_stats` (ComfyUI asks
 the GPU there). On CUDA the reading still uses `mem_get_info` and torch's reserved memory. The device check the health
 report has carried since 0.9 (`mem_get_info`) is unchanged.
+
+**D-52 Profiles from a recipe carry over the flags and environment the workers run now.** *(field, dev.27)* — Two builds
+in a row made a worker's next GPU profile from the template alone: the operator's `--disable-smart-memory
+--disable-async-offload --disable-pinned-memory` were gone after the rollout, and for two days the worker hit GPU faults
+(about one run in ten) as models were moved off the GPU; with the flags back, none in 16. The loss was invisible: the
+dialog filled the environment from the template and the allow field, so the new profile looked like the old one.
+→ For each role the dialog takes the profile most of that role's workers are assigned to and shows its extra flags
+and environment (those the template lacks or sets otherwise) in editable fields, prefilled; `COMFYFARM_ALLOW` comes
+from it too. The note of a profile made so says where they came from. Clearing the fields gives the template alone.

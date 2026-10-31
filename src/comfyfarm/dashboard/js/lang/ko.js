@@ -120,6 +120,12 @@ export default {
 
   // ---- system: workers ----
   "Name": "이름", "State": "상태", "GPU": "GPU", "Job": "작업", "Warnings": "경고",
+  "carried over from {name}, the profile the {what} run now — clear to start from the template alone":
+    "{what}가 지금 쓰는 프로필 {name} 에서 이어받음 — 비우면 템플릿 그대로",
+  "no profile assigned to the {what} yet": "{what}에 배정된 프로필이 아직 없음",
+  "Extra ComfyUI flags · {what}": "추가 ComfyUI 플래그 · {what}",
+  "Extra environment · {what}": "추가 환경 변수 · {what}",
+  "flags/environment carried over from {name}": "플래그·환경 변수를 {name} 에서 이어받음",
   "Memory": "메모리", "RAM": "RAM", "Swap": "스왑", "VRAM": "VRAM", "in {in} MB/s · out {out} MB/s": "읽기 {in} MB/s · 쓰기 {out} MB/s",
   "ComfyUI {n} GB": "ComfyUI {n} GB",
   "The device's own use shows from worker extension 0.11 (Build, then a rollout)":

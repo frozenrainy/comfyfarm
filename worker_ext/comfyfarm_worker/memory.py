@@ -11,8 +11,8 @@ Cheap enough for every health check (psutil, a few small /proc and sysfs reads).
 The health check runs on the server's thread while the executor may be loading a model on the GPU. On ROCm the
 reading therefore makes no GPU runtime call at all (0.12): the devices (name, size, PCI address) are read once when
 the extension loads, before any job; the device's use comes from the driver (sysfs mem_info_vram_used) and this
-process's from its DRM file descriptors (/proc/self/fdinfo, drm-memory-vram). Two GPU faults at a model load followed
-0.11, which asked torch on every check (10-29, 10-30) — not proven the cause, not worth the risk. torch.cuda.mem_get_info
+process's from its DRM file descriptors (/proc/self/fdinfo, drm-memory-vram). A health check has no business calling
+the GPU runtime while a job runs (GPU faults that began alongside 0.11 turned out to have another cause, D-52). torch.cuda.mem_get_info
 (what ComfyUI's /system_stats reports) is not used there either: it said 14.1 GiB in use where the driver said 23.5.
 On CUDA the device's use is mem_get_info (the driver's own figure) and this process's what torch reserved.
 COMFYFARM_MEMORY=0 turns the reading off.

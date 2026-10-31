@@ -154,6 +154,9 @@ environment). The token value itself is refused: it would be stored in the ledge
    rollout history keeps its name, and the name is free again. A profile stays while it is assigned, a worker runs it
    (its command line matches the render — an assignment without a restart is not what runs) or an active rollout uses
    it; the *In use* column says which ([D-47](../design/decisions.md)).
+   *Profiles from a recipe* makes the next profiles from a build's template — and carries over the extra ComfyUI
+   flags and environment of the profile each role runs now (the one most of its workers are assigned to): they are
+   shown in the dialog, editable, and cleared to start from the template alone ([D-52](../design/decisions.md)).
 3. First start: *Assign* the current profile (no restart), start the unit on the host, wait for the badge `match`.
 4. Upgrades: *Start rollout* — the worker is drained (its running job finishes), restarted through the backend, must be
    seen going down, must come back with exactly the new argv (badge `match`) — a ComfyUI that dies as it starts

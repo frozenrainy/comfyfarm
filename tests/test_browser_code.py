@@ -177,3 +177,47 @@ console.log(JSON.stringify(out));
     assert "staged.splice(i, 1); renderUploads(); }), " not in models     # the old Clear (everything not uploading)
     # the groups ticked are this batch's: taken at its start, not read again while it runs
     assert "const grp = (batchGroups || []).map(Number);\n    batchGroups = null;" in models
+
+
+PROFILE_CARRY = (ROOT / "src" / "comfyfarm" / "dashboard" / "js" / "profile_carry.js").as_uri()
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
+def test_profiles_from_a_recipe_carry_the_flags_the_workers_run_now():
+    """Field (dev.25–27): two builds in a row made GPU profiles from the template alone; the operator's
+    --disable-smart-memory --disable-async-offload --disable-pinned-memory were gone after the next rollout, and the
+    worker hit GPU faults for two days. The environment looked carried (the template and the allow field fill it)."""
+    script = f'import {{ carried, currentProfile, merged, parseEnv, envText }} from "{PROFILE_CARRY}";' + """
+const D = ["--disable-smart-memory", "--disable-async-offload", "--disable-pinned-memory"];
+const profiles = [
+  { id: 43, name: "rocm-17-gpu", flags: D, env: { COMFYFARM_ALLOW: "10.0.0.10", HSA_TOOLS_DISABLE_REGISTER: "1", PYTORCH_X: "1" } },
+  { id: 44, name: "rocm-17-ui", flags: ["--cpu", "--preview-method", "auto"], env: { COMFYFARM_ALLOW: "10.0.0.10" } },
+  { id: 40, name: "rocm-15-gpu", flags: [], env: {} },
+];
+const insts = [
+  { instance: { role: "gpu", profile_id: 43 } }, { instance: { role: "gpu", profile_id: 43 } },
+  { instance: { role: "gpu", profile_id: 40 } }, { instance: { role: "ui", profile_id: 44 } }, { instance: null },
+];
+const tpl = { gpu: { flags: [], env: { HSA_TOOLS_DISABLE_REGISTER: "1" } }, ui: { flags: ["--cpu"], env: {} } };
+const out = {};
+const g = currentProfile("gpu", insts, profiles), u = currentProfile("ui", insts, profiles);
+out.cur = [g && g.name, u && u.name];
+const cg = carried(g, tpl.gpu), cu = carried(u, tpl.ui);
+out.carried = [cg, cu];
+out.gpu = merged(tpl.gpu, cg, cg.allow);
+out.ui = merged(tpl.ui, cu, "");
+out.none = carried(currentProfile("gpu", [], profiles), tpl.gpu);
+out.roundtrip = parseEnv(envText({ A: "1", B: "x=y" }));
+out.oldWay = { flags: tpl.gpu.flags };                         // what the dialog made before: the template alone
+console.log(JSON.stringify(out));
+"""
+    o = json.loads(subprocess.run(["node", "--input-type=module", "-e", script], capture_output=True, text=True,
+                                  check=True, cwd=ROOT).stdout)
+    D = ["--disable-smart-memory", "--disable-async-offload", "--disable-pinned-memory"]
+    assert o["cur"] == ["rocm-17-gpu", "rocm-17-ui"]                       # what most GPU instances run
+    assert o["gpu"]["flags"] == D and o["oldWay"]["flags"] == []          # the flags go on; before, they were gone
+    assert o["gpu"]["env"] == {"HSA_TOOLS_DISABLE_REGISTER": "1", "PYTORCH_X": "1", "COMFYFARM_ALLOW": "10.0.0.10"}
+    assert o["carried"][0]["env"] == {"PYTORCH_X": "1"}                    # only what the template lacks; ALLOW apart
+    assert o["ui"]["flags"] == ["--cpu", "--preview-method", "auto"]      # the template's --cpu once, then the extras
+    assert o["none"] == {"flags": [], "env": {}, "allow": ""}             # nothing assigned yet: the template alone
+    assert o["roundtrip"] == {"A": "1", "B": "x=y"}

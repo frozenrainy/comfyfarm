@@ -16,6 +16,7 @@ function stepDetail(d) {
 import { act, api, bar, button, formDialog, h, namedRow, pill, qs, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
 import { checkDetail, checkHost } from "./setup.js";
 import { bytes, pickFiles, uploadFile } from "../upload.js";
+import { carried, currentProfile, envText, flagsText, merged, parseEnv, parseFlags } from "../profile_carry.js";
 
 const ACTIVE = ["running", "aborting", "interrupted"];
 const PATHS = [["art", "Artifact store <ART>"], ["local", "Local root <LOCAL>"], ["models", "Models directory"],
@@ -264,6 +265,21 @@ export function rollout(root, { refresh }) {
       const host = last ? new URL(last.spec.router_url).hostname : "";
       if (/^[0-9.]+$/.test(host)) allow = host;                 // the allow-list takes addresses, not names
     } catch { /* a guess only */ }
+    // what the operator added to the profiles the workers run now goes on (field: two builds dropped the GPU flags)
+    const deflt = templates.some((x) => x.template === pick) ? templates.find((x) => x.template === pick) : templates[templates.length - 1];
+    const cur = { gpu: currentProfile("gpu", insts, profiles), ui: currentProfile("ui", insts, profiles) };
+    const carry = { gpu: carried(cur.gpu, deflt.gpu), ui: carried(cur.ui, deflt.ui) };
+    allow = carry.gpu.allow || carry.ui.allow || allow;
+    const carryFields = ["gpu", "ui"].flatMap((role) => {
+      const what = role === "gpu" ? t("GPU workers") : t("UI worker");
+      const from = cur[role] ? t("carried over from {name}, the profile the {what} run now — clear to start from the template alone",
+                                 { name: cur[role].name, what }) : t("no profile assigned to the {what} yet", { what });
+      return [
+        { name: `${role}_flags`, label: t("Extra ComfyUI flags · {what}", { what }), value: flagsText(carry[role].flags), hint: from },
+        { name: `${role}_env`, label: t("Extra environment · {what}", { what }), type: "textarea", rows: 2,
+          value: envText(carry[role].env), hint: from },
+      ];
+    });
     const v = await formDialog(via ? t("Profiles from a recipe (read through {name})", { name: via.worker }) : t("Profiles from a recipe"), [
       { name: "template", label: t("Template"), type: "select",
         hint: (() => { const r = builds.find((x) => x.state === "running"); return r ? t("A build of {recipe} is running: its template appears here when it is done", r) : ""; })(),
@@ -274,6 +290,7 @@ export function rollout(root, { refresh }) {
       { name: "allow", label: "COMFYFARM_ALLOW", value: allow,
         tip: t("Optional: addresses the workers take requests from, added to what setup allowed on each host (the router's address). Leave it empty unless a worker reaches the router or the gateway over another address."),
         hint: t("optional — usually empty: setup already lets the router and the gateway in on each host") },
+      ...carryFields,
       ...(buildable.length ? [{ name: "build", type: "checkbox", value: false, label: t("Build"),
                                text: t("Build the chosen template's recipe again on {name} first", { name: where }),
                                tip: t("Makes a new template instead of using one of these: after adding or updating node packs, or after a ComfyFarm upgrade that changed the recipe. The build takes minutes; its profiles then roll out like any.") }] : []),
@@ -285,10 +302,12 @@ export function rollout(root, { refresh }) {
     for (const [role, what] of [["gpu", t("GPU workers")], ["ui", t("UI worker")]]) {
       if (!tpl[role]) continue;                                // a template may hold one half (the first start's: UI only)
       const name = `${tpl.template}-${role}`, p = tpl[role];
+      const m = merged(p, { flags: parseFlags(v[`${role}_flags`]), env: parseEnv(v[`${role}_env`]) }, v.allow);
       try {
         await api("POST", "/api/admin/profiles", {
-          name, core: p.core, venv: p.venv, nodes: p.nodes, frontend: null, flags: p.flags || [],
-          env: { ...(p.env || {}), ...(v.allow.trim() ? { COMFYFARM_ALLOW: v.allow.trim() } : {}) }, note: `${what} · ${tpl.template}` });
+          name, core: p.core, venv: p.venv, nodes: p.nodes, frontend: null, flags: m.flags, env: m.env,
+          note: `${what} · ${tpl.template}` + (cur[role] && (m.flags.length > (p.flags || []).length || Object.keys(m.env).length > Object.keys(p.env || {}).length)
+            ? ` · ${t("flags/environment carried over from {name}", { name: cur[role].name })}` : "") });
         made.push(name);
       } catch (e) {
         if (e.status === 409) { kept.push(name); continue; }      // a second click, or half of a pair
