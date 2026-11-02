@@ -33,6 +33,7 @@ class Reconciler:
         self.busy = BusyLog(log, "reconcile")
         self.posting = posting if posting is not None else {}    # the dispatcher's: jobs this process is POSTing now
         self.collected: dict[int, float] = {}                    # job id → when its outputs were read from /history
+        self.readopt_done: set[int] = set()                      # lost jobs their worker does not know (D-54)
 
     async def run(self):
         while True:
@@ -67,6 +68,12 @@ class Reconciler:
             self.wake.set()
         await self.collect_outputs()
         try:
+            await self.readopt()
+        except Busy:
+            raise
+        except Exception:
+            log.exception("re-adopting lost jobs failed")
+        try:
             if await retry_gpu_faults(self.db, self.s.retry_gpu_faults) and self.wake:     # D-44
                 self.wake.set()
         except Busy:
@@ -91,6 +98,51 @@ class Reconciler:
                 await c.execute("UPDATE jobs SET outputs = coalesce(outputs, '{}'::jsonb) || $2::jsonb WHERE id = $1",
                                 r["id"], outputs if isinstance(outputs, dict) else {})
             self.collected[r["id"]] = time.monotonic()                  # asked once per process, answer or not
+
+    async def readopt(self):
+        """D-54: a job failed as lost because its worker stopped answering (a host swapping to a crawl) may still be
+        running there — field (10-31): the job failed in the ledger while ComfyUI went on with it, and the dashboard
+        showed nothing of it. When the worker answers again it is asked: still running or queued → running again (lost
+        again later, asked again); finished → the worker's outcome; unknown there → really lost, not asked again. Not
+        when the job was retried (D-44) — the retry stands — nor after 24 hours."""
+        async with self.db.conn() as c:
+            rows = [dict(r) for r in await c.fetch(
+                "SELECT j.id, j.prompt_id, j.worker_id, w.base_url, coalesce((w.capabilities->>'jobs_api')::boolean, true) AS jobs_api "
+                "FROM jobs j JOIN workers w ON w.id = j.worker_id "
+                "WHERE j.status = 'failed' AND j.error->>'kind' IN ('worker_lost', 'lost') AND j.deleted_at IS NULL "
+                "AND j.finished_at > now() - interval '24 hours' AND w.state = 'online' AND w.enabled AND w.deleted_at IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM jobs k WHERE k.retry_of = j.id) AND NOT (j.id = ANY($1)) "
+                "ORDER BY j.finished_at DESC LIMIT 10", list(self.readopt_done))]
+        for r in rows:
+            ans = await self.adapter.job_state(r["base_url"], str(r["prompt_id"]), r["jobs_api"])
+            if ans is None or isinstance(ans, NoAnswer):
+                continue                                         # busy again: ask next tick
+            async with self.db.conn() as c:
+                async with c.transaction():
+                    match ans.status:
+                        case "pending" | "in_progress":
+                            if await transition(c, r["id"], "running", ("failed",), f"re-adopted: the worker still has it "
+                                                f"({ans.status})", error=None, finished_at=None):
+                                log.info("job %s re-adopted: the worker still has it (%s)", r["id"], ans.status)
+                                # the worker is busy with it: no new job on top (one already sent there stays queued behind)
+                                await c.execute("UPDATE workers SET current_job_id = $2 WHERE id = $1 AND current_job_id IS NULL",
+                                                r["worker_id"], r["id"])
+                                if self.wake:
+                                    self.wake.set()
+                        case "completed":
+                            await c.execute("UPDATE jobs SET finished_at = NULL WHERE id = $1 AND status = 'failed'", r["id"])
+                            if await transition(c, r["id"], "completed", ("failed",), "re-adopted: the worker finished it",
+                                                error=None):
+                                log.info("job %s re-adopted: the worker finished it after all", r["id"])
+                        case "cancelled":
+                            await transition(c, r["id"], "cancelled", ("failed",), "re-adopted: cancelled on the worker",
+                                             error=None)
+                        case "failed":
+                            await c.execute("UPDATE jobs SET error = $2 WHERE id = $1 AND status = 'failed'", r["id"],
+                                            error_doc("execution", "execution error on the worker",
+                                                      detail=ans.raw.get("execution_error")))
+                        case _:                                  # the worker does not know it: it really is lost —
+                            self.readopt_done.add(r["id"])       # not asked again (any other answer moves it out of the query)
 
     async def _ask(self, r: dict, now: datetime):
         if r["wid"] is None or r["deleted_at"] is not None or not r["enabled"]:

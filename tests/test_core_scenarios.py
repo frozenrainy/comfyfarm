@@ -496,3 +496,80 @@ async def test_migrations_do_not_block_submits(router_factory):
         assert created
     finally:
         await other.close()
+
+
+async def _as_lost(r, pid, kind="worker_lost", age="0 seconds"):
+    """What D-06b leaves behind when the worker stopped answering: failed, the worker freed."""
+    async with r.db.conn() as c:
+        jid = await c.fetchval(
+            "UPDATE jobs SET status = 'failed', error = $2::jsonb, finished_at = now() - $3::text::interval "
+            "WHERE prompt_id = $1 RETURNING id", uuid.UUID(pid),
+            jobsvc.error_doc(kind, "worker lost"), age)
+        await c.execute("UPDATE workers SET current_job_id = NULL WHERE current_job_id = $1", jid)
+    return jid
+
+
+async def test_lost_job_still_running_on_the_worker_is_readopted(router_factory, fakes):
+    """D-54: failed as worker_lost while the worker was swapping to a crawl, but it ran on there → running again, then
+    the worker's outcome; the worker counts as busy with it again."""
+    w = await fakes()
+    r = await router_factory()
+    _, wid = await add_worker(r, w.url)
+    pid = await submit(r, 40, prompt=tiny(40, blur=25, size=2048))      # fake: one 4 s step
+    await wait_status(r, pid, "running")
+    jid = await _as_lost(r, pid)
+    job = await wait_status(r, pid, "running", timeout=10)
+    assert job["error"] is None
+    async with r.db.conn() as c:
+        assert await c.fetchval("SELECT current_job_id FROM workers WHERE id = $1", wid) == jid
+    await _as_lost(r, pid)                                               # a flapping host: lost again, taken back again
+    await wait_status(r, pid, ("running", "completed"), timeout=10)
+    job = await wait_status(r, pid, "completed", timeout=20)
+    assert job["error"] is None
+    ev = await reasons(r, pid)
+    assert any(st == "running" and why.startswith("re-adopted") for st, why in ev)
+    assert sum(why.startswith("re-adopted") for _, why in ev) == 2, ev
+    assert w.fake.post_log == [pid]                                      # never sent again
+
+
+async def test_lost_job_finished_on_the_worker_is_completed(router_factory, fakes):
+    w = await fakes()
+    r = await router_factory()
+    await add_worker(r, w.url)
+    pid = await submit(r, 41)
+    await wait_status(r, pid, "completed")
+    await _as_lost(r, pid, kind="lost")
+    job = await wait_status(r, pid, "completed", timeout=10)
+    assert job["error"] is None
+    async with r.db.conn() as c:
+        assert await c.fetchval("SELECT finished_at FROM jobs WHERE prompt_id = $1", uuid.UUID(pid)) is not None
+        await c.execute("UPDATE jobs SET outputs = NULL WHERE prompt_id = $1", uuid.UUID(pid))   # as a lost job has none
+    r.reconciler.collected.clear()
+    for _ in range(40):                                                  # and its outputs are read from the worker
+        async with r.db.conn() as c:
+            if await c.fetchval("SELECT outputs FROM jobs WHERE prompt_id = $1", uuid.UUID(pid)):
+                break
+        await asyncio.sleep(0.25)
+    else:
+        raise AssertionError("outputs of the re-adopted job were never collected")
+
+
+async def test_lost_job_is_not_readopted_when_retried_or_old_or_unknown(router_factory, fakes):
+    """The retry stands (D-44); after a day it is left alone; a job the worker does not know really is lost."""
+    w = await fakes()
+    r = await router_factory()
+    await add_worker(r, w.url)
+    retried = await submit(r, 42); await wait_status(r, retried, "completed")
+    old = await submit(r, 43); await wait_status(r, old, "completed")
+    forgot = await submit(r, 44); await wait_status(r, forgot, "completed")
+    async with r.db.conn() as c:
+        rid = await c.fetchval("SELECT id FROM jobs WHERE prompt_id = $1", uuid.UUID(retried))
+    assert await jobsvc.retry(r.db, rid)                                  # retried before it is marked lost
+    await _as_lost(r, retried)
+    await _as_lost(r, old, age="25 hours")
+    await _as_lost(r, forgot)
+    w.fake.history.pop(forgot, None); w.fake.jobs.pop(forgot, None)
+    await asyncio.sleep(3)                                               # several reconcile periods
+    for pid in (retried, old, forgot):
+        job = await wait_status(r, pid, "failed", timeout=1)
+        assert job["error"]["kind"] in ("worker_lost", "lost"), (pid, job["error"])
