@@ -32,6 +32,28 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from .identity import Identity, read_session, sign_session
 
 log = logging.getLogger(__name__)
+
+
+class UpstreamFailures:
+    """The 502s the gateway answers itself (the upstream did not answer) go to its log — before, only the browser saw
+    them, and "Bad Gateway" with nothing in any log sent the search the wrong way (10-31: it was the browser's VPN,
+    but nothing here could say "the gateway never failed to reach anything"). Once a minute per upstream and kind of
+    failure, with how many were folded in: a dead UI worker asked by every open tab must not flood the log."""
+
+    def __init__(self, every: float = 60.0, clock=time.monotonic):
+        self.every, self.clock = every, clock
+        self.seen: dict[tuple[str, str], list] = {}          # (upstream, kind) → [last logged at, folded since]
+
+    def note(self, base: str, method: str, path: str, e: Exception):
+        key, now = (base, type(e).__name__), self.clock()
+        last = self.seen.get(key)
+        if last is not None and now - last[0] < self.every:
+            last[1] += 1
+            return
+        folded = last[1] if last else 0
+        self.seen[key] = [now, 0]
+        log.warning("502 for %s %s: upstream %s did not answer (%s: %s)%s", method, path, base, key[1],
+                    str(e)[:200] or "-", f" — {folded} more like it since the last report" if folded else "")
 SESSION_TTL = 30.0          # seconds a confirmed session is trusted before the router is asked again (D-35)
 
 
@@ -167,6 +189,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
     http = httpx.AsyncClient(timeout=timeout)                                                    # the router
     upstream = httpx.AsyncClient(timeout=timeout, limits=httpx.Limits(max_connections=s.upstream_max_connections))
     comfy_user_lock = asyncio.Lock()
+    failures = UpstreamFailures()
 
     # ---- identity ----------------------------------------------------------------------------------------------
     session_cache: dict[tuple, tuple[float, frozenset]] = {}
@@ -286,6 +309,7 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         try:
             up = await client.send(req, stream=True)
         except httpx.HTTPError as e:
+            failures.note(base, request.method, request.url.path, e)
             return JSONResponse({"error": f"upstream unavailable: {type(e).__name__}"}, status_code=502)
         try:
             if miss is not None and up.status_code == miss:

@@ -35,6 +35,7 @@ class UIStub:
     def __init__(self):
         self.users, self.seen = {}, []
         self.refuse = False                                      # behave like a worker whose allow-list lacks the gateway
+        self.drop = False                                        # hang up without answering (a worker dying mid-request)
         self.app = web.Application()
         self.app.router.add_get("/", self.index)
         self.app.router.add_get("/api/users", self.get_users)
@@ -46,6 +47,9 @@ class UIStub:
         self.views = []
 
     async def index(self, r):
+        if self.drop:
+            r.transport.close()
+            await asyncio.sleep(0.1)
         self.seen.append(dict(r.headers)); return web.Response(text="<html>stock frontend</html>", content_type="text/html")
 
     async def get_users(self, r):
@@ -651,3 +655,32 @@ async def test_upstream_closed_when_the_browser_is_gone_before_the_first_byte():
         with pytest.raises(gone_errors):
             await UpstreamResponse(up, 200)(scope, receive, gone)
         assert up.is_closed
+
+
+async def test_a_502_the_gateway_answers_itself_is_in_its_log(farm, caplog):
+    """Before: only the browser saw it. Now the gateway says which upstream did not answer — once, however many tabs ask."""
+    gw = farm["gw"]
+    async with httpx.AsyncClient() as c:
+        await login(c, gw, "alice", "pw-alice")
+        assert (await c.get(f"{gw}/")).status_code == 200
+        assert not [x for x in caplog.records if "502 for" in x.getMessage()]        # nothing when nothing failed
+        farm["ui"].drop = True
+        for _ in range(3):
+            assert (await c.get(f"{gw}/")).status_code == 502
+    lines = [x for x in caplog.records if "502 for" in x.getMessage()]
+    assert len(lines) == 1 and farm["ui_url"] in lines[0].getMessage() and "GET /" in lines[0].getMessage()
+
+
+def test_upstream_failures_fold_repeats_and_count_them(caplog):
+    from comfyfarm.gateway import UpstreamFailures
+    t = [0.0]
+    f = UpstreamFailures(every=60, clock=lambda: t[0])
+    e = httpx.ConnectError("refused")
+    f.note("http://w1", "GET", "/a", e); f.note("http://w1", "GET", "/b", e); f.note("http://w1", "GET", "/c", e)
+    f.note("http://w2", "GET", "/a", e)                                             # another upstream: its own report
+    f.note("http://w1", "GET", "/a", httpx.ReadTimeout("slow"))                     # another kind: its own report
+    t[0] = 61
+    f.note("http://w1", "GET", "/d", e)
+    msgs = [x.getMessage() for x in caplog.records if "502 for" in x.getMessage()]
+    assert len(msgs) == 4, msgs
+    assert "2 more like it" in msgs[-1] and "more like it" not in msgs[0]
