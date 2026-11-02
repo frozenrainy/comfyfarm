@@ -78,6 +78,8 @@ function warnText(x) {
 const head = (title, ...right) => h("div", { class: "section-head" }, h("h2", {}, title), ...right);
 
 // ---- workers ------------------------------------------------------------------------------------------------------
+const RESET_STATE = { restarting: "asking its host to restart it", down: "stopping", starting: "starting",
+                      done: "done", failed: "failed" };
 function workers(root, { refresh }) {
   let groupList = [];
   const cols = ["name", "group", "state", "gpu", "memory", "job", "warnings", "note", "actions"];
@@ -101,7 +103,7 @@ function workers(root, { refresh }) {
       "Delete keeps the worker's history."))));
 
   function build() {
-    const tr = namedRow(cols, { name: "nowrap", memory: "memory", actions: "actions" });
+    const tr = namedRow(cols, { name: "nowrap", memory: "memory", actions: "actions wrap" });
     const id = () => tr._item.id;
     tr.sel = h("select", { onchange: () => patch(id(), { group: tr.sel.value }, t("Group changed")) });
     tr.uiNote = h("span", { class: "muted", hidden: true }, t("UI worker"));
@@ -130,8 +132,25 @@ function workers(root, { refresh }) {
       if (!s) return toast(t("this worker was not set up from the dashboard — Set up a worker, with another name"), true);
       setupWorker(refresh, { worker_id: id(), spec: s.spec, extra: s.extra });
     });
+    // D-53: a worker too busy to answer cannot cancel its job or drain — end its jobs now, restart it through its host
+    tr.reset = button(t("Force reset"), async () => {
+      const w = tr._item;
+      const p = await act(() => api("GET", `/api/admin/workers/${id()}/force-reset`));
+      if (!p) return;
+      if (p.running) return toast(t("a reset of this worker is under way"), true);
+      const lines = [t("Force reset {name}?", w), "",
+        p.jobs.length ? t("These jobs end now, as cancelled:") : t("No job of its is running."),
+        ...p.jobs.map((j) => `  · ${j.owner} · ${j.title || j.prompt_id.slice(0, 8)} (${t(j.status)})`), "",
+        t("Its ComfyUI is then restarted through its host — whatever it holds goes: the job, its queue, RAM and VRAM. " +
+          "No new job is sent to it until it answers again."),
+        ...(p.command ? ["", t("Its restart is manual — run this on the host now:"), `  ${p.command}`] : []),
+        ...(p.rollout ? ["", t("Rollout #{id} is working on this worker; it stays in charge of maintenance.", { id: p.rollout })] : [])];
+      if (!confirm(lines.join("\n"))) return;
+      act(() => api("POST", `/api/admin/workers/${id()}/force-reset`),
+        (r) => t("Reset started — {n} job(s) cancelled", { n: r.cancelled.length }), refresh);
+    }, { cls: "danger", title: t("When the worker is too busy to answer: end its jobs now and restart its ComfyUI") });
     tr.again = again;
-    tr.c.actions.append(tr.maint, tr.enable, again, edit, del);
+    tr.c.actions.append(tr.maint, tr.enable, tr.reset, again, edit, del);
     return tr;
   }
   function update(tr, w) {
@@ -161,10 +180,17 @@ function workers(root, { refresh }) {
     const frac = w.job ? progressOf(w.job.progress) : null;
     setText(c.job, w.job ? `${w.job.owner} · ${w.job.prompt_id.slice(0, 8)}${frac != null ? ` · ${Math.round(frac * 100)}%` : ""}`
       : w.state === "online" && w.enabled && !w.maintenance ? t("idle") : "");
-    const ws = w.warnings.join("\n");
+    tr.reset.hidden = !w.has_instance;                   // nothing to restart it through (Rollout → Instances)
+    const rs = w.reset, busy = rs && ["restarting", "down", "starting"].includes(rs.state);
+    tr.reset.disabled = !!busy;
+    const ws = w.warnings.join("\n") + (rs ? `|${rs.state}|${rs.detail}|${rs.command}` : "");
     if (c.warnings.dataset.v !== ws) {
       c.warnings.dataset.v = ws;
-      c.warnings.replaceChildren(...(w.warnings.length ? [h("ul", { class: "warnings" }, ...w.warnings.map((x) => h("li", {}, warnText(x))))] : []));
+      const items = w.warnings.map((x) => h("li", {}, warnText(x)));
+      if (rs) items.unshift(h("li", { class: rs.state === "failed" ? "bad" : "" },
+        `${t("Force reset")}: `, pill(rs.state, t(RESET_STATE[rs.state] || rs.state)), ` ${rs.detail || ""}`,
+        ...(busy && rs.command ? [h("br"), t("run on the host:"), " ", h("code", {}, rs.command.split("  (")[0])] : [])));
+      c.warnings.replaceChildren(...(items.length ? [h("ul", { class: "warnings" }, ...items)] : []));
     }
     syncNote(tr.note, w.note);
     setText(tr.maint, w.maintenance ? t("End maintenance") : t("Maintenance"));

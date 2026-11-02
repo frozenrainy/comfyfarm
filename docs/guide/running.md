@@ -55,4 +55,15 @@ A job that crawls while swap is read at tens of MB/s does not fit in that host's
 need worker extension 0.11 (*Build*, then roll the GPU and UI profiles out); until then RAM shows from ComfyUI's own
 report. The same numbers are on `/metrics` (`comfyfarm_worker_*`) for a history in Prometheus/Grafana.
 
+**A worker too busy to answer** (a workflow that swaps its host to a crawl, a ComfyUI that no longer responds):
+System → Workers → *Force reset* ends its jobs at once (they show as cancelled), keeps new jobs away and restarts its
+ComfyUI through the host's agent — no shell needed ([D-53](../design/decisions.md)). The row shows the restart until it
+is back; with the manual restart backend it shows the command to run on the host. If a job failed as *worker lost*
+but the worker had kept running it, the router notices when the worker answers again and takes the job back
+([D-54](../design/decisions.md)).
+
+**502 Bad Gateway**: the gateway logs each upstream that did not answer (`gateway.log`, at most once a minute per
+upstream and error). A 502 in the browser with no such line did not come from the gateway — look at what sits between
+the browser and it (a proxy, a VPN).
+
 Backups: [backup.md](backup.md). Upgrading workers: [rollouts.md](rollouts.md).

@@ -246,7 +246,8 @@ def make_router(ctx: Ctx) -> APIRouter:
         ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
             rows = await c.fetch("SELECT w.*, g.name AS group_name, comfyfarm_satisfies(w.capabilities, g.requirements) AS fits, "
-                                 "j.prompt_id AS job_prompt_id, j.owner AS job_owner, j.progress AS job_progress "
+                                 "j.prompt_id AS job_prompt_id, j.owner AS job_owner, j.progress AS job_progress, "
+                                 "EXISTS (SELECT 1 FROM instances i WHERE i.worker_id = w.id) AS has_instance "
                                  "FROM workers w LEFT JOIN worker_groups g ON g.id = w.group_id "
                                  "LEFT JOIN jobs j ON j.id = w.current_job_id WHERE w.deleted_at IS NULL ORDER BY w.name")
         streams = router.events.streams
@@ -282,6 +283,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                         "builtin": bool(ctx.settings.ui_service) and r["base_url"].rstrip("/") == ctx.settings.ui_service.rstrip("/"),
                         "vram_gb": round(vram / 2**30, 1) if vram else None, "comfyui": caps.get("comfyui"),
                         "memory": router.health.memory.view(r["id"]),
+                        "reset": router.rollout.reset_view(r["id"]), "has_instance": r["has_instance"],
                         "capabilities": caps,
                         "job": {"prompt_id": str(r["job_prompt_id"]), "owner": r["job_owner"], "progress": r["job_progress"]}
                         if r["job_prompt_id"] else None})
@@ -358,6 +360,29 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(404, "not found")
         router.dispatcher.wake.set()
         return {"changed": True}
+
+    # D-53: a worker too busy to answer — its jobs end now, its ComfyUI restarts through the host's agent
+    @api.get("/api/admin/workers/{worker_id}/force-reset")
+    async def force_reset_preview(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
+        ctx.admin(x_comfyfarm_user)
+        try:
+            p = await router.rollout.reset_preview(worker_id)
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        p.pop("_row", None)
+        return p
+
+    @api.post("/api/admin/workers/{worker_id}/force-reset")
+    async def force_reset(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
+        who = ctx.admin(x_comfyfarm_user)
+        try:
+            r = await router.rollout.force_reset(worker_id, who)
+        except LookupError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        router.dispatcher.wake.set()                     # pending jobs may go elsewhere now
+        return r
 
     @api.delete("/api/admin/workers/{worker_id}")
     async def delete_worker(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):

@@ -367,3 +367,27 @@ dialog filled the environment from the template and the allow field, so the new 
 → For each role the dialog takes the profile most of that role's workers are assigned to and shows its extra flags
 and environment (those the template lacks or sets otherwise) in editable fields, prefilled; `COMFYFARM_ALLOW` comes
 from it too. The note of a profile made so says where they came from. Clearing the fields gives the template alone.
+
+**D-53 A worker too busy to answer can be force-reset from the dashboard.** *(field, dev.29)* — A heavy workflow
+can push a host into swap until its ComfyUI answers nothing in time: the job cannot be cancelled (the cancel is a
+request to that ComfyUI), a rollout's restart waits for a drain that never comes, and the only way out was a shell on
+the host. → System → Workers → *Force reset*: the dialog lists the worker's jobs (dispatching, running, cancelling);
+on confirmation they end in the ledger at once as `cancelled` (error kind `force_reset`, in one transaction with the
+audit record), the worker goes into maintenance so nothing new is sent to it, and its ComfyUI is restarted through
+its instance's restart backend — the host's agent does not need ComfyUI to answer. The row shows the reset going
+down, starting, done or failed; maintenance is lifted when it answers again, unless an administrator had set it or a
+rollout on that worker owns it (D-46). With the manual backend the dialog and the row give the command to run on the
+host. A worker without an instance has no button: there is nothing to restart it through.
+
+**D-54 A job failed as lost is re-adopted when its worker turns out to have kept it.** *(field, dev.29)* — A worker
+swapping to a crawl misses its health checks for longer than `worker_lost_after`; its job fails as `worker_lost`
+(D-06b) while ComfyUI goes on running it — invisible in the dashboard, its outputs never collected. → When the worker is online again, each job failed as `worker_lost` or `lost` on it in the last 24 hours is
+asked about: still queued or running → `running` again (error cleared; the worker is busy with it again); finished
+→ `completed` and its outputs are collected; cancelled or failed there → that outcome. Not when the job has been retried
+(the retry stands, D-44), not after 24 hours, and a job the worker does not know stays lost.
+
+**D-55 The gateway logs the 502s it answers itself.** *(field, dev.29)* — "Bad Gateway" in a browser with nothing in
+any log sent a search the wrong way (it was a VPN in the browser): nothing could say that the gateway had never failed
+to reach anything. → When an upstream (router, UI worker, a worker serving a file) does not answer, the gateway logs
+a warning with the request and the error — once a minute per upstream and kind of error, with how many more were folded
+in. No line means the 502 did not come from this gateway.

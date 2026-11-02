@@ -84,6 +84,8 @@ tbody tr:last-child td { border-bottom: 0; }
 td.num { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
 td.actions { white-space: nowrap; text-align: right; }
 td.actions button + button { margin-left: .25rem; }
+td.actions.wrap { white-space: normal; min-width: 14rem; }       /* six buttons: two rows, never cut off */
+td.actions.wrap button { margin: .12rem 0 .12rem .25rem; }
 td.nowrap { white-space: nowrap; }
 td.result { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 img.thumb, video.thumb { height: 2.5rem; max-width: 5rem; object-fit: cover; border-radius: 3px; vertical-align: middle; display: inline-block; }
@@ -180,7 +182,7 @@ th.pick, td.pick { width: 1.6rem; text-align: center; }
 tr.folder-row td { background: var(--panel); border-top: 1px solid var(--line); }
 button.fold { background: none; border: 0; padding: .1rem 0; font: inherit; font-weight: 600; color: var(--text); cursor: pointer; }
 .s-match, .s-done, .s-succeeded { color: var(--ok); }
-.s-differs, .s-reverted, .s-interrupted, .s-aborting, .s-reverting, .s-fetching, .s-draining, .s-restarting, .s-starting, .s-verifying { color: var(--amber); }
+.s-differs, .s-reverted, .s-interrupted, .s-aborting, .s-reverting, .s-fetching, .s-draining, .s-restarting, .s-down, .s-starting, .s-verifying { color: var(--amber); }
 .s-revert_failed, .s-aborted { color: var(--bad); }
 .s-unassigned, .s-skipped { color: var(--muted); }
 .checks { display: flex; flex-wrap: wrap; gap: .3rem .9rem; }
@@ -253,3 +255,4 @@ td.memory, th.memory { min-width: 17rem; }
 .card .members { margin-top: .6rem; border-top: 1px solid var(--line); padding-top: .5rem; }
 .card .members > div + div { margin-top: .5rem; }
 .card .members .who { font-weight: 600; }
+.warnings li.bad { color: var(--bad); }

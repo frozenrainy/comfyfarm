@@ -806,3 +806,50 @@ async def test_profiles_in_the_rollout_history_can_be_deleted_and_several_at_onc
     assert (await api.post("/api/admin/profiles/delete", json={"ids": "1"}, headers=H)).status_code == 400
     actions = [a["action"] for a in (await api.get("/api/admin/audit", headers=H)).json()]
     assert actions.count("profile deleted") == 1
+
+
+async def test_force_reset_ends_the_jobs_now_and_restarts_through_the_agent(farm):
+    """D-53, field: a heavy run swapped the host to a crawl; the worker answered nothing, the job could not be
+    cancelled nor the worker drained for a restart — someone had to log in to the host."""
+    api, r = farm["api"], farm["router"]
+    pid = (await api.post("/api/prompt", json={"prompt": tiny(2, blur=60), "comfyfarm_group": farm["gid"]}, headers=H)).json()["prompt_id"]
+    await wait_status(r, pid, "running")
+    h = next(x for x in farm["hosts"].values() if x.worker and pid in x.worker.post_log)
+    before = h.restarts
+    pre = (await api.get(f"/api/admin/workers/{h.wid}/force-reset", headers=H)).json()
+    assert [j["prompt_id"] for j in pre["jobs"]] == [pid] and pre["command"].startswith("systemctl restart comfyfarm@")
+    res = await api.post(f"/api/admin/workers/{h.wid}/force-reset", headers=H)
+    assert res.status_code == 200, res.text
+    assert (await wait_status(r, pid, "cancelled", timeout=1))["status"] == "cancelled"     # at once, not after the worker
+    async with r.db.conn() as c:
+        err = await c.fetchval("SELECT error FROM jobs WHERE prompt_id = $1::uuid", pid)
+        assert err["kind"] == "force_reset"
+        assert await c.fetchval("SELECT maintenance FROM workers WHERE id = $1", h.wid)        # no new job meanwhile
+    again = await api.post(f"/api/admin/workers/{h.wid}/force-reset", headers=H)
+    assert again.status_code == 409 and "under way" in again.json()["detail"]
+    for _ in range(150):
+        view = next(w for w in (await api.get("/api/admin/workers", headers=H)).json() if w["id"] == h.wid)["reset"]
+        if view and view["state"] in ("done", "failed"):
+            break
+        await asyncio.sleep(0.1)
+    assert view["state"] == "done", view
+    assert h.restarts == before + 1
+    async with r.db.conn() as c:
+        assert not await c.fetchval("SELECT maintenance FROM workers WHERE id = $1", h.wid)    # back in service
+        actions = [a for (a,) in await c.fetch("SELECT action FROM audit_log ORDER BY id")]
+    assert "worker reset" in actions and actions.index("maintenance off") > actions.index("worker reset")
+
+
+async def test_force_reset_keeps_maintenance_an_admin_set(farm):
+    api, r = farm["api"], farm["router"]
+    h = farm["hosts"]["w2"]
+    assert (await api.patch(f"/api/admin/workers/{h.wid}", json={"maintenance": True}, headers=H)).status_code == 200
+    assert (await api.post(f"/api/admin/workers/{h.wid}/force-reset", headers=H)).status_code == 200
+    for _ in range(150):
+        view = next(w for w in (await api.get("/api/admin/workers", headers=H)).json() if w["id"] == h.wid)["reset"]
+        if view and view["state"] in ("done", "failed"):
+            break
+        await asyncio.sleep(0.1)
+    assert view["state"] == "done"
+    async with r.db.conn() as c:
+        assert await c.fetchval("SELECT maintenance FROM workers WHERE id = $1", h.wid)        # still the admin's

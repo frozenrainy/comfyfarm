@@ -787,6 +787,18 @@ export default {
   "setting changed": "설정 변경", "rollout succeeded": "롤아웃 성공", "rollout failed": "롤아웃 실패",
   "rollout aborted": "롤아웃 중단됨", "worker setup reported": "워커 설치 보고", "UI worker container added": "UI 워커 컨테이너 추가",
   "worker setup": "워커 설치",
+  "worker reset": "워커 강제 정리",
+  "Force reset": "강제 정리", "Force reset {name}?": "{name} 강제 정리할까요?",
+  "a reset of this worker is under way": "이 워커는 이미 강제 정리 중입니다",
+  "These jobs end now, as cancelled:": "아래 작업은 지금 바로 '취소됨' 으로 끝납니다:",
+  "No job of its is running.": "실행 중인 작업은 없습니다.",
+  "Its ComfyUI is then restarted through its host — whatever it holds goes: the job, its queue, RAM and VRAM. No new job is sent to it until it answers again.":
+    "그다음 호스트를 통해 ComfyUI 를 재시작합니다 — 들고 있던 작업·큐·RAM·VRAM 이 모두 비워집니다. 다시 응답할 때까지 새 작업은 보내지 않습니다.",
+  "Its restart is manual — run this on the host now:": "이 워커는 수동 재시작입니다 — 지금 호스트에서 실행하세요:",
+  "Rollout #{id} is working on this worker; it stays in charge of maintenance.": "롤아웃 #{id} 가 이 워커를 진행 중이라 점검 상태는 롤아웃이 계속 관리합니다.",
+  "Reset started — {n} job(s) cancelled": "강제 정리 시작 — 작업 {n}개 취소됨",
+  "When the worker is too busy to answer: end its jobs now and restart its ComfyUI": "워커가 너무 바빠 응답하지 못할 때: 작업을 바로 끝내고 ComfyUI 를 재시작",
+  "run on the host:": "호스트에서 실행:", "asking its host to restart it": "호스트에 재시작 요청 중", "stopping": "멈추는 중",
   "(the host has reported — no need to run the script again)": "(호스트가 이미 보고했습니다 — 스크립트를 다시 실행할 필요 없음)",
   "http://<router address>:<router port> — the address the launcher fetches its render from": "http://<라우터 주소>:<라우터 포트> — 런처가 렌더를 받아 가는 주소",
 };

@@ -23,6 +23,7 @@ import time
 import httpx
 
 from ..adapter.comfy import QUERY_TIMEOUT, classify_exception
+from ..core import jobs as jobsvc
 from ..db import Busy, BusyLog
 from . import backends as be
 from . import render as rd
@@ -89,6 +90,8 @@ class Engine:
         self.current: int | None = None
         self._status_at: dict[str, float] = {}
         self._status: dict[str, dict | None] = {}
+        self.resets: dict[int, dict] = {}                # worker id → its force reset (D-53), shown for an hour after
+        self.reset_tasks: dict[int, asyncio.Task] = {}
         self.http = httpx.AsyncClient(timeout=QUERY_TIMEOUT)
 
     # ---- loop ---------------------------------------------------------------------------------------------------
@@ -140,7 +143,108 @@ class Engine:
             await asyncio.sleep(1.0)
 
     async def stop(self):
+        for t in list(self.reset_tasks.values()):
+            t.cancel()
         await self.http.aclose()
+
+    # ---- force reset (D-53) ----------------------------------------------------------------------------------------
+    # A worker too busy to answer (a workflow that swaps the host to a crawl) can neither cancel its job nor drain for
+    # a rollout's restart: its jobs end in the ledger at once, and its ComfyUI is restarted through the host's agent,
+    # which does not need ComfyUI to answer. The restart ends whatever ComfyUI held — the job, its queue, RAM, VRAM.
+    RESET_DOWN = 300.0      # seconds to see it go down (a unit's stop may wait TimeoutStopSec before it kills)
+    RESET_UP = 900.0        # and to come back (a first start loads node packs)
+
+    async def reset_preview(self, worker_id: int) -> dict:
+        async with self.db.conn() as c:
+            w = await c.fetchrow("SELECT w.id, w.name, w.base_url, w.maintenance, i.instance, i.restart_backend, i.restart_config "
+                                 "FROM workers w LEFT JOIN instances i ON i.worker_id = w.id "
+                                 "WHERE w.id = $1 AND w.deleted_at IS NULL", worker_id)
+            if w is None:
+                raise LookupError(f"no worker {worker_id}")
+            jobs = [dict(r) for r in await c.fetch(
+                "SELECT prompt_id::text, owner, status, title FROM jobs WHERE worker_id = $1 "
+                "AND status IN ('dispatching', 'running', 'cancelling') ORDER BY id", worker_id)]
+            rollout = await c.fetchval("SELECT s.rollout_id FROM rollout_steps s JOIN rollouts r ON r.id = s.rollout_id "
+                                       "WHERE s.worker_id = $1 AND r.status IN ('running', 'aborting', 'interrupted') AND s.status NOT IN "
+                                       "('done', 'failed', 'reverted', 'revert_failed', 'skipped') LIMIT 1", worker_id)
+        w = dict(w)
+        manual = (w["restart_backend"] or "manual") == "manual"
+        return {"worker": w["name"], "instance": w["instance"], "backend": w["restart_backend"], "jobs": jobs,
+                "rollout": rollout, "running": self.resets.get(worker_id, {}).get("state") in ("restarting", "down", "starting"),
+                "command": (f"systemctl restart comfyfarm@{w['instance']}  (on its host, or however it is run there)"
+                            if manual and w["instance"] else None), "_row": w}
+
+    async def force_reset(self, worker_id: int, actor: str) -> dict:
+        p = await self.reset_preview(worker_id)
+        w = p.pop("_row")
+        if w["instance"] is None:
+            raise ValueError("this worker has no instance (Rollout → Instances): there is nothing to restart it through")
+        if p["running"]:
+            raise ValueError("a reset of this worker is under way")
+        lift = False
+        async with self.db.conn() as c:
+            async with c.transaction():
+                for j in p["jobs"]:
+                    jid = await c.fetchval("SELECT id FROM jobs WHERE prompt_id = $1::uuid", j["prompt_id"])
+                    await jobsvc.transition(c, jid, "cancelled", ("dispatching", "running", "cancelling"),
+                                            f"force reset of {w['name']} by {actor}",
+                                            error=jobsvc.error_doc("force_reset", f"cancelled: {actor} reset the worker"))
+                # no new job while it restarts; lifted again when it answers — unless it was in maintenance already, or
+                # a rollout on this worker owns the flag (it restores it as it found it, D-46)
+                if not w["maintenance"] and p["rollout"] is None:
+                    await c.execute("UPDATE workers SET maintenance = true WHERE id = $1", worker_id)
+                    lift = True
+                await audit(c, actor, "worker reset", w["name"], cancelled=[j["prompt_id"] for j in p["jobs"]],
+                            backend=w["restart_backend"], maintenance_lifted_after=lift)
+        self.resets[worker_id] = {"state": "restarting", "at": time.time(), "detail": f"via {w['restart_backend']}",
+                                  "command": p["command"], "cancelled": len(p["jobs"])}
+        self.reset_tasks[worker_id] = asyncio.create_task(self._reset(worker_id, w, lift, actor))
+        return {**p, "cancelled": p["jobs"], "maintenance": "on until it answers" if lift else "as it was"}
+
+    async def _reset(self, worker_id: int, w: dict, lift: bool, actor: str):
+        st = self.resets[worker_id]
+        def say(state, detail):
+            st.update(state=state, detail=detail, at=time.time())
+            log.info("reset of %s: %s — %s", w["name"], state, detail)
+        try:
+            backend = self.make_backend(w["restart_backend"] or "manual", w["restart_config"] or {})
+            ok, detail = await backend.restart(w["instance"])
+            if not ok:
+                return say("failed", f"the restart was refused: {detail}")
+            say("down", f"waiting for it to stop ({detail})")
+            t0, dead = time.monotonic(), 0
+            limit = max(self.RESET_DOWN, getattr(backend, "observe_timeout", 0) or 0)
+            while dead < 2:
+                if time.monotonic() - t0 > limit:
+                    return say("failed", f"not seen going down within {limit:.0f} s — the restart did nothing visible; "
+                                         f"look at the host (logs/{w['instance']}.log in the service account's home)")
+                dead = dead + 1 if await self.alive(w["base_url"]) == "dead" else 0
+                await asyncio.sleep(self.poll)
+            say("starting", "stopped; waiting for it to come back")
+            t0 = time.monotonic()
+            while await self.alive(w["base_url"]) != "up":
+                if time.monotonic() - t0 > self.RESET_UP:
+                    return say("failed", f"did not come back within {self.RESET_UP:.0f} s — "
+                                         f"logs/{w['instance']}.log in the service account's home")
+                await asyncio.sleep(self.poll)
+            async with self.db.conn() as c:
+                if lift:
+                    await c.execute("UPDATE workers SET maintenance = false WHERE id = $1", worker_id)
+                    await audit(c, actor, "maintenance off", w["name"], after="reset")
+            say("done", "restarted" + ("; back in service" if lift else ""))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("reset of %s failed", w["name"])
+            say("failed", f"{type(e).__name__}: {e}")
+        finally:
+            self.reset_tasks.pop(worker_id, None)
+
+    def reset_view(self, worker_id: int) -> dict | None:
+        r = self.resets.get(worker_id)
+        if r is None or (r["state"] in ("done", "failed") and time.time() - r["at"] > 3600):
+            return None
+        return {k: r[k] for k in ("state", "detail", "at", "command", "cancelled") if k in r}
 
     # ---- one rollout ------------------------------------------------------------------------------------------
     async def drive(self, rid: int):
