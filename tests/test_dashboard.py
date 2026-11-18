@@ -1,5 +1,6 @@
 """M3: monitoring contract (/api/health/dispatch, /metrics) and dashboard queue operations."""
 import asyncio
+import datetime
 import uuid
 
 import httpx
@@ -323,3 +324,58 @@ async def test_dashboard_is_served(farm_api):
     assert font.status_code == 200 and font.content[:4] == b"wOF2" and font.headers["cache-control"] == "public, max-age=86400"
     assert "Pretendard" in (await c.get("/comfyfarm/dashboard/app.css")).text
     assert (await c.get("/comfyfarm/dashboard/fonts/LICENSE-Pretendard.txt")).status_code == 200
+
+
+async def finish(r, pid, status="completed", when="now()"):
+    await sql(r, f"UPDATE jobs SET status = $2, finished_at = {when}, started_at = {when} WHERE prompt_id = $1",
+              uuid.UUID(pid), status)
+
+
+async def history_ids(c, user, q=""):
+    return {j["prompt_id"] for j in (await c.get(f"/api/farm/history?scope=all{q}", headers=H(user))).json()["jobs"]}
+
+
+async def test_delete_one_finished_job(farm_api):
+    """Off the lists only: the row stays for statistics and retries; a queued job is refused; not a hint to others."""
+    r, c = farm_api
+    a, b = await post_prompt(c, "alice", 1), await post_prompt(c, "alice", 2)
+    await finish(r, a)
+    assert (await c.delete(f"/api/farm/jobs/{a}", headers=H("bob"))).status_code == 404           # not bob's
+    assert (await c.delete(f"/api/farm/jobs/{b}", headers=H("alice"))).status_code == 409         # still waiting
+    assert (await c.delete(f"/api/farm/jobs/{a}", headers=H("alice"))).json() == {"deleted": 1}
+    assert await history_ids(c, "alice") == set()
+    assert a not in (await c.get("/api/history", headers=H("alice"))).json()                    # the stock view too
+    assert (await c.delete(f"/api/farm/jobs/{a}", headers=H("alice"))).status_code == 404         # gone
+    async with r.db.conn() as conn:
+        assert await conn.fetchval("SELECT deleted_at IS NOT NULL FROM jobs WHERE prompt_id = $1", uuid.UUID(a))
+        assert await conn.fetchval("SELECT count(*) FROM audit_log WHERE action = 'finished jobs deleted'") == 0  # own job
+
+
+async def test_delete_finished_jobs_by_filter(farm_api):
+    """Deletes exactly what the history filter shows — every page, never another user's unless an admin says all users."""
+    r, c = farm_api
+    old_ok, old_bad, new_ok = [await post_prompt(c, "alice", i) for i in (1, 2, 3)]
+    bobs, waiting = await post_prompt(c, "bob", 4), await post_prompt(c, "alice", 5)
+    await finish(r, old_ok, when="now() - interval '10 days'")
+    await finish(r, old_bad, "failed", when="now() - interval '10 days'")
+    await finish(r, new_ok)
+    await finish(r, bobs, when="now() - interval '10 days'")             # in the same period as alice's old ones
+    day = lambda d: (datetime.datetime.now(datetime.UTC).date() - datetime.timedelta(days=d)).isoformat()
+    # alice, failed only: one row
+    res = await c.post("/api/farm/history/delete", json={"status": "failed"}, headers=H("alice"))
+    assert res.json() == {"deleted": 1}
+    assert await history_ids(c, "admin") == {old_ok, new_ok, bobs}
+    # alice, finished 15..5 days ago, asking for everyone (not an admin: still only hers)
+    res = await c.post("/api/farm/history/delete", json={"scope": "all", "start": day(15), "end": day(5), "tz": "UTC"}, headers=H("alice"))
+    assert res.json() == {"deleted": 1}
+    assert await history_ids(c, "admin") == {new_ok, bobs}
+    assert (await c.post("/api/farm/history/delete", json={"status": "pending"}, headers=H("alice"))).status_code == 400
+    # an admin, all users: everything finished goes, the waiting job stays, and the audit log names whose
+    res = await c.post("/api/farm/history/delete", json={"scope": "all"}, headers=H("admin"))
+    assert res.json() == {"deleted": 2}
+    assert await history_ids(c, "admin") == set()
+    assert [j["prompt_id"] for j in (await c.get("/api/farm/queue?scope=all", headers=H("admin"))).json()["jobs"]] == [waiting]
+    async with r.db.conn() as conn:
+        a = await conn.fetchrow("SELECT actor, detail FROM audit_log WHERE action = 'finished jobs deleted'")
+    assert a["actor"] == "admin" and a["detail"] == {"count": 2, "owners": ["alice", "bob"]}
+    assert (await c.post("/api/farm/history/delete", json={"scope": "all"}, headers=H("admin"))).json() == {"deleted": 0}

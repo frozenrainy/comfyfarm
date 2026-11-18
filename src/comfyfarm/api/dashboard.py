@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from ..core import jobs as jobsvc
 from ..core import stats as statsvc
 from ..health.dispatch import snapshot
+from ..rollout.engine import audit
 from .context import Ctx
 from .stock import outputs_count, outputs_files
 
@@ -28,6 +29,16 @@ class MoveIn(BaseModel):
     to: str | None = None          # "top" | "bottom"
     before: str | None = None      # prompt_id of a queued job
     after: str | None = None
+
+
+class HistoryDeleteIn(BaseModel):
+    scope: str = "mine"
+    q: str | None = None
+    status: str | None = None
+    group: int | None = None
+    start: str | None = None
+    end: str | None = None
+    tz: str | None = None
 
 
 class NoteIn(BaseModel):
@@ -240,14 +251,9 @@ def make_router(ctx: Ctx) -> APIRouter:
                 "farm": {"queued": totals["queued"], "running": totals["running"]}}
 
     # ---- history page -------------------------------------------------------------------------------------------
-    @api.get("/api/farm/history")
-    async def history(x_comfyfarm_user: str | None = Header(default=None), scope: str = "mine", q: str | None = None,
-                      status: str | None = None, group: int | None = None, start: str | None = None,
-                      end: str | None = None, tz: str | None = None, offset: int = Query(0, ge=0),
-                      limit: int = Query(50, ge=1, le=HISTORY_MAX_PAGE)):
-        who = ctx.identity(x_comfyfarm_user)
-        admin = ctx.is_admin(who)
-        everyone = admin and scope == "all"
+    def history_where(who: str, scope: str, q, status, group, start, end, tz):
+        """The finished jobs a history filter names — the list and "delete these" must mean the same rows."""
+        everyone = ctx.is_admin(who) and scope == "all"
         terminal = list(jobsvc.TERMINAL)
         wanted = [x for x in (status or "").split(",") if x] or terminal
         if bad := set(wanted) - set(terminal):
@@ -266,12 +272,49 @@ def make_router(ctx: Ctx) -> APIRouter:
             args += [since, until]
             where += f" AND j.finished_at >= ${len(args) - 1} AND j.finished_at < ${len(args)}"
         where += search_clause(q, args, everyone)
+        return where, args, everyone
+
+    @api.get("/api/farm/history")
+    async def history(x_comfyfarm_user: str | None = Header(default=None), scope: str = "mine", q: str | None = None,
+                      status: str | None = None, group: int | None = None, start: str | None = None,
+                      end: str | None = None, tz: str | None = None, offset: int = Query(0, ge=0),
+                      limit: int = Query(50, ge=1, le=HISTORY_MAX_PAGE)):
+        who = ctx.identity(x_comfyfarm_user)
+        where, args, everyone = history_where(who, scope, q, status, group, start, end, tz)
         async with db.conn() as c:
             total = await c.fetchval(f"SELECT count(*) FROM jobs j WHERE {where}", *args)
             rows = await c.fetch(f"SELECT {JOB_COLS}, j.outputs {JOB_FROM} WHERE {where} "
                                  f"ORDER BY j.finished_at DESC NULLS LAST, j.id DESC OFFSET {offset} LIMIT {limit}", *args)
         return {"scope": "all" if everyone else "mine", "total": total, "offset": offset, "limit": limit,
                 "jobs": [job_doc(r) for r in rows]}
+
+    # ---- deleting finished jobs: off the lists only (like the stock history's delete) --------------------------------
+    # The row stays (deleted_at): statistics still count it, a retry still names it, and its output files stay on disk.
+    async def hidden(c, who: str, owners: set[str], n: int, what: str):
+        if n and owners - {who}:                    # an admin removing other people's jobs leaves a trace
+            await audit(c, who, "finished jobs deleted", what, count=n, owners=sorted(owners))
+        await router.events.push_status(owners)     # the stock frontend's history panel follows (D-18)
+
+    @api.delete("/api/farm/jobs/{prompt_id}")
+    async def delete_job(prompt_id: str, x_comfyfarm_user: str | None = Header(default=None)):
+        who, _, r = await acting(prompt_id, x_comfyfarm_user)
+        if r["status"] not in jobsvc.TERMINAL:
+            raise HTTPException(409, f"only finished jobs can be deleted (job is {r['status']}) — cancel it first")
+        async with db.conn() as c:
+            n = await c.fetchval("WITH d AS (UPDATE jobs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL "
+                                 "RETURNING 1) SELECT count(*) FROM d", r["id"])
+            await hidden(c, who, {r["owner"]}, n, str(r["prompt_id"]))
+        return {"deleted": n}
+
+    @api.post("/api/farm/history/delete")
+    async def delete_history(body: HistoryDeleteIn, x_comfyfarm_user: str | None = Header(default=None)):
+        """Every finished job the history filter shows (all pages), the same filter as GET /api/farm/history."""
+        who = ctx.identity(x_comfyfarm_user)
+        where, args, everyone = history_where(who, body.scope, body.q, body.status, body.group, body.start, body.end, body.tz)
+        async with db.conn() as c:
+            rows = await c.fetch(f"UPDATE jobs j SET deleted_at = now() WHERE {where} RETURNING j.owner", *args)
+            await hidden(c, who, {x["owner"] for x in rows}, len(rows), "history filter" if everyone else who)
+        return {"deleted": len(rows)}
 
     @api.get("/api/farm/jobs/{prompt_id}/files")
     async def job_files(prompt_id: str, x_comfyfarm_user: str | None = Header(default=None)):

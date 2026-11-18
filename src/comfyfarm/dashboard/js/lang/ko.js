@@ -801,4 +801,15 @@ export default {
   "run on the host:": "호스트에서 실행:", "asking its host to restart it": "호스트에 재시작 요청 중", "stopping": "멈추는 중",
   "(the host has reported — no need to run the script again)": "(호스트가 이미 보고했습니다 — 스크립트를 다시 실행할 필요 없음)",
   "http://<router address>:<router port> — the address the launcher fetches its render from": "http://<라우터 주소>:<라우터 포트> — 런처가 렌더를 받아 가는 주소",
+  // finished jobs off the list (0.1.0-dev.30) · busy buttons
+  "Delete this finished job from the list? Its output files stay.": "이 끝난 작업을 목록에서 지울까요? 출력 파일은 그대로 남습니다.",
+  "Deleted from the list": "목록에서 지웠습니다", "Delete from the list (the files stay)": "목록에서 지우기 (파일은 남음)",
+  "Delete finished…": "끝난 작업 지우기…", "No finished job in this filter": "이 필터에 끝난 작업이 없습니다",
+  "Delete the {n} finished job(s) this filter shows from the list? Their output files stay.":
+    "이 필터에 보이는 끝난 작업 {n}개를 목록에서 지울까요? 출력 파일은 그대로 남습니다.",
+  "Delete the {n} finished job(s) this filter shows, of all users, from the list? Their output files stay.":
+    "이 필터에 보이는 끝난 작업 {n}개(모든 사용자)를 목록에서 지울까요? 출력 파일은 그대로 남습니다.",
+  "Deleted {n} from the list": "{n}개를 목록에서 지웠습니다",
+  "Every finished job the filter shows, on all pages — from the list only, the files stay": "필터에 보이는 끝난 작업 전부(모든 페이지) — 목록에서만 지우고 파일은 남습니다",
+  "looking up the newest commit of {ref}…": "{ref}의 최신 커밋 확인 중…",
 };

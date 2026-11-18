@@ -1,6 +1,6 @@
 // Jobs: the queue and the history in one table — unfinished jobs on top, live; finished ones below, newest first,
 // 50 a page. Admins see everybody's jobs and may reorder the waiting ones (D-32).
-import { TZ, api, button, h, qs, setText, state, t } from "../core.js";
+import { TZ, act, api, button, h, qs, setText, state, t } from "../core.js";
 import { jobsTable } from "../jobs.js";
 
 const PAGE = 50, FINISHED_EVERY = 30000;
@@ -50,14 +50,32 @@ export default {
     const prev = button(t("← Newer"), () => { f.offset = Math.max(0, f.offset - PAGE); refresh(); });
     const next = button(t("Older →"), () => { f.offset += PAGE; refresh(); });
     const pager = h("div", { class: "pager" }, prev, pageInfo, next);
+    // every finished job the filter shows, on every page — the same filter the list asked with
+    const finishedQuery = () => {
+      const sel = f.status ? f.status.split(",") : null;
+      const q = { scope: f.scope, q: f.q || null, group: f.group ? Number(f.group) : null,
+                  status: (sel ? sel.filter((s) => DONE.includes(s)) : DONE).join(","), tz: TZ };
+      if (f.start || f.end) { q.start = f.start || "2000-01-01"; q.end = f.end || new Date().toLocaleDateString("sv"); }
+      return q;
+    };
+    const clearDone = button(t("Delete finished…"), () => {
+      const n = done.total, everyone = f.scope === "all";
+      if (!n) return;
+      if (!confirm(t(everyone ? "Delete the {n} finished job(s) this filter shows, of all users, from the list? Their output files stay."
+                              : "Delete the {n} finished job(s) this filter shows from the list? Their output files stay.", { n }))) return;
+      return act(() => api("POST", "/api/farm/history/delete", finishedQuery()),
+                 (r) => t("Deleted {n} from the list", { n: r.deleted }), () => { doneAt = 0; refresh(); });
+    }, { cls: "danger", title: t("Every finished job the filter shows, on all pages — from the list only, the files stay") });
     let tbl;
     function rebuild() {
-      tbl = jobsTable({ owner: f.scope === "all", reorder: admin, refresh, list: () => active });
+      // a row's action may change the finished list (delete, retry): read it again at once, not in up to 30 s
+      tbl = jobsTable({ owner: f.scope === "all", reorder: admin, refresh: () => { doneAt = 0; refresh(); }, list: () => active });
       holder.replaceChildren(tbl.el);
     }
     rebuild();
     root.append(h("section", {},
-      h("div", { class: "section-head" }, h("h2", {}, t("Jobs")), summary, h("span", { class: "spacer" }), button(t("Refresh"), () => { doneAt = 0; refresh(); })),
+      h("div", { class: "section-head" }, h("h2", {}, t("Jobs")), summary, h("span", { class: "spacer" }), clearDone,
+        button(t("Refresh"), () => { doneAt = 0; refresh(); })),
       h("div", { class: "filters" },
         searchBox(admin ? t("search title, id, note, error, owner") : t("search title, id, note or error"), set("q")),
         statusSel, groupSel.el, h("span", { class: "dates" }, from, " – ", to), scope),
@@ -94,6 +112,9 @@ export default {
         setText(summary, farm ? t("farm: {queued} waiting · {running} running", farm) : "");
         pager.hidden = !doneWanted.length || done.total <= PAGE;
         setText(pageInfo, done.total ? t("{from}–{to} of {total}", { from: done.offset + 1, to: done.offset + done.jobs.length, total: done.total }) : "");
+        clearDone.hidden = !doneWanted.length; clearDone.disabled = !done.total;
+        if (!clearDone.classList.contains("busy")) clearDone.title = done.total
+          ? t("Every finished job the filter shows, on all pages — from the list only, the files stay") : t("No finished job in this filter");
         prev.disabled = done.offset === 0;
         next.disabled = done.offset + done.jobs.length >= done.total;
       },

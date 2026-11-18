@@ -150,13 +150,18 @@ export function jobsTable(opts) {
       resume: button(t("Resume"), post("resume")),
       cancel: button(t("Cancel"), () => {
         if (["dispatching", "running"].includes(tr._item.status) && !confirm(t("Interrupt this running job?"))) return;
-        post("cancel")();
+        return post("cancel")();
       }, { cls: "danger" }),
       retry: button(t("Retry"), () => act(() => api("POST", jobUrl(pid(), "retry")),
         (r) => t("Queued again as {id}", { id: r.prompt_id.slice(0, 8) }), opts.refresh), { title: t("Queue a new job with the same workflow") }),
+      // off the lists only, like the stock history's delete: the files stay, statistics still count it
+      del: button("✕", () => {
+        if (!confirm(t("Delete this finished job from the list? Its output files stay."))) return;
+        return act(() => api("DELETE", `/api/farm/jobs/${pid()}`), t("Deleted from the list"), opts.refresh);
+      }, { cls: "danger", title: t("Delete from the list (the files stay)") }),
     };
     tr.c.actions.append(h("span", { class: "segs" }, tr.btn.top, tr.btn.up, tr.btn.down, tr.btn.bottom), " ",
-                        tr.btn.pause, tr.btn.resume, tr.btn.cancel, tr.btn.retry);
+                        tr.btn.pause, tr.btn.resume, tr.btn.cancel, tr.btn.retry, " ", tr.btn.del);
     for (const k of ["top", "up", "down", "bottom"]) tr.btn[k].classList.add("seg");
     return tr;
   }
@@ -182,7 +187,7 @@ export function jobsTable(opts) {
     for (const k of ["top", "up", "down", "bottom"]) show(k, opts.reorder && queued);
     show("pause", j.status === "pending"); show("resume", j.status === "paused");
     show("cancel", active && j.status !== "cancelling");
-    show("retry", !active);
+    show("retry", !active); show("del", !active);
   }
   return { el, update: (items) => syncRows(tbody, items, (j) => j.key, build, update) };
 }

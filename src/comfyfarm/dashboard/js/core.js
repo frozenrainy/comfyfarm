@@ -216,8 +216,24 @@ export function syncNote(inp, value) {
   inp.dataset.saved = value || "";
   if (document.activeElement !== inp) inp.value = value || "";
 }
+// A button that answers a click at once: while what the click started is still going (the handler returned a
+// promise) it spins and takes no second click — a double click on Update or Delete sent the request twice, and a slow
+// one (Update asks the builder for the newest commit) looked like nothing happened.
 export function button(label, onclick, opts = {}) {
-  return h("button", { type: "button", onclick, title: opts.title, class: opts.cls }, label);
+  const b = h("button", { type: "button", title: opts.title, class: opts.cls }, label);
+  b.addEventListener("click", (e) => {
+    if (b.classList.contains("busy")) return;
+    const r = onclick?.(e);
+    if (r && typeof r.then === "function") busy(b, r);
+  });
+  return b;
+}
+export function busy(b, promise) {
+  b._wasDisabled = b.disabled;
+  b.classList.add("busy"); b.setAttribute("aria-busy", "true"); b.disabled = true;
+  const done = () => { b.classList.remove("busy"); b.removeAttribute("aria-busy"); b.disabled = b._wasDisabled; };
+  promise.then(done, done);
+  return promise;
 }
 
 // To the clipboard — also on a farm opened at http://<address>, where navigator.clipboard is missing (dev.20): the

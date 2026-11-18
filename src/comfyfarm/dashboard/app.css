@@ -127,6 +127,14 @@ button.danger:hover { border-color: var(--bad); color: var(--bad); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--panel); }
 button.primary:hover { filter: brightness(1.08); color: var(--panel); }
 button:disabled { opacity: .4; cursor: default; }
+/* busy: the label keeps the width, a spinner sits on it (core.js button) */
+button.busy { opacity: 1; cursor: progress; position: relative; color: transparent !important; }
+button.busy::after { content: ""; position: absolute; inset: 0; margin: auto; width: .85em; height: .85em; box-sizing: border-box;
+                     border: 2px solid var(--accent); border-right-color: transparent; border-radius: 50%; animation: cf-spin .7s linear infinite; }
+button.primary.busy::after { border-color: var(--panel); border-right-color: transparent; }
+button.danger.busy::after { border-color: var(--bad); border-right-color: transparent; }
+@keyframes cf-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { button.busy::after { animation-duration: 2.4s; } }
 .segs { display: inline-flex; }
 button.seg { border-radius: 0; margin-left: -1px; }
 button.seg:first-child { border-radius: 4px 0 0 4px; }

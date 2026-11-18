@@ -13,7 +13,7 @@ function stepDetail(d) {
 
 // Rollout tab (docs/design/07): how each worker is launched (instance), what it should run (profile), and rolling a
 // profile out one worker at a time — drain, restart, wait for the badge, verify, revert that worker on failure.
-import { act, api, bar, button, formDialog, h, namedRow, pill, qs, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
+import { act, api, bar, button, dur, formDialog, h, namedRow, pill, qs, setPill, setText, syncRows, t, table, toast, when } from "../core.js";
 import { checkDetail, checkHost } from "./setup.js";
 import { bytes, pickFiles, uploadFile } from "../upload.js";
 import { carried, currentProfile, envText, flagsText, merged, parseEnv, parseFlags } from "../profile_carry.js";
@@ -429,17 +429,26 @@ export function rollout(root, { refresh }) {
     sendArchive(file, { name: v.name.trim(), ui: !!v.ui, requirements_file: v.requirements_file.trim() || null,
                         constraints: words(v.constraints), note: v.note.trim() || null });
   }
-  async function updatePack(p) {
+  // What a row is doing while a button of it waits: "asking the builder… 12 s" under the commit (the builder runs
+  // git ls-remote; on a slow link that took long enough to look like nothing happened, and to get clicked again).
+  async function rowDoing(tr, text, fn) {
+    const t0 = Date.now(), show = () => setText(tr.doing, `${text} ${dur((Date.now() - t0) / 1000)}`);
+    show(); tr.doing.hidden = false;
+    const tick = setInterval(show, 1000);
+    try { return await fn(); } finally { clearInterval(tick); tr.doing.hidden = true; }
+  }
+  async function updatePack(p, tr) {
     if (p.archive) {                          // an archive pack: its new version is another archive
       const [file] = await pickFiles({ accept: ARCHIVES });
-      if (file) sendArchive(file, { pack_id: p.id });
+      if (file) await sendArchive(file, { pack_id: p.id });
       return;
     }
-    await act(async () => {
+    const ref = p.ref || t("the default branch");
+    await act(() => rowDoing(tr, t("looking up the newest commit of {ref}…", { ref }), async () => {
       const commit = await resolve(p.repo, p.ref || "");
       if (commit === p.commit) return "same";
       return api("PATCH", `/api/admin/node-packs/${p.id}`, { commit });
-    }, (r) => r === "same" ? t("Already the newest commit of {ref}", { ref: p.ref || t("the default branch") }) : t("Updated — Build to use it"), refresh);
+    }), (r) => r === "same" ? t("Already the newest commit of {ref}", { ref }) : t("Updated — Build to use it"), refresh);
   }
   async function editPack(p) {
     const v = await formDialog(t("Node pack {name}", p), [
@@ -481,16 +490,18 @@ export function rollout(root, { refresh }) {
   }
   function buildPack() {
     const tr = namedRow(["name", "repo", "commit", "ui", "note", "actions"], { actions: "actions" });
-    tr.c.actions.append(button(t("Update"), () => updatePack(tr._item), { title: t("a git pack: the newest commit of its branch or tag; an archive pack: upload its new version") }),
+    tr.commit = h("span"); tr.doing = h("div", { class: "muted small", hidden: true, "aria-live": "polite" });
+    tr.c.commit.append(tr.commit, tr.doing);
+    tr.c.actions.append(button(t("Update"), () => updatePack(tr._item, tr), { title: t("a git pack: the newest commit of its branch or tag; an archive pack: upload its new version") }),
       button(t("Edit"), () => editPack(tr._item)),
-      button(t("Remove"), () => { if (confirm(t("Remove node pack {name}? Profiles built with it keep it until you build again.", tr._item))) act(() => api("DELETE", `/api/admin/node-packs/${tr._item.id}`), t("Removed"), refresh); },
+      button(t("Remove"), () => { if (confirm(t("Remove node pack {name}? Profiles built with it keep it until you build again.", tr._item))) return act(() => api("DELETE", `/api/admin/node-packs/${tr._item.id}`), t("Removed"), refresh); },
              { cls: "danger" }));
     return tr;
   }
   function updatePackRow(tr, p) {
     setText(tr.c.name, p.name);
     setText(tr.c.repo, p.archive ? t("archive: {file}", { file: p.archive_name || "?" }) : p.repo.replace(/^https:\/\//, ""));
-    setText(tr.c.commit, p.archive ? `sha256 ${p.archive.slice(0, 12)}` : p.commit.slice(0, 12) + (p.ref ? ` (${p.ref})` : ""));
+    setText(tr.commit, p.archive ? `sha256 ${p.archive.slice(0, 12)}` : p.commit.slice(0, 12) + (p.ref ? ` (${p.ref})` : ""));
     setText(tr.c.ui, p.ui ? t("yes") : t("no — GPU only")); setText(tr.c.note, p.note ?? "");
   }
   function renderBuilds(list) {
