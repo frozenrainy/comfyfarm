@@ -16,7 +16,9 @@ import time
 from dataclasses import dataclass
 
 USER_H, ROLES_H, GATEWAY_H = b"x-comfyfarm-user", b"x-comfyfarm-roles", b"x-comfyfarm-gateway"
+TOKEN_H = b"x-comfyfarm-token"        # "<id>:<name>" of the API token the request came with (docs/design/19)
 current_roles: contextvars.ContextVar[frozenset] = contextvars.ContextVar("comfyfarm_roles", default=frozenset())
+current_token: contextvars.ContextVar[str | None] = contextvars.ContextVar("comfyfarm_token", default=None)
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,8 @@ class Identity:
     user: str
     roles: frozenset = frozenset()
     epoch: int | None = None        # local sessions: users.session_epoch at login (D-35)
+    token: str | None = None        # API tokens: "<id>:<name>" (docs/design/19)
+    scope: str | None = None        # API tokens: read | user | admin
 
 
 class TrustGatewayHeaders:
@@ -41,17 +45,32 @@ class TrustGatewayHeaders:
             vouched = (self.dev and loopback) or (self.secret is not None and any(
                 k == GATEWAY_H and hmac.compare_digest(v, self.secret) for k, v in headers))
             if not vouched:
-                headers = [(k, v) for k, v in headers if k not in (USER_H, ROLES_H)]
+                headers = [(k, v) for k, v in headers if k not in (USER_H, ROLES_H, TOKEN_H)]
             roles = frozenset(r.decode().strip() for k, v in headers if k == ROLES_H for r in v.split(b",") if r.strip()) \
                 if vouched else frozenset()
+            api_token = next((v.decode("utf-8", "replace") for k, v in headers if k == TOKEN_H), None) if vouched else None
             scope = dict(scope, headers=[(k, v) for k, v in headers if k != GATEWAY_H])
-            token = current_roles.set(roles)
+            reset_roles, reset_token = current_roles.set(roles), current_token.set(api_token)
             try:
                 await self.app(scope, receive, send)
             finally:
-                current_roles.reset(token)
+                current_roles.reset(reset_roles)
+                current_token.reset(reset_token)
             return
         await self.app(scope, receive, send)
+
+
+# ---- API tokens (docs/design/19) ------------------------------------------------------------------------------------
+TOKEN_PREFIX = "cft_"
+
+
+def new_api_token() -> str:
+    return TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
+def api_token_hash(token: str) -> str:
+    """High-entropy secrets: a plain SHA-256 is enough (no password stretching), and lets the router look one up."""
+    return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
 
 
 # ---- password hashing (local provider) -----------------------------------------------------------------------------

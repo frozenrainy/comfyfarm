@@ -87,4 +87,5 @@ production farm. Those decisions and their reasons are in [decisions.md](decisio
 | [10-heterogeneous-gpus](10-heterogeneous-gpus.md) | CUDA + ROCm workers |
 | [11-testing](11-testing.md) | Fake workers, fault scenarios, negative controls |
 | [12-roadmap](12-roadmap.md) | Milestones |
+| [19-cli-and-api-tokens](19-cli-and-api-tokens.md) | Holding dispatch, API tokens, the `comfyfarm-ctl` command |
 | [decisions](decisions.md) | Decision log with the reason behind each one |

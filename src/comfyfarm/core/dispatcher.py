@@ -7,6 +7,7 @@ import uuid
 
 from ..adapter.comfy import Accepted, Ambiguous, ComfyAdapter, Rejected, Unreachable
 from ..db import Busy, BusyLog, Database
+from . import hold as holdsvc
 from .jobs import error_doc, transition
 from .settings import Settings
 
@@ -18,11 +19,12 @@ SELECT id FROM workers
    AND current_job_id IS NULL AND group_id IS NOT NULL
  ORDER BY last_ok_at NULLS LAST, id"""
 
-# Re-checked under the lock: a worker put into maintenance after the candidate list was read is skipped (D-02).
-LOCK_WORKER = """
+# Re-checked under the lock: a worker put into maintenance after the candidate list was read is skipped (D-02), and
+# nothing is claimed while dispatch is held (D-56) — a hold set while a tick runs stops the claims after it.
+LOCK_WORKER = f"""
 SELECT w.id, w.group_id, w.base_url, w.capabilities FROM workers w JOIN worker_groups g ON g.id = w.group_id
  WHERE w.id = $1 AND w.enabled AND NOT w.maintenance AND w.deleted_at IS NULL AND w.state = 'online' AND w.kind = 'gpu'
-   AND w.current_job_id IS NULL AND comfyfarm_satisfies(w.capabilities, g.requirements)
+   AND w.current_job_id IS NULL AND comfyfarm_satisfies(w.capabilities, g.requirements) AND NOT {holdsvc.ACTIVE}
  FOR UPDATE OF w SKIP LOCKED"""
 
 # Group jobs first, then ungrouped ones (policy 'lowest_priority', D-03); highest priority first; only jobs whose
@@ -69,8 +71,10 @@ class Dispatcher:
     async def tick(self) -> int:
         """Claim as many pairs as possible and POST them concurrently. Returns the number of claims."""
         async with self.db.conn() as c:
-            candidates = [r["id"] for r in await c.fetch(IDLE_WORKERS)]
             await self.prune_secrets(c)
+            if await holdsvc.blocks(c):                               # dispatch held for the farm (D-56)
+                return 0
+            candidates = [r["id"] for r in await c.fetch(IDLE_WORKERS)]
         claimed = 0
         for wid in candidates:
             if not self.ready(wid):

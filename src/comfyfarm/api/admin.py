@@ -13,6 +13,7 @@ from ..core import access, consistency
 from ..core import jobs as jobsvc
 from ..core import stats as statsvc
 from ..identity import hash_password
+from ..rollout.engine import audit
 from .account import password_problem
 from .context import Ctx
 
@@ -179,7 +180,7 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.post("/api/admin/groups")
     async def create_group(body: GroupIn, x_comfyfarm_user: str | None = Header(default=None)):
-        ctx.admin(x_comfyfarm_user)
+        who = ctx.admin(x_comfyfarm_user)
         name = body.name.strip()
         if not name:
             raise HTTPException(400, "name is empty")
@@ -189,13 +190,15 @@ def make_router(ctx: Ctx) -> APIRouter:
                 gid = await c.fetchval("INSERT INTO worker_groups(name, requirements) VALUES ($1, $2) RETURNING id", name, req)
             except asyncpg.UniqueViolationError:
                 raise HTTPException(409, f"group {name!r} exists")
+            await audit(c, who, "group created", name, requirements=req)
         return {"id": gid, "name": name, "requirements": req}
 
     @api.patch("/api/admin/groups/{group_id}")
     async def patch_group(group_id: int, body: GroupPatch, x_comfyfarm_user: str | None = Header(default=None)):
-        ctx.admin(x_comfyfarm_user)
+        who = ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
-            if await c.fetchval("SELECT 1 FROM worker_groups WHERE id = $1", group_id) is None:
+            old = await c.fetchval("SELECT name FROM worker_groups WHERE id = $1", group_id)
+            if old is None:
                 raise HTTPException(404, "not found")
             try:
                 if body.name is not None and body.name.strip():
@@ -204,6 +207,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 raise HTTPException(409, f"group {body.name!r} exists")
             if body.requirements is not None:
                 await c.execute("UPDATE worker_groups SET requirements = $2 WHERE id = $1", group_id, group_req(body.requirements))
+            await audit(c, who, "group changed", old, **{k: v for k, v in body.model_dump().items() if v is not None})
         router.dispatcher.wake.set()
         return {"changed": True}
 
@@ -211,10 +215,10 @@ def make_router(ctx: Ctx) -> APIRouter:
     async def delete_group(group_id: int, x_comfyfarm_user: str | None = Header(default=None)):
         """Only empty groups: deleting one with jobs would turn them into ungrouped jobs that may run anywhere, and
         its workers would silently stop receiving work."""
-        ctx.admin(x_comfyfarm_user)
+        who = ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:
             async with c.transaction():
-                g = await c.fetchrow("SELECT id FROM worker_groups WHERE id = $1 FOR UPDATE", group_id)
+                g = await c.fetchrow("SELECT id, name FROM worker_groups WHERE id = $1 FOR UPDATE", group_id)
                 if g is None:
                     raise HTTPException(404, "not found")
                 workers = await c.fetchval("SELECT count(*) FROM workers WHERE group_id = $1 AND deleted_at IS NULL", group_id)
@@ -225,6 +229,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                                              "move or remove them first")
                 await c.execute("UPDATE workers SET group_id = NULL WHERE group_id = $1", group_id)   # deleted ones
                 await c.execute("DELETE FROM worker_groups WHERE id = $1", group_id)
+                await audit(c, who, "group deleted", g["name"])
         return {"deleted": True}
 
     @api.post("/api/admin/groups/{name}/object_info/refresh")
@@ -299,7 +304,7 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.post("/api/admin/workers")
     async def create_worker(body: WorkerIn, x_comfyfarm_user: str | None = Header(default=None)):
-        ctx.admin(x_comfyfarm_user)
+        who = ctx.admin(x_comfyfarm_user)
         url = check_url(body.base_url)
         if body.kind not in ("gpu", "ui"):
             raise HTTPException(400, "kind: gpu or ui")
@@ -312,6 +317,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 raise HTTPException(409, "a worker with this name or URL exists")
             except asyncpg.CheckViolationError:
                 raise HTTPException(400, UI_NO_GROUP)
+            await audit(c, who, "worker added", body.name.strip(), base_url=url, group=body.group, kind=body.kind)
         return {"id": wid}
 
     @api.patch("/api/admin/workers/{worker_id}")
@@ -354,8 +360,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 except asyncpg.CheckViolationError:
                     raise HTTPException(400, UI_NO_GROUP)
                 if done is not None:
-                    await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ($1, 'worker changed', $2, $3)",
-                                    who, done, {k: v for k, v in body.model_dump().items() if v is not None})
+                    await audit(c, who, "worker changed", done, **{k: v for k, v in body.model_dump().items() if v is not None})
         if done is None:
             raise HTTPException(404, "not found")
         router.dispatcher.wake.set()
@@ -386,13 +391,14 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.delete("/api/admin/workers/{worker_id}")
     async def delete_worker(worker_id: int, x_comfyfarm_user: str | None = Header(default=None)):
-        ctx.admin(x_comfyfarm_user)
+        who = ctx.admin(x_comfyfarm_user)
         async with db.conn() as c:     # soft delete: its running jobs become worker_lost (D-06b); name/URL reusable
             async with c.transaction():
                 done = await c.fetchval("UPDATE workers SET deleted_at = now(), enabled = false WHERE id = $1 AND deleted_at IS NULL "
-                                        "RETURNING id", worker_id)
+                                        "RETURNING name", worker_id)
                 if done is not None:   # its instance goes with it: the name is free for the host's next setup
                     await c.execute("DELETE FROM instances WHERE worker_id = $1", worker_id)
+                    await audit(c, who, "worker deleted", done)
         if done is None:
             raise HTTPException(404, "not found")
         return {"deleted": True}
@@ -427,7 +433,7 @@ def make_router(ctx: Ctx) -> APIRouter:
 
     @api.post("/api/admin/users")
     async def create_user(body: UserIn, x_comfyfarm_user: str | None = Header(default=None)):
-        ctx.admin(x_comfyfarm_user)
+        who = ctx.admin(x_comfyfarm_user)
         if not USERNAME.match(body.username):
             raise HTTPException(400, "username: letters, digits and . _ @ - (max 64), starting with a letter or digit")
         if problem := password_problem(body.password):
@@ -440,6 +446,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 except asyncpg.UniqueViolationError:
                     raise HTTPException(409, f"user {body.username!r} exists")
                 await set_groups(c, body.username, body.groups)
+                await audit(c, who, "user created", body.username, admin=body.admin, groups=body.groups)
         return {"created": True}
 
     @api.patch("/api/admin/users/{username}")
@@ -477,6 +484,8 @@ def make_router(ctx: Ctx) -> APIRouter:
                     await c.execute("UPDATE users SET session_epoch = next_session_epoch(session_epoch) WHERE username = $1", username)
                 if body.admin is not None or body.groups is not None:
                     await access.restamp(c, username)      # queued jobs follow the new permissions now (D-34)
+                await audit(c, me, "user changed", username,   # never the password itself
+                            **{k: ("(set)" if k == "password" else v) for k, v in body.model_dump().items() if v is not None})
         router.dispatcher.wake.set()
         return {"changed": True}
 
@@ -494,6 +503,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                 if "admin" in u["roles"] and await other_active_admins(c, username) == 0:
                     raise HTTPException(409, "this is the last active admin")
                 await c.execute("DELETE FROM users WHERE username = $1", username)
+                await audit(c, me, "user deleted", username)
         return {"deleted": True}
 
     # ---- site settings ------------------------------------------------------------------------------------------
@@ -518,8 +528,7 @@ def make_router(ctx: Ctx) -> APIRouter:
                     await c.execute("INSERT INTO settings(key, value, updated_by) VALUES ($1, $2, $3) ON CONFLICT (key) "
                                     "DO UPDATE SET value = excluded.value, updated_at = now(), updated_by = excluded.updated_by",
                                     k, v, who)
-                    await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ($1, 'setting changed', $2, $3)",
-                                    who, k, {"value": v})
+                    await audit(c, who, "setting changed", k, value=v)
         return {"saved": True}
 
     # ---- statistics -------------------------------------------------------------------------------------------

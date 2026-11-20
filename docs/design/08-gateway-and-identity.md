@@ -55,6 +55,10 @@ operations open.
 | `local` | users in the database with scrypt password hashes (stdlib, no extra dependency); small sites |
 | `dev-none` | single user `dev`, refuses to start unless bound to 127.0.0.1 |
 
+With every provider the gateway also accepts **API tokens** (`Authorization: Bearer cft_…`) for the command line and
+programs: personal, scoped (`read` / `user` / `admin`), never more than their user's current rights, the farm API only —
+see [19](19-cli-and-api-tokens.md) (D-57).
+
 ## Accounts and permissions
 
 Every identity has a row in `users` — local accounts with a scrypt password, external ones (trusted-header, later OIDC)

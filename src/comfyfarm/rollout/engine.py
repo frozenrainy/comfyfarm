@@ -67,6 +67,10 @@ audit_log = logging.getLogger("comfyfarm.audit")
 
 
 async def audit(c, actor: str, action: str, target: str | None, **detail):
+    """One audit entry. A request that came with an API token records which one (docs/design/19, D-59)."""
+    from ..identity import current_token
+    if (tok := current_token.get()) is not None:
+        detail.setdefault("token", tok)
     await c.execute("INSERT INTO audit_log(actor, action, target, detail) VALUES ($1, $2, $3, $4)", actor, action, target, detail)
     # the router's log tells what happened too (QA: it held a setup code and request lines, no events); who, what, on
     # what — the detail stays in the ledger

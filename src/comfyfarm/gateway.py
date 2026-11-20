@@ -29,7 +29,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .identity import Identity, read_session, sign_session
+from .identity import TOKEN_PREFIX, Identity, api_token_hash, read_session, sign_session
 
 log = logging.getLogger(__name__)
 
@@ -110,7 +110,8 @@ SETUP_FORM = """<form method=post action=/comfyfarm/setup><h1>{title}</h1><p cla
 <input name=password type=password placeholder="{password}" autocomplete=new-password>
 <input name=again type=password placeholder="{again}" autocomplete=new-password><button>{create}</button></form>"""
 IDENTITY_HEADERS = {"x-comfyfarm-user", "x-comfyfarm-roles", "x-comfyfarm-gateway", "comfy-user",
-                    "x-comfyfarm-gateway-login"}
+                    "x-comfyfarm-gateway-login", "x-comfyfarm-token",
+                    "authorization"}            # an API token is the gateway's to check; no upstream ever sees it
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
                "transfer-encoding", "upgrade", "host", "content-length", "accept-encoding",
                # the gateway does the cross-site check itself (same_origin_ok); upstream ComfyUI would compare the
@@ -218,7 +219,42 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             return None
         raise Unavailable(f"router answered {r.status_code}")
 
+    token_cache: dict[str, tuple[float, Identity | None]] = {}
+
+    async def token_identity(token: str) -> Identity | None:
+        """Who an API token belongs to, with the roles its scope leaves (docs/design/19). Asked from the router and
+        cached SESSION_TTL seconds by the token's hash, so a revoked token stops within that time."""
+        key, now = api_token_hash(token), time.monotonic()
+        hit = token_cache.get(key)
+        if hit and now - hit[0] < SESSION_TTL:
+            return hit[1]
+        try:
+            r = await http.post(f"{s.router_url}/api/internal/token", headers={"x-comfyfarm-gateway-login": s.secret},
+                                json={"token": token}, timeout=5)
+        except httpx.HTTPError as e:
+            raise Unavailable(type(e).__name__)
+        if r.status_code == 401:
+            token_cache.pop(key, None)
+            return None
+        if r.status_code != 200:
+            raise Unavailable(f"router answered {r.status_code}")
+        d = r.json()
+        ident = Identity(d["user"], frozenset(d["roles"]), token=d["token"], scope=d["scope"])
+        if len(token_cache) > 10000:
+            token_cache.clear()
+        token_cache[key] = (now, ident)
+        return ident
+
+    def bearer(request) -> str | None:
+        auth = request.headers.get("authorization", "")
+        if auth[:7].lower() == "bearer ":
+            return auth[7:].strip()
+        return None
+
     async def identify(request) -> Identity | None:
+        tok = bearer(request)
+        if tok is not None:                                   # works with every provider: the gateway checks it itself
+            return await token_identity(tok) if tok.startswith(TOKEN_PREFIX) else None
         if s.provider == "dev":
             host = request.client.host if request.client else ""
             return Identity(s.dev_user, frozenset({"admin"})) if host in ("127.0.0.1", "::1") else None
@@ -242,6 +278,8 @@ def create_gateway(s: GatewaySettings) -> Starlette:
         h = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS | IDENTITY_HEADERS}
         h.update({"x-comfyfarm-user": ident.user, "x-comfyfarm-roles": ",".join(sorted(ident.roles)),
                   "x-comfyfarm-gateway": s.secret})
+        if ident.token:
+            h["x-comfyfarm-token"] = ident.token              # the router puts it in every audit entry (D-59)
         return h
 
     ui_found = {"url": None, "at": 0.0}
@@ -471,6 +509,12 @@ def create_gateway(s: GatewaySettings) -> Starlette:
                 if path.startswith("/comfyfarm/dashboard"):
                     return RedirectResponse(f"/comfyfarm/login?next={DASHBOARD}", status_code=303)
             return JSONResponse({"error": "not authenticated"}, status_code=401)
+        if ident.token:
+            # an API token reaches the farm API only — not ComfyUI's own routes on the UI worker, not users' files
+            if not under(path, ROUTER_PREFIXES) or path.startswith("/comfyfarm/dashboard"):
+                return JSONResponse({"error": "an API token reaches the farm API only"}, status_code=403)
+            if ident.scope == "read" and request.method not in ("GET", "HEAD"):
+                return JSONResponse({"error": "this token is read-only"}, status_code=403)
         if under(path, ROUTER_PREFIXES):
             return await proxy(request, s.router_url, router_headers(request, ident))
         base_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS | IDENTITY_HEADERS}
@@ -524,6 +568,9 @@ def create_gateway(s: GatewaySettings) -> Starlette:
             return
         if ident is None:
             await ws.close(code=4401)
+            return
+        if ident.token:                                       # the API, not the live event stream (docs/design/19)
+            await ws.close(code=4403)
             return
         await ws.accept()
         q = ws.url.query

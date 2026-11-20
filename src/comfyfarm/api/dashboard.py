@@ -324,37 +324,45 @@ def make_router(ctx: Ctx) -> APIRouter:
         return {"prompt_id": str(r["prompt_id"]), "files": outputs_files(r["outputs"])}
 
     # ---- queue operations ---------------------------------------------------------------------------------------
+    async def job_audit(who: str, action: str, r, **detail):
+        """Pause, resume, retry, move: one entry each (D-59) — a token acting for a person leaves a trace like one."""
+        async with db.conn() as c:
+            await audit(c, who, action, str(r["prompt_id"]), number=r["id"], owner=r["owner"], **detail)
+
     @api.post("/api/farm/jobs/{prompt_id}/pause")
     async def pause(prompt_id: str, x_comfyfarm_user: str | None = Header(default=None)):
-        _, _, r = await acting(prompt_id, x_comfyfarm_user)
+        who, _, r = await acting(prompt_id, x_comfyfarm_user)
         if not await jobsvc.pause(db, r["id"]):
             raise HTTPException(409, f"only pending jobs can be paused (job is {r['status']})")
+        await job_audit(who, "job paused", r)
         await changed(r["owner"])
         return {"status": "paused"}
 
     @api.post("/api/farm/jobs/{prompt_id}/resume")
     async def resume(prompt_id: str, x_comfyfarm_user: str | None = Header(default=None)):
-        _, _, r = await acting(prompt_id, x_comfyfarm_user)
+        who, _, r = await acting(prompt_id, x_comfyfarm_user)
         if not await jobsvc.resume(db, r["id"]):
             raise HTTPException(409, f"only paused jobs can be resumed (job is {r['status']})")
+        await job_audit(who, "job resumed", r)
         await changed(r["owner"])
         return {"status": "pending"}
 
     @api.post("/api/farm/jobs/{prompt_id}/retry")
     async def retry(prompt_id: str, x_comfyfarm_user: str | None = Header(default=None)):
-        _, _, r = await acting(prompt_id, x_comfyfarm_user)
+        who, _, r = await acting(prompt_id, x_comfyfarm_user)
         try:
             new = await jobsvc.retry(db, r["id"])
         except jobsvc.NotPermitted as e:
             raise HTTPException(403, str(e))
         if new is None:
             raise HTTPException(409, f"only finished jobs can be retried (job is {r['status']})")
+        await job_audit(who, "job retried", r, new=str(new["prompt_id"]))
         await changed(r["owner"])
         return {"prompt_id": str(new["prompt_id"]), "number": new["id"]}
 
     @api.post("/api/farm/jobs/{prompt_id}/move")
     async def move(prompt_id: str, body: MoveIn, x_comfyfarm_user: str | None = Header(default=None)):
-        _, admin, r = await acting(prompt_id, x_comfyfarm_user)
+        who, admin, r = await acting(prompt_id, x_comfyfarm_user)
         if not admin:
             raise HTTPException(403, "admin only: the queue order is shared")
         kw = {}
@@ -377,6 +385,7 @@ def make_router(ctx: Ctx) -> APIRouter:
             raise HTTPException(409, "both jobs must be pending or paused")
         except ValueError as e:
             raise HTTPException(400, str(e))
+        await job_audit(who, "job moved", r, **{k: v for k, v in body.model_dump().items() if v is not None})
         router.dispatcher.wake.set()
         return {"moved": True}
 

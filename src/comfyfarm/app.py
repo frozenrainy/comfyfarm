@@ -141,14 +141,15 @@ def create_app(settings: Settings) -> FastAPI:
         await router.stop()
 
     app = FastAPI(title="ComfyFarm", lifespan=lifespan)
-    from .api import (account, admin as admin_api, artifacts, builds as builds_api, dashboard, models as models_api,
+    from .api import (account, admin as admin_api, artifacts, builds as builds_api, control, dashboard, models as models_api,
                       rollout as rollout_api, setup as setup_api, stock, uploads as uploads_api)
     from .api.context import Ctx
     from .identity import TrustGatewayHeaders
     app.add_middleware(TrustGatewayHeaders, secret=settings.gateway_secret, dev=settings.dev_identity is not None)
     ctx = Ctx(router, settings)
     identity, is_admin = ctx.identity, ctx.is_admin
-    for module in (stock, dashboard, account, admin_api, rollout_api, setup_api, builds_api, artifacts, models_api, uploads_api):
+    for module in (stock, dashboard, account, admin_api, control, rollout_api, setup_api, builds_api, artifacts, models_api,
+                   uploads_api):
         app.include_router(module.make_router(ctx))
 
     @app.exception_handler(Busy)
@@ -236,6 +237,9 @@ def create_app(settings: Settings) -> FastAPI:
         if r is None:
             raise HTTPException(404, "not found")
         status = await jobsvc.request_cancel(router.db, router.adapter, r["id"])
+        from .rollout.engine import audit
+        async with router.db.conn() as c:                       # D-59
+            await audit(c, who, "job cancelled", str(prompt_id), number=r["id"], owner=r["owner"], status=status)
         await router.events.push_status({r["owner"]})
         return {"status": status}
 

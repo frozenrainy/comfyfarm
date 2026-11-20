@@ -391,3 +391,35 @@ any log sent a search the wrong way (it was a VPN in the browser): nothing could
 to reach anything. → When an upstream (router, UI worker, a worker serving a file) does not answer, the gateway logs
 a warning with the request and the error — once a minute per upstream and kind of error, with how many more were folded
 in. No line means the 502 did not come from this gateway.
+
+**D-56 "Pause everything" holds dispatch; it does not pause every job.** *(design 19)* — People and agents need to
+stop the farm for a driver update, a backup or a rollout without losing the queue. Pausing every pending job one by
+one was rejected: "resume everything" would also resume the jobs people had paused on purpose, and the two kinds of
+`paused` could not be told apart afterwards. → One `dispatch_hold` row in `settings` (`since`, `by`, `reason`,
+optional `until`), checked by the dispatcher's tick and again in its claim transaction: no job goes to a worker, jobs
+already on one run to the end, new jobs queue. Every user sees a banner; monitoring sees `dispatch_held_since` (a
+timestamp, like `rollout_started_at`, not a flag that can stick). A hold with `until` ends by itself — one router
+deletes the row, the audit log says "expired": a forgotten hold must not keep a farm idle unnoticed.
+
+**D-57 Personal API tokens, never more than their user.** *(design 19)* — The command line and programs (scripts, AI
+agents) had no way in but a browser session or the gateway's secret, which is every right at once. → Tokens of a
+user (`read` = GET only, `user` = without the admin role, `admin` = everything, only an admin makes one), checked by
+the gateway and confirmed with the router every 30 s like a session (D-35), with the user's **current** roles cut to
+the scope — disabling or demoting the user reaches every token. Only the SHA-256 is stored; the token is shown once.
+A token reaches the farm API only (not the UI worker, not the WebSocket), cannot make or revoke tokens (a leaked one
+cannot multiply), expires within 1–365 days (no "never"), and survives a password change (it is its own credential,
+revoked on its own).
+
+**D-58 `comfyfarm-ctl` is a client of the HTTP API, standard library only.** *(design 19)* — The existing `comfyfarm`
+command works on the database directly; a second path to the same operations would need every rule twice. → One
+module (Python 3.10+, no dependency) that maps each command to an existing route: the same checks, the same audit
+trail as the dashboard. For programs: `--json` everywhere, fixed exit codes (auth 3, conflict 4, not found 5,
+unavailable 6), `commands --json` lists itself, a destructive command needs `--yes` off a terminal, the token comes
+from the environment or stdin — never from an argument.
+
+**D-59 Every change to accounts, workers and the queue is audited.** *(design 19)* — Groups, users and workers being
+added or removed, and jobs paused, resumed, moved, retried or cancelled, left no trace; with agents acting through
+tokens that is no longer acceptable. → All of it goes through `audit()`, which adds the token (`<id>:<name>`) when the
+request came with one; the router keeps that header only when the gateway vouched for the request. A password is
+recorded as "(set)", never its value.
+

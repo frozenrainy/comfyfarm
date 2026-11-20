@@ -58,12 +58,15 @@ means online, not in maintenance and without a current job — exactly the dispa
 | `rollout_started_at` | start of an active rollout, else `null` | a boolean "suppress alerts" flag that gets stuck silences monitoring forever |
 | `inconsistent_workers` | online workers whose node set or model files differ from the rest of their group (majority = reference; see *Group consistency*) | a job validated on one worker and executed on another with different nodes fails late and confusingly — the original farm had exactly this incident |
 
-Top level: `ungrouped_unsatisfiable_pending` — ungrouped jobs no group can take (they belong to no group's numbers).
+Top level: `ungrouped_unsatisfiable_pending` — ungrouped jobs no group can take (they belong to no group's numbers);
+`dispatch_held_since` — start of a farm-wide dispatch hold ([19](19-cli-and-api-tokens.md), D-56), else `null`: while it is
+set, waiting jobs are not a stall.
 
 `GET /metrics` — the same computation (`health/dispatch.py`) as Prometheus gauges, label `group="<id>"`:
 `comfyfarm_pending_jobs`, `comfyfarm_paused_jobs`, `comfyfarm_running_jobs`, `comfyfarm_idle_workers`,
 `comfyfarm_dispatch_idle_seconds`, `comfyfarm_running_longest_seconds`, `comfyfarm_unsatisfiable_pending_jobs`,
-`comfyfarm_rollout_started_timestamp_seconds`, `comfyfarm_group_inconsistent_workers`, plus `comfyfarm_ungrouped_unsatisfiable_pending_jobs` and
+`comfyfarm_rollout_started_timestamp_seconds`, `comfyfarm_group_inconsistent_workers`, plus `comfyfarm_ungrouped_unsatisfiable_pending_jobs`,
+`comfyfarm_dispatch_held_timestamp_seconds` (no labels) and
 `comfyfarm_ledger_up`. A `null` is an **absent series**, never 0. When the ledger cannot be read the scrape still
 succeeds with only `comfyfarm_ledger_up 0`: "not observed" must not look like "nothing to report".
 
@@ -87,10 +90,12 @@ for the groups a user may use, in the dashboard's group cards; exported with lab
 the threshold for "swapping while a job runs" is to come from the readings (field: 150 MB/s for minutes when a run did
 not fit, 0 when it did).
 
-Example alert (stall for 5 minutes, unless a rollout is running):
+Example alerts (stall for 5 minutes, unless a rollout is running or dispatch is held; a hold older than 4 hours):
 
 ```
 comfyfarm_dispatch_idle_seconds > 300 unless on(group) comfyfarm_rollout_started_timestamp_seconds
+                                       unless on() comfyfarm_dispatch_held_timestamp_seconds
+time() - comfyfarm_dispatch_held_timestamp_seconds > 4 * 3600
 ```
 
 Rules learned the hard way:

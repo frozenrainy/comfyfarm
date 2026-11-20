@@ -256,9 +256,27 @@ function users(root, { refresh }) {
       groupField(groupList.map((g) => g.id))], t("Create"));          // every group by default: a user with none can run nothing
     if (v) act(() => api("POST", "/api/admin/users", { ...v, groups: v.groups.map(Number) }), t("User created"), refresh);
   }, { cls: "primary" });
+  const tok = table([[t("User")], [t("Name")], [t("Scope")], [t("Token")], [t("Expires")], [t("Last used")], ["", "actions"]]);
   root.append(h("section", {}, head(t("Users"), add), tb.el,
     h("p", { class: "muted small" }, t("Disabling a user or setting a new password signs them out within 30 seconds. " +
-      "Their jobs and history stay. The last active administrator cannot be demoted, disabled or deleted."))));
+      "Their jobs and history stay. The last active administrator cannot be demoted, disabled or deleted."))),
+    h("section", {}, head(t("API tokens")), tok.el,
+      h("p", { class: "muted small" }, t("Everyone's live tokens. A token has at most its user's rights; disabling the user " +
+        "stops all of them. Changing a password does not."))));
+  const tcols = ["user", "name", "scope", "hint", "expires", "used", "actions"];
+  function buildTok() {
+    const tr = namedRow(tcols, { actions: "actions" });
+    tr.c.actions.append(button(t("Revoke"), () => {
+      if (confirm(t("Revoke the token {name}? Programs using it stop within 30 seconds.", { name: tr._item.name })))
+        return act(() => api("DELETE", `/api/admin/tokens/${tr._item.id}`), t("Revoked"), refresh);
+    }, { cls: "danger" }));
+    return tr;
+  }
+  function updateTok(tr, k) {
+    setText(tr.c.user, k.user); setText(tr.c.name, k.name); setText(tr.c.scope, k.scope); setText(tr.c.hint, k.hint);
+    setText(tr.c.expires, k.expired ? t("expired") : new Date(k.expires_at).toLocaleDateString(locale()));   // a future date
+    setText(tr.c.used, k.last_used_at ? when(k.last_used_at) : t("never"));
+  }
   const cols = ["user", "role", "signin", "groups", "status", "last", "actions"];
   function build() {
     const tr = namedRow(cols, { last: "num", actions: "actions" });
@@ -302,9 +320,11 @@ function users(root, { refresh }) {
   }
   return {
     async refresh() {
-      const [us, gs] = await Promise.all([api("GET", "/api/admin/users"), api("GET", "/api/admin/groups")]);
+      const [us, gs, ks] = await Promise.all([api("GET", "/api/admin/users"), api("GET", "/api/admin/groups"),
+                                              api("GET", "/api/admin/tokens")]);
       groupList = gs;
       syncRows(tb.tbody, us, (u) => u.username, build, update);
+      syncRows(tok.tbody, ks.tokens, (k) => k.id, buildTok, updateTok);
     },
   };
 }
@@ -348,10 +368,37 @@ const SETTING_LABELS = { login_user_list: "Pick the user name from a list on the
 
 function settings(root, { refresh }) {
   const box = h("div", { class: "panel stack" });
-  root.append(h("section", {}, head(t("Settings")), box));
-  let sig = "";
+  const holdBox = h("div", { class: "panel stack" });
+  root.append(h("section", {}, head(t("Dispatch")), holdBox,
+    h("p", { class: "muted small" }, t("Holding dispatch stops the farm from handing jobs to workers: running jobs finish, new " +
+      "jobs wait in the queue, every user sees a banner. Paused jobs stay paused. comfyfarm-ctl hold / release do the same."))),
+    h("section", {}, head(t("Settings")), box));
+  let sig = "", holdSig = "";
+  const changed = () => { window.dispatchEvent(new Event("comfyfarm:hold")); refresh(); };
+  function renderHold(hd) {
+    const s2 = JSON.stringify(hd);
+    if (s2 === holdSig) return;
+    holdSig = s2;
+    const at = (iso) => new Date(iso).toLocaleString(locale());
+    holdBox.replaceChildren(hd.held
+      ? h("div", {}, h("p", {}, h("strong", {}, t("Held")), " — ", t("by {by} since {since}", { by: hd.by, since: at(hd.since) }),
+          hd.reason ? ` · ${hd.reason}` : "", hd.until ? ` · ${t("ends by itself at {time}", { time: at(hd.until) })}` : ""),
+        h("p", { class: "muted" }, t("{running} running · {pending} waiting", hd)),
+        button(t("Release"), () => act(() => api("PUT", "/api/admin/hold", { held: false }), t("Dispatch released"), changed),
+          { cls: "primary" }))
+      : h("div", {}, h("p", {}, t("Dispatch is running."), " ", h("span", { class: "muted" }, t("{running} running · {pending} waiting", hd))),
+        button(t("Hold dispatch…"), async () => {
+          const v = await formDialog(t("Hold dispatch"), [
+            { name: "reason", label: t("Reason"), placeholder: t("shown to every user, e.g. driver update until 14:00") },
+            { name: "minutes", label: t("End by itself after (minutes)"), type: "number", min: 1,
+              hint: t("empty = until someone releases it") }], t("Hold"));
+          if (v) return act(() => api("PUT", "/api/admin/hold", { held: true, reason: v.reason || null, minutes: v.minutes || null }),
+            t("Dispatch held"), changed);
+        })));
+  }
   return {
     async refresh() {
+      renderHold(await api("GET", "/api/farm/hold"));
       const all = await api("GET", "/api/admin/settings");
       const next = JSON.stringify(all);
       if (next === sig) return;

@@ -1,7 +1,7 @@
 // The job table shared by the dashboard and the Jobs page: one shape for waiting, running and finished jobs.
 import { locale } from "./i18n.js";
 import { act, ago, api, button, copyText, dur, h, memoryView, namedRow, noteInput, now, pill, setBar, setPill, setText, syncNote,
-         syncRows, t, toast, when } from "./core.js";
+         state, syncRows, t, toast, when } from "./core.js";
 import { eta, pace, silence, weighted } from "./progress.js";
 
 const jobUrl = (pid, op) => `/api/farm/jobs/${pid}/${op}`;
@@ -213,7 +213,8 @@ export function groupCards(groups) {
         row(t("Waiting"), String(hh.pending ?? "—")),
         row(t("Running"), String(hh.running ?? "—")),
         admin ? row(t("Paused"), String(hh.paused ?? "—")) : null,
-        admin ? row(t("Dispatch stalled"), stall == null ? "—" : dur(stall), stallCls) : null,
+        admin ? (state.hold?.held ? row(t("Dispatch stalled"), t("held"), "caution")   // not a stall: held on purpose (D-56)
+          : row(t("Dispatch stalled"), stall == null ? "—" : dur(stall), stallCls)) : null,
         row(t("Longest running"), dur(hh.running_longest_seconds)),
         hh.unsatisfiable_pending ? row(t("Cannot run"), t("{n} job(s)", { n: hh.unsatisfiable_pending }), "alert") : null,
         admin && hh.inconsistent_workers ? row(t("Consistency"), t("{n} worker(s) differ", { n: hh.inconsistent_workers }), "caution") : null),

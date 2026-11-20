@@ -1,6 +1,6 @@
 // ComfyFarm web UI shell: hash routes → page modules (docs/design/13-web-ui.md). Each page mounts into <main> and
 // exposes refresh(); pages showing live state poll, the others refresh on demand.
-import { $, api, applyTheme, setText, state } from "./js/core.js";
+import { $, act, api, applyTheme, button, h, setText, state } from "./js/core.js";
 import { locale, setLang, t, translateStatic } from "./js/i18n.js";
 import dashboard from "./js/pages/dashboard.js";
 import jobs from "./js/pages/jobs.js";
@@ -70,6 +70,28 @@ async function updateBadge() {
   } catch { /* the page's own refresh reports outages */ }
 }
 
+// Dispatch held for the whole farm (D-56): every user sees it on every page — their jobs wait because of it.
+let holdSig = "";
+async function updateHold() {
+  let hd;
+  try { hd = await api("GET", "/api/farm/hold"); } catch { return; }
+  state.hold = hd;
+  const sig = JSON.stringify([hd.held, hd.since, hd.by, hd.reason, hd.until, state.me?.admin]);
+  if (sig === holdSig) return;
+  holdSig = sig;
+  const el = $("#hold");
+  el.hidden = !hd.held;
+  if (!hd.held) return el.replaceChildren();
+  const at = (iso) => new Date(iso).toLocaleString(locale());
+  let text = t("new jobs wait in the queue and go to no worker; running jobs finish. Held by {by} since {since}.",
+    { by: hd.by, since: at(hd.since) });
+  if (hd.reason) text += " " + t("Reason: {reason}", { reason: hd.reason });
+  if (hd.until) text += " " + t("Ends by itself at {time}.", { time: at(hd.until) });
+  el.replaceChildren(h("strong", {}, t("Dispatch is held:")), " ", text);       // replaceChildren() takes no arrays (h() does)
+  if (state.me?.admin) el.append(" ", button(t("Release"), () => act(() => api("PUT", "/api/admin/hold", { held: false }),
+    t("Dispatch released"), () => { holdSig = ""; updateHold(); })));
+}
+
 // Messages from the ComfyUI extension in the Workflow tab — only from that frame, only from this origin.
 window.addEventListener("message", (e) => {
   if (e.origin !== location.origin || !frame || e.source !== frame.contentWindow) return;
@@ -109,6 +131,8 @@ function route() {
 window.addEventListener("hashchange", () => { if (state.me) route(); });   // before loadMe: its .then(route) routes
 document.addEventListener("visibilitychange", () => { if (!document.hidden && current?.poll) tick(); });
 translateStatic();
-loadMe().then(route, (e) => showFreshness(e));
+loadMe().then(() => { route(); updateHold(); }, (e) => showFreshness(e));
 updateBadge();
 setInterval(updateBadge, BADGE_EVERY);
+setInterval(updateHold, BADGE_EVERY);
+window.addEventListener("comfyfarm:hold", () => { holdSig = ""; updateHold(); });     // changed on this page

@@ -39,6 +39,9 @@ ComfyUI — about how to route around those mismatches without forking ComfyUI o
 - Models from the dashboard: paste Hugging Face links, or upload your own files (resumable) or drop them in an inbox —
   checked and signed once on the control plane, copied to the GPU workers of the groups that use them in the
   background; no pickles by default ([models](docs/guide/models.md)). Node packs from git or as uploaded archives.
+- A command line for people and AI agents: `comfyfarm-ctl` (standard library only) holds and releases dispatch for the
+  whole farm and acts on jobs and workers through the API, with personal scoped API tokens, `--json` and fixed exit codes
+  ([CLI](docs/guide/cli.md)).
 - Postgres ledger on a single box. High availability (two routers, Postgres replication) is designed, not built yet
   ([architecture](docs/design/01-architecture.md) C).
 

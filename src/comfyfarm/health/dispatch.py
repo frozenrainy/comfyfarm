@@ -84,7 +84,15 @@ async def snapshot(conn, iso: bool = True) -> dict:
     rep = report([dict(r) for r in rows])
     for gid, g in groups.items():
         g["inconsistent_workers"] = rep.get(int(gid), {}).get("inconsistent", 0)
-    return {"groups": groups, "ungrouped_unsatisfiable_pending": await conn.fetchval(UNGROUPED_UNSATISFIABLE)}
+    # dispatch held for the whole farm (D-56): a timestamp, never a "suppress" flag — alert rules suppress the stall
+    # alert on it and can alert on a hold that has lasted too long
+    from ..core import hold as holdsvc
+    held = await holdsvc.current(conn)
+    since = None
+    if held is not None:
+        since = held["since"] if iso else await conn.fetchval("SELECT $1::text::timestamptz", held["since"])
+    return {"groups": groups, "ungrouped_unsatisfiable_pending": await conn.fetchval(UNGROUPED_UNSATISFIABLE),
+            "dispatch_held_since": since}
 
 
 # ---- Prometheus text exposition ---------------------------------------------------------------------------------
@@ -122,6 +130,10 @@ def prometheus(snap: dict | None) -> str:
             if hasattr(v, "timestamp"):
                 v = v.timestamp()
             out.append(f'{name}{{group="{gid}"}} {float(v) if isinstance(v, float) else v}')
+    out += ["# HELP comfyfarm_dispatch_held_timestamp_seconds Start of a farm-wide dispatch hold (unix time); absent when none.",
+            "# TYPE comfyfarm_dispatch_held_timestamp_seconds gauge"]
+    if snap.get("dispatch_held_since") is not None:
+        out.append(f"comfyfarm_dispatch_held_timestamp_seconds {snap['dispatch_held_since'].timestamp()}")
     out += ["# HELP comfyfarm_ungrouped_unsatisfiable_pending_jobs Ungrouped pending jobs no group can take.",
             "# TYPE comfyfarm_ungrouped_unsatisfiable_pending_jobs gauge",
             f"comfyfarm_ungrouped_unsatisfiable_pending_jobs {snap['ungrouped_unsatisfiable_pending']}"]

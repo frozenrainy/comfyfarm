@@ -34,6 +34,8 @@ ComfyUI로 재현한 구체적인 장애에 묶여 있습니다.
   대신 실행) 호스트 점검 결과를 보고 워커를 등록합니다([설계 14](docs/design/14-worker-setup.md)).
 - 대시보드에서 노드팩 배포: 저장소를 추가하고 빌드해서 롤아웃합니다. 요구사항을 한 번에 해석하고, OpenCV는 한 벌만,
   서브모듈 포함, 커밋 고정, 운영자가 허용한 저장소에서만 받습니다([설계 15](docs/design/15-control-plane-builds.md)).
+- 사람과 AI 에이전트가 함께 쓰는 명령줄: `comfyfarm-ctl`(표준 라이브러리만)로 팜 전체의 작업 배정을 멈추고 다시 시작하며,
+  개인별·범위별 API 토큰으로 API 를 통해 작업과 워커를 다룹니다. `--json`·고정 종료 코드([CLI](docs/guide/cli.md))
 - Postgres 원장, 한 대 구성. 이중화(라우터 2대 + Postgres 복제)는 설계만 되어 있고 아직 구현 전입니다
   ([아키텍처](docs/design/01-architecture.md) C).
 
@@ -70,7 +72,8 @@ ComfyFarm은 콘텐츠를 조직 네트워크 밖으로 내보낼 수 없는 곳
 3. **점검** — `docker compose exec router comfyfarm doctor`가 아직 맞지 않은 것을 한 줄씩 알려 줍니다.
 
 안내서(영문): [설치](docs/guide/install.md) · [운영](docs/guide/running.md) · [롤링 업그레이드](docs/guide/rollouts.md) ·
-[커스텀 노드](docs/guide/custom-nodes.md) · [백업](docs/guide/backup.md) · 보안 신고: [SECURITY.md](SECURITY.md)
+[커스텀 노드](docs/guide/custom-nodes.md) · [백업](docs/guide/backup.md) · [명령줄 (comfyfarm-ctl)](docs/guide/cli.md) ·
+보안 신고: [SECURITY.md](SECURITY.md)
 
 화면 언어는 개인 설정에서 고릅니다(자동 = 브라우저 언어). 서버가 돌려주는 오류 문구는 로그·문서와 맞추려고 영어로 둡니다.
 

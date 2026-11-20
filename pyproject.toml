@@ -10,6 +10,7 @@ dependencies = ["fastapi>=0.110", "uvicorn>=0.29", "asyncpg>=0.29", "httpx>=0.27
 [project.scripts]
 comfyfarm = "comfyfarm.cli:main"
 comfyfarm-gateway = "comfyfarm.gateway:main"
+comfyfarm-ctl = "comfyfarm.ctl:main"
 
 [project.optional-dependencies]
 fake = ["aiohttp>=3.9"]
