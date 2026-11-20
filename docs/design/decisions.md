@@ -415,7 +415,8 @@ command works on the database directly; a second path to the same operations wou
 module (Python 3.10+, no dependency) that maps each command to an existing route: the same checks, the same audit
 trail as the dashboard. For programs: `--json` everywhere, fixed exit codes (auth 3, conflict 4, not found 5,
 unavailable 6), `commands --json` lists itself, a destructive command needs `--yes` off a terminal, the token comes
-from the environment or stdin — never from an argument.
+from the environment or stdin — never from an argument. Phase 2 adds workers (maintenance, enable, force reset),
+rollouts, builds and node packs, with `--wait` turning the end of a long operation into the exit code.
 
 **D-59 Every change to accounts, workers and the queue is audited.** *(design 19)* — Groups, users and workers being
 added or removed, and jobs paused, resumed, moved, retried or cancelled, left no trace; with agents acting through

@@ -284,3 +284,168 @@ async def test_ctl_end_to_end(farm, tmp_path):
         toks = [r["detail"].get("token") for r in await c.fetch(
             "SELECT detail FROM audit_log WHERE action IN ('dispatch held', 'job cancelled', 'dispatch released') ORDER BY id")]
     assert toks and all(t and t.endswith(":agent") for t in toks)
+
+
+# ---- phase 2: workers, builds, node packs, rollouts -----------------------------------------------------------------
+@pytest.fixture
+async def farm_b(dsn, fakes, tmp_path):
+    """The gateway farm with a control-plane builder directory (the builder itself is played by the test)."""
+    from aiohttp import web
+    from comfyfarm.app import create_app
+    from comfyfarm.cli import add_user
+    from comfyfarm.gateway import GatewaySettings, create_gateway
+    from conftest import add_worker, fast_settings, free_port
+    from test_gateway import SECRET, UIStub, serve_asgi
+    builds = tmp_path / "builds"
+    for d in ("requests", "status"):
+        (builds / d).mkdir(parents=True)
+    started = []
+    app = create_app(fast_settings(dsn, dev_identity=None, gateway_secret=SECRET, builds_dir=str(builds)))
+    rport = await serve_asgi(app, started)
+    ui = UIStub()
+    runner = web.AppRunner(ui.app, shutdown_timeout=1); await runner.setup()
+    uport = free_port(); await web.TCPSite(runner, "127.0.0.1", uport).start()
+    gw = create_gateway(GatewaySettings(f"http://127.0.0.1:{rport}", f"http://127.0.0.1:{uport}", SECRET, b"k" * 32))
+    gport = await serve_asgi(gw, started)
+    worker = await fakes(ws_fix=True)
+    _, wid = await add_worker(app.state.router, worker.url, name="gpu-1")
+    await add_user(dsn, "alice", "pw-alice", admin=False, groups=["g1"])
+    await add_user(dsn, "root", "pw-root-1", admin=True)
+    yield {"router": app.state.router, "gw": f"http://127.0.0.1:{gport}", "builds": builds, "wid": wid}
+    for server, task in started:
+        server.should_exit = True
+        await task
+    await runner.cleanup()
+
+
+class PlayBuilder:
+    """Answers the router's builder requests the way the control-plane builder does (status files), in the background."""
+
+    def __init__(self, builds, commits=None, fail=()):
+        self.builds, self.commits, self.fail, self.seen = builds, dict(commits or {}), set(fail), []
+        from comfyfarm import builder
+        self.builder = builder
+        builder.write_json(str(builds / "status" / "policy.json"),
+                           {"recipes": ["rocm-x"], "node_sources": ["https://github.com/"], "about": {"rocm-x": "AMD"}})
+        self.task = asyncio.create_task(self.run())
+
+    async def run(self):
+        while True:
+            for f in sorted((self.builds / "requests").glob("*.json")):
+                req, rid = json.loads(f.read_text()), f.stem
+                f.unlink()
+                self.seen.append(req)
+                st = {"id": rid, "kind": req["kind"]}
+                if req["kind"] == "resolve":
+                    st.update(state="done", commit=self.commits[req["ref"] or "HEAD"]) if (req["ref"] or "HEAD") in self.commits \
+                        else st.update(state="failed", error=f"no ref {req['ref']!r}")
+                elif req["kind"] == "build":
+                    st.update(recipe=req["recipe"], state="failed" if req["recipe"] in self.fail else "done",
+                              template=f"{req['recipe']}-1", **({"error": "pip failed"} if req["recipe"] in self.fail else {}))
+                self.builder.write_json(str(self.builds / "status" / f"{rid}.json"), st)
+            await asyncio.sleep(0.1)
+
+    def stop(self):
+        self.task.cancel()
+
+
+async def test_ctl_workers_builds_packs_and_rollouts(farm_b):
+    gw, router, builds = farm_b["gw"], farm_b["router"], farm_b["builds"]
+    async with session(gw, "root", "pw-root-1") as root, session(gw, "alice", "pw-alice") as alice:
+        rt = (await make_token(root, gw, "admin", "ops-agent"))["token"]
+        at = (await make_token(alice, gw, "user"))["token"]
+    ctl_ = lambda *a, **k: run_ctl(*a, token=k.pop("token", rt), url=gw, **k)
+
+    # workers: by name, several at once, unknown ones named, non-admins refused
+    rc, o = await ctl_("workers", "maintenance", "on", "gpu-1", "--json")
+    assert rc == 0 and json.loads(o)["results"][0]["ok"]
+    async with router.db.conn() as c:
+        assert await c.fetchval("SELECT maintenance FROM workers WHERE name = 'gpu-1'")
+    rc, o = await ctl_("workers", "maintenance", "off", "gpu-1", "nope", "--json")
+    assert rc == ctl.NOT_FOUND and [r["ok"] for r in json.loads(o)["results"]] == [True, False]
+    async with router.db.conn() as c:
+        assert not await c.fetchval("SELECT maintenance FROM workers WHERE name = 'gpu-1'")
+    rc, _ = await ctl_("workers", "disable", str(farm_b["wid"]))                          # by id
+    rc2, _ = await ctl_("workers", "enable", "gpu-1")
+    assert rc == rc2 == 0
+    rc, o = await ctl_("workers", "show", "gpu-1", "--json")
+    assert rc == 0 and json.loads(o)["name"] == "gpu-1" and json.loads(o)["enabled"]
+    rc, _ = await ctl_("workers", "maintenance", "on", "gpu-1", token=at)
+    assert rc == ctl.AUTH
+    rc, _ = await ctl_("workers", "reset", "gpu-1", stdin="")                             # not a terminal, no --yes
+    assert rc == ctl.USAGE
+
+    # builds: the builder down, then up; --wait follows it to the end and the exit code says how it went
+    rc, _ = await ctl_("builds", "start", "rocm-x")
+    assert rc == ctl.UNAVAILABLE                                                         # 503: no builder running
+    pb = PlayBuilder(builds, commits={"main": "a" * 40, "HEAD": "b" * 40, "v2": "c" * 40}, fail={"rocm-bad"})
+    try:
+        rc, o = await ctl_("builds", "recipes", "--json")
+        assert rc == 0 and json.loads(o)["recipes"] == ["rocm-x"]
+        rc, o = await ctl_("builds", "start", "rocm-x", "--wait", "--json")
+        b = json.loads(o)
+        assert rc == 0 and b["state"] == "done" and b["template"] == "rocm-x-1"
+        rc, o = await ctl_("builds", "start", "nope", "--json")
+        assert rc == ctl.FAILED and "no recipe" in json.loads(o)["error"]               # 400 from the router
+        pb.builder.write_json(str(builds / "status" / "policy.json"),
+                              {"recipes": ["rocm-x", "rocm-bad"], "node_sources": ["https://github.com/"]})
+        rc, o = await ctl_("builds", "start", "rocm-bad", "--wait", "--json")
+        assert rc == ctl.FAILED and json.loads(o)["state"] == "failed"
+        rc, o = await ctl_("builds", "show", b["id"], "--json")
+        assert rc == 0 and json.loads(o)["state"] == "done"
+
+        # node packs: pinned to the commit the builder looks up; update moves it; remove asks first
+        rc, o = await ctl_("packs", "add", "https://github.com/someone/ComfyUI-Thing.git", "--ref", "main", "--gpu-only",
+                           "--constraint", "kornia<0.8", "--json")
+        assert rc == 0 and json.loads(o)["commit"] == "a" * 40 and json.loads(o)["name"] == "ComfyUI-Thing"
+        rc, o = await ctl_("packs", "list", "--json")
+        p = json.loads(o)[0]
+        assert p["commit"] == "a" * 40 and p["ref"] == "main" and p["ui"] is False and p["constraints"] == ["kornia<0.8"]
+        rc, o = await ctl_("packs", "update", "ComfyUI-Thing", "--json")
+        assert rc == 0 and json.loads(o)["changed"] is False                              # main still names a…
+        pb.commits["main"] = "d" * 40
+        rc, o = await ctl_("packs", "update", "ComfyUI-Thing", "--json")
+        assert rc == 0 and json.loads(o)["changed"] and json.loads(o)["commit"] == "d" * 40
+        rc, o = await ctl_("packs", "add", "https://github.com/someone/Other", "--ref", "gone", "--json")
+        assert rc == ctl.FAILED and "could not look up" in json.loads(o)["error"]
+        rc, _ = await ctl_("packs", "remove", "ComfyUI-Thing", stdin="")
+        assert rc == ctl.USAGE
+        rc, _ = await ctl_("packs", "remove", "ComfyUI-Thing", "--yes")
+        assert rc == 0
+        rc, o = await ctl_("packs", "list", "--json")
+        assert json.loads(o) == []
+        assert {r["kind"] for r in pb.seen} == {"resolve", "build"}
+    finally:
+        pb.stop()
+
+    # rollouts: a profile by name; waiting on one nobody drives ends at once with what to do
+    rc, _ = await ctl_("rollouts", "start", "--profile", "nope", "--worker", "gpu-1", "--yes")
+    assert rc == ctl.NOT_FOUND
+    async with router.db.conn() as c:
+        pid = await c.fetchval("INSERT INTO profiles(name, core, venv) VALUES ('p1', 'comfyui-x', 'venv-x') RETURNING id")
+        rid = await c.fetchval("INSERT INTO rollouts(target_profile_id, status, created_by) VALUES ($1, 'interrupted', 'root') "
+                               "RETURNING id", pid)
+        await c.execute("INSERT INTO rollout_steps(rollout_id, worker_id, position, to_profile_id) VALUES ($1, $2, 0, $3)",
+                        rid, farm_b["wid"], pid)
+    rc, o = await ctl_("profiles", "list", "--json")
+    assert rc == 0 and [p["name"] for p in json.loads(o)] == ["p1"]
+    rc, _ = await ctl_("rollouts", "start", "--profile", "p1", "--yes")
+    assert rc == ctl.USAGE                                                                 # no workers named
+    rc, o = await ctl_("rollouts", "show", str(rid), "--wait", "--json")
+    assert rc == ctl.FAILED and json.loads(o)["status"] == "interrupted"
+    rc, o = await ctl_("rollouts", "start", "--profile", "p1", "--worker", "gpu-1", "--yes", "--json")
+    assert rc in (ctl.CONFLICT, ctl.FAILED)                     # another rollout is active / the worker has no instance
+    rc, o = await ctl_("rollouts", "abort", str(rid), "--yes", "--wait", "--json")
+    assert rc == 0 and json.loads(o)["status"] == "aborted"                                # aborting is what was asked
+    rc, o = await ctl_("rollouts", "abort", str(rid), "--yes", "--json")
+    assert rc == ctl.CONFLICT
+    rc, o = await ctl_("rollouts", "list", "--json")
+    assert rc == 0 and json.loads(o)[0]["id"] == rid
+    async with router.db.conn() as c:                        # every change above is in the audit log, under the token
+        rows = [dict(r) for r in await c.fetch("SELECT action, detail FROM audit_log WHERE actor = 'root' AND action IN "
+                                               "('worker changed', 'node pack added', 'node pack changed', 'node pack removed', "
+                                               "'build requested', 'rollout abort')")]
+    assert {r["action"] for r in rows} == {"worker changed", "node pack added", "node pack changed", "node pack removed",
+                                           "build requested", "rollout abort"}
+    assert all(r["detail"].get("token", "").endswith(":ops-agent") for r in rows)
+

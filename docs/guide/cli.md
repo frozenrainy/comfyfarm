@@ -56,8 +56,27 @@ comfyfarm-ctl jobs resume <prompt_id>…
 comfyfarm-ctl jobs cancel <prompt_id>… --yes
 comfyfarm-ctl jobs retry  <prompt_id>
 comfyfarm-ctl jobs move   <prompt_id> --top   # admin: --bottom, --before ID, --after ID
-comfyfarm-ctl workers list                    # admin
 ```
+
+## Workers, rollouts, builds, node packs (admin)
+
+```sh
+comfyfarm-ctl workers list
+comfyfarm-ctl workers maintenance on gpu-1 gpu-2   # no new jobs; a running one finishes · off: back to work
+comfyfarm-ctl workers disable gpu-3                # enable: back
+comfyfarm-ctl workers reset gpu-1                  # too busy to answer: its jobs end now, ComfyUI restarts (asks first)
+
+comfyfarm-ctl packs add https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite --ref main
+comfyfarm-ctl packs update ComfyUI-VideoHelperSuite   # to the newest commit of its branch or tag
+comfyfarm-ctl builds recipes                          # is the builder up, which recipes
+comfyfarm-ctl builds start rocm-gfx1201 --wait        # exit 1 if the build failed
+comfyfarm-ctl profiles list
+comfyfarm-ctl rollouts start --profile farm-gpu-27 --group gpu --wait --yes   # exit 1 unless it succeeded
+comfyfarm-ctl rollouts abort 12 --wait
+```
+
+Workers, groups, profiles and node packs are named by name or id. Profiles are still made in the dashboard
+(System → Rollout → Profiles → From a recipe).
 
 ## For programs and agents
 
@@ -76,9 +95,11 @@ comfyfarm-ctl workers list                    # admin
   | 5 | not found |
   | 6 | farm unavailable |
 
-- `jobs cancel` asks on a terminal; elsewhere it needs `--yes`.
+- `jobs cancel`, `workers reset`, `rollouts start`/`abort` and `packs remove` ask on a terminal; elsewhere they need
+  `--yes`.
+- `--wait` follows rollouts, builds and `hold` to the end; the exit code says how they ended. `--wait-timeout` bounds
+  it (the operation itself goes on).
 - An agent should get a token of its own, so the audit log tells its actions apart from yours (System → Rollout → Audit
   log shows the token's name on each entry). Give it **Read only** when it only watches, and **Act as me** to operate.
 
-Coming next: maintenance and force reset of workers, rollouts, builds and node packs (with `--wait`), then users,
-groups, models and settings.
+Coming next: users, groups, models and uploads, settings, profiles from a recipe.

@@ -96,7 +96,7 @@ saves both in `~/.config/comfyfarm/ctl.json` with mode 0600; the token is read f
   reading the documentation.
 - Destructive commands (cancel) ask for confirmation on a terminal and require `--yes` otherwise.
 
-**Phase 1 commands:**
+**Commands:**
 
 | Command | API |
 |---|---|
@@ -105,11 +105,20 @@ saves both in `~/.config/comfyfarm/ctl.json` with mode 0600; the token is read f
 | `hold [--reason R] [--for 2h] [--wait]`, `release`, `hold-status` | `/api/admin/hold`, `/api/farm/hold` |
 | `jobs list [--all] [--status …] [--history]`, `jobs show ID` | `/api/farm/queue`, `/api/farm/history`, `/api/farm/jobs/{id}` |
 | `jobs pause|resume|cancel|retry ID…`, `jobs move ID --top|--bottom|--before X|--after X` | the per-job routes |
-| `workers list` | `/api/admin/workers` |
+| `workers list|show`, `workers maintenance on|off W…`, `workers enable|disable W…` | `/api/admin/workers` |
+| `workers reset W` (shows the preview, then asks) | `/api/admin/workers/{id}/force-reset` |
+| `profiles list` | `/api/admin/profiles` |
+| `rollouts list|show`, `rollouts start --profile P (--worker W… | --group G)`, `rollouts abort|resume ID` | `/api/admin/rollouts` |
+| `builds recipes|list|show`, `builds start RECIPE [--roles] [--no-packs]` | `/api/admin/builder`, `/api/admin/builds` |
+| `packs list|add|update|remove` (add/update ask the builder which commit a branch or tag names now) | `/api/admin/node-packs` |
 | `commands` | — |
 
-**Later phases:** phase 2 covers workers (maintenance, force reset), rollouts, builds and node packs, with `--wait` for
-the long ones. Phase 3 covers users, groups, models and uploads, and settings. Every command maps to an existing route,
+Workers, profiles, groups and node packs are named by name or id. `--wait` (rollouts, builds, `hold`) follows the long
+operations to the end and sets the exit code from how they ended: a rollout that did not succeed (or, for `abort`, was
+not aborted), a failed build or a hold whose jobs did not drain in time exits 1. Starting a rollout, aborting one, a
+force reset and removing a node pack ask first (`--yes` off a terminal).
+
+**Later:** users, groups, models and uploads, settings, profiles from a recipe. Every command maps to an existing route,
 so the CLI never gets a rule the dashboard does not have.
 
 ## Audit (D-59)

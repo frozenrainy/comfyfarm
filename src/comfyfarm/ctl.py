@@ -10,6 +10,8 @@ checks and audit trail as the dashboard.
   comfyfarm-ctl hold --reason "driver update" --for 2h --wait
   comfyfarm-ctl release
   comfyfarm-ctl jobs list --all --json
+  comfyfarm-ctl rollouts start --profile farm-gpu-26 --group gpu --wait --yes
+  comfyfarm-ctl builds start rocm-gfx1201 --wait
   comfyfarm-ctl commands --json                         # every command and its arguments, for programs
 
 Exit codes: 0 ok · 1 refused or failed · 2 usage · 3 not authenticated / not allowed · 4 conflict · 5 not found ·
@@ -285,6 +287,253 @@ def cmd_workers_list(args):
     out(args, doc, table(rows, ["id", "name", "kind", "group", "state", "maintenance", ""]) if rows else "no workers")
 
 
+# ---- phase 2: workers, profiles, rollouts, builds, node packs (admin) -----------------------------------------------
+def pick(items: list[dict], ref: str, what: str, key: str = "name") -> dict:
+    """An item by id (all digits) or by its exact name."""
+    for it in items:
+        if (ref.isdigit() and it.get("id") == int(ref)) or it.get(key) == ref:
+            return it
+    names = ", ".join(str(it.get(key)) for it in items[:20]) or "none"
+    raise Fail(NOT_FOUND, f"no {what} {ref!r} (there are: {names})")
+
+
+def wait_until(args, poll, done, describe, what: str):
+    """Poll `poll()` until `done(doc)`; print each new description on stderr (not with --json). Returns the last doc."""
+    deadline, last, doc = time.monotonic() + args.wait_timeout, None, poll()
+    while not done(doc):
+        line = describe(doc)
+        if line != last and not args.json:
+            print(line, file=sys.stderr)
+            last = line
+        if time.monotonic() >= deadline:
+            raise Fail(FAILED, f"{what} still not finished after {args.wait_timeout:.0f} s — it goes on; look again with "
+                               f"`show`", doc)
+        time.sleep(args.poll)
+        doc = poll()
+    return doc
+
+
+def cmd_workers_show(args):
+    w = pick(connect(args).call("GET", "/api/admin/workers"), args.worker, "worker")
+    out(args, w, "\n".join(f"{k}: {v}" for k, v in w.items() if k not in ("capabilities", "memory", "reset")))
+
+
+def worker_patch(args, body: dict, done: str):
+    f = connect(args)
+    ws = f.call("GET", "/api/admin/workers")
+    results, worst = [], OK
+    for ref in args.workers:
+        try:
+            w = pick(ws, ref, "worker")
+            results.append({"worker": w["name"], "ok": True, "result": f.call("PATCH", f"/api/admin/workers/{w['id']}", body)})
+        except Fail as e:
+            results.append({"worker": ref, "ok": False, "error": str(e), "exit": e.code})
+            worst = max(worst, e.code)
+    out(args, {"results": results}, "\n".join(f"{r['worker']}: " + (done if r["ok"] else r["error"]) for r in results))
+    if worst:
+        e = Fail(worst, "", {"results": results})
+        e.printed = True
+        raise e
+
+
+def cmd_workers_maintenance(args):
+    on = args.state == "on"
+    worker_patch(args, {"maintenance": on}, "maintenance on — no new jobs; a running one finishes" if on else "maintenance off")
+
+
+def cmd_workers_enable(args):
+    worker_patch(args, {"enabled": True}, "enabled")
+
+
+def cmd_workers_disable(args):
+    worker_patch(args, {"enabled": False}, "disabled — gets no jobs")
+
+
+def cmd_workers_reset(args):
+    """Force reset (D-53): its jobs end now and its ComfyUI restarts. Shows what it would do first."""
+    f = connect(args)
+    w = pick(f.call("GET", "/api/admin/workers"), args.worker, "worker")
+    preview = f.call("GET", f"/api/admin/workers/{w['id']}/force-reset")
+    if not args.json:
+        print(json.dumps(preview, ensure_ascii=False, indent=1), file=sys.stderr)
+    confirm(args, f"force reset {w['name']} (its jobs are cancelled, ComfyUI restarts)")
+    doc = f.call("POST", f"/api/admin/workers/{w['id']}/force-reset")
+    out(args, {"preview": preview, "result": doc}, json.dumps(doc, ensure_ascii=False))
+
+
+def cmd_profiles_list(args):
+    doc = connect(args).call("GET", "/api/admin/profiles")
+    rows = [[p["id"], p["name"], p.get("core"), p.get("venv"), p.get("nodes") and ",".join(p["nodes"]), p.get("assigned")]
+            for p in doc]
+    out(args, doc, table(rows, ["id", "name", "core", "venv", "nodes", "assigned"]) if rows else "no profiles")
+
+
+ROLLOUT_ACTIVE = ("running", "aborting")
+
+
+def rollout_line(r: dict) -> str:
+    steps = " · ".join(f"{s['worker']} {s['status']}" for s in r.get("steps", []))
+    return f"rollout #{r['id']} → {r['profile']}: {r['status']}" + (f" — {steps}" if steps else "") + \
+        (f" — {r['error']}" if r.get("error") else "")
+
+
+def rollout_result(args, f, rid: int, ok=("succeeded",)):
+    """With --wait: until the rollout ends. Ending as `ok` = 0 (succeeded; for abort, aborted); anything else = 1."""
+    doc = f.call("GET", f"/api/admin/rollouts/{rid}")
+    if getattr(args, "wait", False):
+        doc = wait_until(args, lambda: f.call("GET", f"/api/admin/rollouts/{rid}"),
+                         lambda r: r["status"] not in ROLLOUT_ACTIVE, rollout_line, f"rollout #{rid}")
+    out(args, doc, rollout_line(doc))
+    if getattr(args, "wait", False) and doc["status"] not in ok:
+        e = Fail(FAILED, f"rollout #{rid} {doc['status']}" + (" — `rollouts resume` or `rollouts abort`"
+                                                              if doc["status"] == "interrupted" else ""), doc)
+        e.printed = True
+        raise e
+
+
+def cmd_rollouts_list(args):
+    doc = connect(args).call("GET", "/api/admin/rollouts", query={"limit": args.limit})
+    out(args, doc, "\n".join(rollout_line(r) for r in doc) or "no rollouts")
+
+
+def cmd_rollouts_show(args):
+    rollout_result(args, connect(args), args.id)
+
+
+def cmd_rollouts_start(args):
+    f = connect(args)
+    prof = pick(f.call("GET", "/api/admin/profiles"), args.profile, "profile")
+    body = {"profile_id": prof["id"], "window": args.window, "options": {}}
+    if args.group:
+        body["group_id"] = pick(f.call("GET", "/api/admin/groups"), args.group, "group")["id"]
+    if args.worker:
+        ws = f.call("GET", "/api/admin/workers")
+        body["worker_ids"] = [pick(ws, ref, "worker")["id"] for ref in args.worker]
+    if not args.group and not args.worker:
+        raise Fail(USAGE, "name the workers: --worker NAME (repeatable) or --group NAME")
+    for k in ("smoke", "restart"):
+        if getattr(args, k) is not None:
+            body["options"][k] = getattr(args, k)
+    for k in ("drain_timeout", "start_timeout", "verify_timeout"):
+        if getattr(args, k) is not None:
+            body["options"][k] = getattr(args, k)
+    confirm(args, f"roll {prof['name']} out (each worker is drained and restarted, one window at a time)")
+    r = f.call("POST", "/api/admin/rollouts", body)
+    for w in r.get("warnings", []):
+        print(f"warning: {w}", file=sys.stderr)
+    rollout_result(args, f, r["id"])
+
+
+def cmd_rollouts_abort(args):
+    confirm(args, f"abort rollout #{args.id}")
+    f = connect(args)
+    f.call("POST", f"/api/admin/rollouts/{args.id}/abort")
+    rollout_result(args, f, args.id, ok=("aborted",))
+
+
+def cmd_rollouts_resume(args):
+    f = connect(args)
+    f.call("POST", f"/api/admin/rollouts/{args.id}/resume")
+    rollout_result(args, f, args.id)
+
+
+def build_line(b: dict) -> str:
+    what = b.get("recipe") or b.get("kind") or ""
+    return f"{b.get('id')} {what}: {b.get('state')}" + (f" — {b['template']}" if b.get("template") else "") + \
+        (f" — {b['error']}" if b.get("error") else "")
+
+
+def build_result(args, f, rid: str, wait: bool):
+    poll = lambda: f.call("GET", f"/api/admin/builds/{rid}")
+    doc = wait_until(args, poll, lambda b: b.get("state") in ("done", "failed"), build_line, f"build {rid}") if wait else poll()
+    out(args, doc, build_line(doc) + (("\n" + doc["log"][-2000:]) if args.log and doc.get("log") else ""))
+    if wait and doc.get("state") == "failed":
+        e = Fail(FAILED, f"build {rid} failed: {doc.get('error')}", doc)
+        e.printed = True
+        raise e
+    return doc
+
+
+def cmd_builds_recipes(args):
+    doc = connect(args).call("GET", "/api/admin/builder")
+    about = doc.get("about") or {}
+    out(args, doc, ("builder up" if doc.get("up") else "BUILDER DOWN") + "\n" +
+        "\n".join(f"{r}  {about.get(r, '')}".rstrip() for r in doc.get("recipes", [])))
+
+
+def cmd_builds_list(args):
+    doc = connect(args).call("GET", "/api/admin/builds")
+    out(args, doc, "\n".join(build_line(b) for b in doc) or "no builds")
+
+
+def cmd_builds_show(args):
+    build_result(args, connect(args), args.id, args.wait)
+
+
+def cmd_builds_start(args):
+    f = connect(args)
+    roles = [r.strip() for r in args.roles.split(",") if r.strip()]
+    r = f.call("POST", "/api/admin/builds", {"recipe": args.recipe, "roles": roles, "packs": not args.no_packs})
+    if not args.json:
+        print(f"build {r['id']} requested ({r['packs']} node pack(s))", file=sys.stderr)
+    build_result(args, f, r["id"], args.wait)
+
+
+def resolve_commit(args, f, repo: str, ref: str) -> str:
+    """A branch or tag → the commit it names now, asked of the builder (it has the network)."""
+    rid = f.call("POST", "/api/admin/node-packs/resolve", {"repo": repo, "ref": ref})["id"]
+    old = args.wait_timeout
+    args.wait_timeout = min(old, args.lookup_timeout)
+    try:
+        st = wait_until(args, lambda: f.call("GET", f"/api/admin/builds/{rid}"), lambda b: b.get("state") in ("done", "failed"),
+                        lambda b: f"looking up {ref or 'the default branch'} of {repo}…", "the lookup")
+    finally:
+        args.wait_timeout = old
+    if st.get("state") != "done":
+        raise Fail(FAILED, f"could not look up {ref or 'the default branch'} of {repo}: {st.get('error')}", st)
+    return st["commit"]
+
+
+def cmd_packs_list(args):
+    doc = connect(args).call("GET", "/api/admin/node-packs")
+    rows = [[p["id"], p["name"], p.get("archive_name") or p.get("repo"), (p.get("commit") or "")[:10], p.get("ref") or "",
+             "" if p.get("ui") else "gpu only"] for p in doc]
+    out(args, doc, table(rows, ["id", "name", "source", "commit", "ref", ""]) if rows else "no node packs")
+
+
+def cmd_packs_add(args):
+    f = connect(args)
+    repo = args.repo.strip().rstrip("/")
+    name = args.name or repo.split("/")[-1].removesuffix(".git")
+    commit = resolve_commit(args, f, repo, args.ref or "")
+    doc = f.call("POST", "/api/admin/node-packs", {
+        "name": name, "repo": repo, "commit": commit, "ref": args.ref or None, "ui": not args.gpu_only,
+        "requirements_file": args.requirements_file, "constraints": args.constraint or [], "note": args.note})
+    out(args, doc | {"name": name, "commit": commit}, f"{name} added at {commit[:10]} — `builds start RECIPE` to build it")
+
+
+def cmd_packs_update(args):
+    f = connect(args)
+    p = pick(f.call("GET", "/api/admin/node-packs"), args.pack, "node pack")
+    if p.get("archive"):
+        raise Fail(USAGE, f"{p['name']} came from an archive: its new version is another archive (the dashboard uploads it)")
+    ref = p.get("ref") or ""
+    commit = resolve_commit(args, f, p["repo"], ref)
+    if commit == p["commit"]:
+        return out(args, {"name": p["name"], "commit": commit, "changed": False},
+                   f"{p['name']}: already the newest commit of {ref or 'the default branch'}")
+    f.call("PATCH", f"/api/admin/node-packs/{p['id']}", {"commit": commit})
+    out(args, {"name": p["name"], "from": p["commit"], "commit": commit, "changed": True},
+        f"{p['name']}: {p['commit'][:10]} → {commit[:10]} — build to use it")
+
+
+def cmd_packs_remove(args):
+    f = connect(args)
+    p = pick(f.call("GET", "/api/admin/node-packs"), args.pack, "node pack")
+    confirm(args, f"remove the node pack {p['name']} (later builds leave it out)")
+    out(args, f.call("DELETE", f"/api/admin/node-packs/{p['id']}"), f"{p['name']} removed")
+
+
 def cmd_commands(args):
     doc = {"commands": catalog(parser()), "exit_codes": {"0": "ok", "1": "refused or failed", "2": "usage",
                                                          "3": "not authenticated or not allowed", "4": "conflict",
@@ -294,7 +543,7 @@ def cmd_commands(args):
         out(args, doc)
     else:
         for c in doc["commands"]:
-            print(f"{c['command']:<14} {c['help']}")
+            print(f"{c['command']:<20} {c['help']}")
 
 
 # ---- parser -------------------------------------------------------------------------------------------------------
@@ -362,8 +611,90 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--before", metavar="ID")
     g.add_argument("--after", metavar="ID")
 
+    def waiting(sp, default=False, what="it ends"):
+        if not default:
+            sp.add_argument("--wait", action="store_true", help=f"wait until {what}; the exit code says how it went")
+        sp.add_argument("--wait-timeout", type=float, default=6 * 3600, help="seconds --wait waits at most")
+        sp.add_argument("--poll", type=float, default=5, help=argparse.SUPPRESS)
+
     workers = sub.add_parser("workers", help="workers (admin)", parents=[common]).add_subparsers(dest="workers_cmd", metavar="action")
     add("list", cmd_workers_list, "every worker with its state", workers)
+    sp = add("show", cmd_workers_show, "one worker in full", workers)
+    sp.add_argument("worker", help="name or id")
+    sp = add("maintenance", cmd_workers_maintenance, "maintenance on: no new jobs, a running one finishes · off: back to work",
+             workers)
+    sp.add_argument("state", choices=["on", "off"])
+    sp.add_argument("workers", nargs="+", metavar="worker", help="name(s) or id(s)")
+    for name, fn, help_ in (("enable", cmd_workers_enable, "enable (gets jobs again)"),
+                            ("disable", cmd_workers_disable, "disable (gets no jobs)")):
+        sp = add(name, fn, help_, workers)
+        sp.add_argument("workers", nargs="+", metavar="worker", help="name(s) or id(s)")
+    sp = add("reset", cmd_workers_reset, "force reset a worker too busy to answer: its jobs end now, ComfyUI restarts", workers)
+    sp.add_argument("worker", help="name or id")
+    sp.add_argument("--yes", action="store_true", help="do not ask")
+
+    profiles = sub.add_parser("profiles", help="rollout profiles (admin)", parents=[common]).add_subparsers(dest="profiles_cmd", metavar="action")
+    add("list", cmd_profiles_list, "every profile (core, venv, node set)", profiles)
+
+    rollouts = sub.add_parser("rollouts", help="rolling upgrades (admin)", parents=[common]).add_subparsers(dest="rollouts_cmd", metavar="action")
+    sp = add("list", cmd_rollouts_list, "recent rollouts with their steps", rollouts)
+    sp.add_argument("--limit", type=int, default=10)
+    sp = add("show", cmd_rollouts_show, "one rollout", rollouts)
+    sp.add_argument("id", type=int)
+    waiting(sp, what="the rollout ends")
+    sp = add("start", cmd_rollouts_start, "roll a profile out to workers: drained, restarted, verified, reverted on failure", rollouts)
+    sp.add_argument("--profile", required=True, help="profile name or id")
+    sp.add_argument("--worker", action="append", help="worker name or id (repeatable)")
+    sp.add_argument("--group", help="every enabled worker of this group")
+    sp.add_argument("--window", type=int, default=1, help="workers at a time (default 1)")
+    sp.add_argument("--smoke", action=argparse.BooleanOptionalAction, default=None, help="run the smoke test after the start")
+    sp.add_argument("--restart", action=argparse.BooleanOptionalAction, default=None,
+                    help="restart even a worker that already runs the profile")
+    for k in ("drain", "start", "verify"):
+        sp.add_argument(f"--{k}-timeout", type=float, default=None, help=f"seconds for the {k} phase")
+    sp.add_argument("--yes", action="store_true", help="do not ask")
+    waiting(sp, what="the rollout ends")
+    for name, fn, help_ in (("abort", cmd_rollouts_abort, "stop it: no new steps, a draining worker goes back to work"),
+                            ("resume", cmd_rollouts_resume, "go on with an interrupted rollout")):
+        sp = add(name, fn, help_, rollouts)
+        sp.add_argument("id", type=int)
+        if name == "abort":
+            sp.add_argument("--yes", action="store_true", help="do not ask")
+        waiting(sp, what="the rollout ends")
+
+    builds = sub.add_parser("builds", help="artifact builds on the control plane (admin)", parents=[common]).add_subparsers(dest="builds_cmd", metavar="action")
+    add("recipes", cmd_builds_recipes, "is the builder up, which recipes it has", builds)
+    add("list", cmd_builds_list, "recent builds", builds)
+    sp = add("show", cmd_builds_show, "one build (--log: its log's tail)", builds)
+    sp.add_argument("id")
+    sp.add_argument("--log", action="store_true", help="print the tail of its log")
+    waiting(sp, what="the build ends")
+    sp = add("start", cmd_builds_start, "build a recipe (with the node packs) into the artifact store", builds)
+    sp.add_argument("recipe")
+    sp.add_argument("--roles", default="gpu,ui", help="gpu, ui or gpu,ui (default)")
+    sp.add_argument("--no-packs", action="store_true", help="without the dashboard's node packs")
+    sp.add_argument("--log", action="store_true", help="print the tail of its log")
+    waiting(sp, what="the build ends")
+
+    packs = sub.add_parser("packs", help="node packs the builds take (admin)", parents=[common]).add_subparsers(dest="packs_cmd", metavar="action")
+    add("list", cmd_packs_list, "every node pack with its pinned commit", packs)
+    sp = add("add", cmd_packs_add, "add a node pack from git, pinned to the commit a branch or tag names now", packs)
+    sp.add_argument("repo", help="https git URL")
+    sp.add_argument("--ref", help="branch, tag or commit (default: the default branch)")
+    sp.add_argument("--name", help="its directory under custom_nodes (default: from the URL)")
+    sp.add_argument("--gpu-only", action="store_true", help="not on the UI worker (a pack that imports only with a GPU)")
+    sp.add_argument("--requirements-file", help="default: requirements.txt, else pyproject.toml")
+    sp.add_argument("--constraint", action="append", help="hold a dependency back, e.g. 'kornia<0.8' (repeatable)")
+    sp.add_argument("--note")
+    sp = add("update", cmd_packs_update, "move a pack to the newest commit of its branch or tag", packs)
+    sp.add_argument("pack", help="name or id")
+    sp = add("remove", cmd_packs_remove, "remove a node pack (later builds leave it out)", packs)
+    sp.add_argument("pack", help="name or id")
+    sp.add_argument("--yes", action="store_true", help="do not ask")
+    for sp in (packs.choices["add"], packs.choices["update"]):
+        sp.add_argument("--lookup-timeout", type=float, default=120, help="seconds the builder may take to look the commit up")
+        sp.add_argument("--wait-timeout", type=float, default=120, help=argparse.SUPPRESS)
+        sp.add_argument("--poll", type=float, default=1, help=argparse.SUPPRESS)
     add("commands", cmd_commands, "every command and its arguments (--json for programs)")
     return p
 
