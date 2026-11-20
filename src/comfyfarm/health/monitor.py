@@ -28,6 +28,9 @@ class HealthMonitor:
         self.last_failure: dict[int, tuple] = {}            # worker id → (kind, detail) last logged
         self.reminded: set[int] = set()                     # never-answered workers told about after WAIT_REMIND
         self.memory = MemoryBoard()                         # last memory reading per worker (dashboard, /metrics)
+        # one tick at a time: two that overlap both read "never answered" and both log the first answer (and both
+        # decide the same transition); the loop never overlaps itself, but a caller outside it (tests did) would
+        self._ticking = asyncio.Lock()
 
     async def run(self):
         while True:
@@ -49,6 +52,10 @@ class HealthMonitor:
         return await self.adapter.inventory(w["base_url"])
 
     async def tick(self):
+        async with self._ticking:
+            await self._tick()
+
+    async def _tick(self):
         async with self.db.conn() as c:
             workers = [dict(r) for r in await c.fetch(
                 "SELECT id, name, base_url, state, capabilities, failing_since, last_ok_at, now() AS at FROM workers "
